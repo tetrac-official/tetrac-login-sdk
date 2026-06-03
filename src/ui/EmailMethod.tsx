@@ -2,7 +2,11 @@
 // and implements the "auto" mode documented in USE_IN_CODE.md §4 (try register,
 // fall back to login on 409).
 import React, { useState, type CSSProperties } from "react";
-import { useAuth } from "../react/useAuth.js";
+// Import via the public subpath, not a relative path: a relative import causes
+// tsup to inline `useAuth` + `AuthContext` into dist/ui/index.js, producing a
+// second AuthContext instance that <AuthProvider> never populates. Treating the
+// react subpath as external preserves a single shared context at runtime.
+import { useAuth } from "@tetrac/login-sdk/react";
 import type { AuthResult } from "../core/types.js";
 import type { LoginPanelProps } from "./types.js";
 

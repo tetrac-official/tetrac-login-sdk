@@ -28,5 +28,11 @@ export default defineConfig({
     "ioredis",
     "@vercel/kv",
     "@upstash/redis",
+    // The /ui entry imports useAuth from the /react subpath. Marking it
+    // external prevents tsup from re-inlining `useAuth` + `AuthContext` into
+    // dist/ui/index.js, which would otherwise produce two AuthContext
+    // instances at runtime (only the one in dist/react/* is populated by
+    // <AuthProvider>).
+    "@tetrac/login-sdk/react",
   ],
 });

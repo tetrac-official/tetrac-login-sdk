@@ -3,7 +3,8 @@
 // render "Unlock"; otherwise we register and surface the new registration via
 // onPasskeyRegistered so the app can persist it (localStorage / IndexedDB / …).
 import React, { useEffect, useState, type CSSProperties } from "react";
-import { useAuth } from "../react/useAuth.js";
+// Public subpath import — see EmailMethod.tsx for why we avoid `../react/...`.
+import { useAuth } from "@tetrac/login-sdk/react";
 import { isBiometricAvailable } from "../client/webauthn.js";
 import type { AuthResult } from "../core/types.js";
 import type { PasskeyRegistration } from "../client/webauthn.js";

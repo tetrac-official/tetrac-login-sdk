@@ -2,7 +2,8 @@
 // the host app supplies a `WalletConnector` whose `connect()` resolves to the
 // public key + signMessage pair that `connectWallet` needs.
 import React, { useState, type CSSProperties } from "react";
-import { useAuth } from "../react/useAuth.js";
+// Public subpath import — see EmailMethod.tsx for why we avoid `../react/...`.
+import { useAuth } from "@tetrac/login-sdk/react";
 import type { AuthResult } from "../core/types.js";
 import type { LoginPanelProps, WalletConnector } from "./types.js";
 

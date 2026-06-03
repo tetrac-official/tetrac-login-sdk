@@ -81,6 +81,18 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (await getUserByPublicKey(storage, body.publicKey, config)) {
         return error("Account already exists", 409);
       }
+      // Email collision check. The client mints a fresh random publicKey on
+      // every register attempt (Keypair.generate()), so without this check the
+      // publicKey-only collision check above would never fire for email/
+      // biometric signups, and every "Sign in or create account" attempt
+      // would silently overwrite the email→publicKey index. Returning 409 here
+      // lets the client's "auto" mode fall back to loginWithEmail and recover
+      // the original publicKey (the appKey is deterministic, so decryption of
+      // the original wallets still succeeds).
+      if (body.email) {
+        const existing = await resolvePublicKeyByEmail(storage, body.email, config);
+        if (existing) return error("Account already exists", 409);
+      }
 
       // Web3 registrations must prove wallet ownership.
       if (body.authMethod === "wallet") {

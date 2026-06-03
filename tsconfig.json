@@ -14,7 +14,11 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": false,
-    "outDir": "dist"
+    "outDir": "dist",
+    "baseUrl": ".",
+    "paths": {
+      "@tetrac/login-sdk/react": ["./src/react/index.ts"]
+    }
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist", "tests", "examples"]
