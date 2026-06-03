@@ -1,5 +1,5 @@
 {
-  "name": "@ttc/login-sdk",
+  "name": "@tetrac/login-sdk",
   "version": "0.1.0",
   "description": "Reusable, non-custodial authentication SDK: email/passkey, Web3 wallet, and biometric (WebAuthn PRF) login with client-side wallet generation. Redis / Upstash / Vercel KV storage.",
   "license": "MIT",
@@ -46,6 +46,11 @@
       "types": "./dist/next/index.d.ts",
       "import": "./dist/next/index.js",
       "require": "./dist/next/index.cjs"
+    },
+    "./ui": {
+      "types": "./dist/ui/index.d.ts",
+      "import": "./dist/ui/index.js",
+      "require": "./dist/ui/index.cjs"
     }
   },
   "scripts": {

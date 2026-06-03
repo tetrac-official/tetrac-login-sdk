@@ -1,8 +1,8 @@
 // Next.js App Router binding. Wire up a single catch-all route:
 //
 //   // app/api/auth/[...action]/route.ts
-//   import { createNextAuthRoutes } from "@ttc/login-sdk/next";
-//   import { resolveStorageAdapter } from "@ttc/login-sdk/storage";
+//   import { createNextAuthRoutes } from "@tetrac/login-sdk/next";
+//   import { resolveStorageAdapter } from "@tetrac/login-sdk/storage";
 //   const storage = await resolveStorageAdapter();
 //   export const { GET, POST } = createNextAuthRoutes({ storage });
 //

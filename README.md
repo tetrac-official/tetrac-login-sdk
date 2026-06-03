@@ -1,4 +1,4 @@
-# @ttc/login-sdk
+# @tetrac/login-sdk
 
 Reusable, **non-custodial** authentication SDK: **email/passkey**, **Web3 wallet**, and
 **biometric (WebAuthn PRF)** login, with **client-side wallet generation** built in.
@@ -20,7 +20,7 @@ Extracted from the `next-ttc` trading platform so any project can drop in the sa
 ## Install
 
 ```bash
-npm i @ttc/login-sdk
+npm i @tetrac/login-sdk
 # peers (supply what you use):
 npm i @solana/web3.js viem tweetnacl
 # storage backend (pick one):
@@ -35,19 +35,19 @@ npm i react next
 
 | Import | Use in | Contents |
 |---|---|---|
-| `@ttc/login-sdk/core` | anywhere | types, config, key derivation, AES, CSPRNG |
-| `@ttc/login-sdk/client` | browser | wallet generation, sessions, WebAuthn, `AuthClient` |
-| `@ttc/login-sdk/server` | backend | challenge/signature/session verify, route factory |
-| `@ttc/login-sdk/storage` | backend | `StorageAdapter` + Redis/Vercel KV/Upstash/Memory |
-| `@ttc/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useWallet` |
-| `@ttc/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
+| `@tetrac/login-sdk/core` | anywhere | types, config, key derivation, AES, CSPRNG |
+| `@tetrac/login-sdk/client` | browser | wallet generation, sessions, WebAuthn, `AuthClient` |
+| `@tetrac/login-sdk/server` | backend | challenge/signature/session verify, route factory |
+| `@tetrac/login-sdk/storage` | backend | `StorageAdapter` + Redis/Vercel KV/Upstash/Memory |
+| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useWallet` |
+| `@tetrac/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
 
 ## Server (Next.js App Router)
 
 ```ts
 // app/api/auth/[...action]/route.ts
-import { createNextAuthRoutes } from "@ttc/login-sdk/next";
-import { resolveStorageAdapter } from "@ttc/login-sdk/storage";
+import { createNextAuthRoutes } from "@tetrac/login-sdk/next";
+import { resolveStorageAdapter } from "@tetrac/login-sdk/storage";
 
 const storage = await resolveStorageAdapter(); // Redis dev / KV / Upstash by env
 export const { GET, POST } = createNextAuthRoutes({ storage });
@@ -59,7 +59,7 @@ Endpoints served: `POST challenge | register | login | login-wallet | import-wal
 ## Client (React)
 
 ```tsx
-import { AuthProvider, useAuth } from "@ttc/login-sdk/react";
+import { AuthProvider, useAuth } from "@tetrac/login-sdk/react";
 
 function Root() {
   return (
@@ -89,7 +89,7 @@ function LoginButtons() {
 ### Generating wallets directly
 
 ```ts
-import { generateWalletBundle, flattenBundle, toSolanaKeypair } from "@ttc/login-sdk/client";
+import { generateWalletBundle, flattenBundle, toSolanaKeypair } from "@tetrac/login-sdk/client";
 
 const bundle = generateWalletBundle({
   appKey,                       // derived from passkey+email or wallet signature

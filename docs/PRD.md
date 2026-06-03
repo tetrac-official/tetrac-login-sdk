@@ -1,4 +1,4 @@
-# PRD — `@ttc/login-sdk`
+# PRD — `@tetrac/login-sdk`
 
 A reusable, framework-agnostic authentication SDK that packages the auth system currently
 living inside `next-ttc` so any project can drop in email, Web3 wallet, and passkey/biometric
@@ -105,7 +105,7 @@ Monorepo-style single package with layered, tree-shakeable subpath exports. Core
 adapters and React/Next bindings are optional.
 
 ```
-@ttc/login-sdk
+@tetrac/login-sdk
 ├── /core        → framework-agnostic auth logic, crypto, key derivation, wallet gen
 │                  (no React, no Next, no DOM-API assumptions beyond WebCrypto/WebAuthn)
 ├── /client      → browser-only: wallet generation, encryption, WebAuthn, session storage
@@ -119,12 +119,12 @@ adapters and React/Next bindings are optional.
 
 ### Subpath exports
 ```ts
-import { deriveAppKey, encryptSecret } from "@ttc/login-sdk/core";
-import { generateSolanaWallet, generateEvmWallet, registerPasskey } from "@ttc/login-sdk/client";
-import { createAuthRouteHandlers, verifySession } from "@ttc/login-sdk/server";
-import { RedisAdapter, VercelKVAdapter, UpstashAdapter } from "@ttc/login-sdk/storage";
-import { useAuth, AuthProvider } from "@ttc/login-sdk/react";
-import { createNextAuthRoutes } from "@ttc/login-sdk/next";
+import { deriveAppKey, encryptSecret } from "@tetrac/login-sdk/core";
+import { generateSolanaWallet, generateEvmWallet, registerPasskey } from "@tetrac/login-sdk/client";
+import { createAuthRouteHandlers, verifySession } from "@tetrac/login-sdk/server";
+import { RedisAdapter, VercelKVAdapter, UpstashAdapter } from "@tetrac/login-sdk/storage";
+import { useAuth, AuthProvider } from "@tetrac/login-sdk/react";
+import { createNextAuthRoutes } from "@tetrac/login-sdk/next";
 ```
 
 ### Design principles
@@ -284,7 +284,7 @@ UPSTASH_REDIS_REST_TOKEN=...
 
 ## 11. Distribution & Tooling
 
-- **Package name:** `@ttc/login-sdk`, published **publicly to npmjs**; source in its own **GitHub repo**
+- **Package name:** `@tetrac/login-sdk`, published **publicly to npmjs**; source in its own **GitHub repo**
   (separate git history from `next-ttc`). GitHub Actions runs CI and `npm publish` on tag.
 - **Build:** `tsup` → ESM + CJS + `.d.ts`, per-subpath entry points, `sideEffects: false` for tree-shaking.
 - **Peer deps:** `@solana/web3.js`, `viem`, `tweetnacl`, `react`, `next` (the last two optional/peer-marked).
@@ -329,7 +329,7 @@ UPSTASH_REDIS_REST_TOKEN=...
 ## 14. Decisions & Open Questions
 
 ### Decided
-1. **Distribution:** public npmjs package `@ttc/login-sdk`, own GitHub repo, publish via GitHub Actions on tag.
+1. **Distribution:** public npmjs package `@tetrac/login-sdk`, own GitHub repo, publish via GitHub Actions on tag.
 2. **EVM lib:** **viem** (`generatePrivateKey` / `privateKeyToAccount`). `ethers` dropped from the SDK.
 3. **WebAuthn:** **keep the custom implementation** (ported from `PasskeyService.ts`). `@simplewebauthn`
    rejected for v1 — it centers on standard auth ceremonies, whereas our model needs the **PRF extension**

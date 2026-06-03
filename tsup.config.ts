@@ -9,6 +9,7 @@ export default defineConfig({
     "storage/index": "src/storage/index.ts",
     "react/index": "src/react/index.ts",
     "next/index": "src/next/index.ts",
+    "ui/index": "src/ui/index.ts",
   },
   format: ["esm", "cjs"],
   dts: true,
