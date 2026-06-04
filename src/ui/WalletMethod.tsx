@@ -9,13 +9,14 @@ import type { LoginPanelProps, WalletConnector } from "./types.js";
 
 export interface WalletMethodProps {
   connector: WalletConnector;
+  icon?: React.ReactNode;
   styles: Record<string, CSSProperties>;
   classNames?: LoginPanelProps["classNames"];
   onSuccess: (result: AuthResult) => void;
   onError: (err: Error) => void;
 }
 
-export function WalletMethod({ connector, styles, classNames, onSuccess, onError }: WalletMethodProps) {
+export function WalletMethod({ connector, icon, styles, classNames, onSuccess, onError }: WalletMethodProps) {
   const { connectWallet } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,9 +41,6 @@ export function WalletMethod({ connector, styles, classNames, onSuccess, onError
 
   return (
     <div className={classNames?.method} style={styles.method}>
-      <span className={classNames?.methodLabel} style={styles.methodLabel}>
-        Wallet
-      </span>
       <button
         type="button"
         onClick={run}
@@ -50,6 +48,11 @@ export function WalletMethod({ connector, styles, classNames, onSuccess, onError
         className={classNames?.button}
         style={styles.button}
       >
+        {icon ? (
+          <span className={classNames?.iconWrap} style={styles.iconWrap}>
+            {icon}
+          </span>
+        ) : null}
         {busy ? "Waiting for signature…" : (connector.label ?? "Continue with wallet")}
       </button>
       {error ? (

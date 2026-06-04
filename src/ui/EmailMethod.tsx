@@ -12,13 +12,14 @@ import type { LoginPanelProps } from "./types.js";
 
 export interface EmailMethodProps {
   mode: NonNullable<LoginPanelProps["emailMode"]>;
+  icon?: React.ReactNode;
   styles: Record<string, CSSProperties>;
   classNames?: LoginPanelProps["classNames"];
   onSuccess: (result: AuthResult) => void;
   onError: (err: Error) => void;
 }
 
-export function EmailMethod({ mode, styles, classNames, onSuccess, onError }: EmailMethodProps) {
+export function EmailMethod({ mode, icon, styles, classNames, onSuccess, onError }: EmailMethodProps) {
   const { registerWithEmail, loginWithEmail } = useAuth();
   const [email, setEmail] = useState("");
   const [passkey, setPasskey] = useState("");
@@ -60,9 +61,6 @@ export function EmailMethod({ mode, styles, classNames, onSuccess, onError }: Em
 
   return (
     <form className={classNames?.method} style={styles.method} onSubmit={submit}>
-      <span className={classNames?.methodLabel} style={styles.methodLabel}>
-        Email
-      </span>
       <input
         type="email"
         autoComplete="email"
@@ -91,7 +89,12 @@ export function EmailMethod({ mode, styles, classNames, onSuccess, onError }: Em
         className={classNames?.primaryButton}
         style={styles.primaryButton}
       >
-        {busy ? "…" : "Continue"}
+        {icon ? (
+          <span className={classNames?.iconWrap} style={styles.iconWrap}>
+            {icon}
+          </span>
+        ) : null}
+        {busy ? "…" : "Continue with email"}
       </button>
       {error ? (
         <span className={classNames?.error} style={styles.error}>

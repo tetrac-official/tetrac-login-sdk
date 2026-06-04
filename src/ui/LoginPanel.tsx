@@ -24,7 +24,8 @@ export function LoginPanel(props: LoginPanelProps) {
     passkeyRegistration,
     onPasskeyRegistered,
     biometricUserName = "tetrac-user",
-    title = "Sign in",
+    icons,
+    title = "Log in or sign up",
     className,
     classNames,
     styles: stylesOverride,
@@ -52,17 +53,16 @@ export function LoginPanel(props: LoginPanelProps) {
   };
 
   // Render methods in the order requested; each panel manages its own state and
-  // surfaces its own errors inline (matching Privy's per-method affordances).
+  // surfaces its own errors inline. No dividers between methods — the new design
+  // is a clean stack of icon buttons.
   const nodes: React.ReactNode[] = [];
-  methods.forEach((m, i) => {
-    if (i > 0) {
-      nodes.push(<hr key={`div-${i}`} className={classNames?.divider} style={styles.divider} />);
-    }
+  methods.forEach((m) => {
     if (m === "email") {
       nodes.push(
         <EmailMethod
           key="email"
           mode={emailMode}
+          icon={icons?.email}
           styles={styles}
           classNames={classNames}
           onSuccess={handleSuccess("email")}
@@ -75,9 +75,6 @@ export function LoginPanel(props: LoginPanelProps) {
         // instead of silently dropping the method.
         nodes.push(
           <div key="wallet" className={classNames?.method} style={styles.method}>
-            <span className={classNames?.methodLabel} style={styles.methodLabel}>
-              Wallet
-            </span>
             <span className={classNames?.muted} style={styles.muted}>
               Pass a `walletConnector` prop to enable wallet sign-in.
             </span>
@@ -88,6 +85,7 @@ export function LoginPanel(props: LoginPanelProps) {
           <WalletMethod
             key="wallet"
             connector={walletConnector}
+            icon={icons?.wallet}
             styles={styles}
             classNames={classNames}
             onSuccess={handleSuccess("wallet")}
@@ -101,6 +99,7 @@ export function LoginPanel(props: LoginPanelProps) {
           key="biometric"
           registration={passkeyRegistration ?? null}
           userName={biometricUserName}
+          icon={icons?.biometric}
           styles={styles}
           classNames={classNames}
           onSuccess={handleSuccess("biometric")}

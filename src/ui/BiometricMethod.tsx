@@ -13,6 +13,7 @@ import type { LoginPanelProps } from "./types.js";
 export interface BiometricMethodProps {
   registration: PasskeyRegistration | null | undefined;
   userName: string;
+  icon?: React.ReactNode;
   styles: Record<string, CSSProperties>;
   classNames?: LoginPanelProps["classNames"];
   onSuccess: (result: AuthResult) => void;
@@ -23,6 +24,7 @@ export interface BiometricMethodProps {
 export function BiometricMethod({
   registration,
   userName,
+  icon,
   styles,
   classNames,
   onSuccess,
@@ -74,11 +76,8 @@ export function BiometricMethod({
   if (available === false) {
     return (
       <div className={classNames?.method} style={styles.method}>
-        <span className={classNames?.methodLabel} style={styles.methodLabel}>
-          Biometric
-        </span>
         <span className={classNames?.muted} style={styles.muted}>
-          Not available on this device.
+          Biometric not available on this device.
         </span>
       </div>
     );
@@ -86,9 +85,6 @@ export function BiometricMethod({
 
   return (
     <div className={classNames?.method} style={styles.method}>
-      <span className={classNames?.methodLabel} style={styles.methodLabel}>
-        Biometric
-      </span>
       <button
         type="button"
         onClick={run}
@@ -96,11 +92,16 @@ export function BiometricMethod({
         className={classNames?.button}
         style={styles.button}
       >
+        {icon ? (
+          <span className={classNames?.iconWrap} style={styles.iconWrap}>
+            {icon}
+          </span>
+        ) : null}
         {busy
           ? "…"
           : registration
             ? "Unlock with biometric"
-            : "Enable biometric login"}
+            : "Continue with biometric"}
       </button>
       {error ? (
         <span className={classNames?.error} style={styles.error}>

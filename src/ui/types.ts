@@ -33,6 +33,7 @@ export type LoginPanelSlot =
   | "input"
   | "button"
   | "primaryButton"
+  | "iconWrap"
   | "error"
   | "divider"
   | "muted";
@@ -63,6 +64,14 @@ export interface LoginPanelProps {
 
   /** Required to render the "wallet" method — see `WalletConnector`. */
   walletConnector?: WalletConnector;
+
+  /**
+   * Optional icon rendered inside each method's button, keyed by method. The SDK
+   * stays icon-library-agnostic (just like it is wallet-library-agnostic): pass
+   * your own nodes, e.g. lucide-react — `{ email: <Mail />, wallet: <Wallet />,
+   * biometric: <Fingerprint /> }`.
+   */
+  icons?: Partial<Record<LoginMethod, React.ReactNode>>;
 
   /**
    * Existing biometric registration, if the app has one cached (localStorage,
