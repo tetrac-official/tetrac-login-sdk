@@ -137,15 +137,19 @@ For each capability: **Privy** (how it appears in code) → **tetrac today** (wh
 - **Privy:** `useExportWallet().exportWallet({ address })` pops Privy's **hosted reveal iframe** —
   the app never sees plaintext (XSS-isolated by the sandbox). This is the working flow in
   `Shyft.lol/src/app/export-key/page.tsx` today.
-- **tetrac today:** no export hook; the app calls `useSigner().sign(blob, secret => secret)` to
-  get the plaintext and renders it itself (the pattern documented in the migration skill).
-- **Recommended design:** ship a first-class `useExportKey()` →
-  `{ reveal(): Promise<string>, clear() }` that wraps `withDecryptedKey`, plus an **optional**
-  `<ExportKeyPanel>` (in `@tetrac/login-sdk/ui`) that handles the reveal/copy/auto-clear/timeout UX
-  and the React-Native-WebView `postMessage` contract Shyft's export page relies on. Self-custody
-  means *the app's DOM holds the plaintext* — so the SDK should own the safe-reveal UX rather than
-  leave each app to get the clipboard-timeout and CSP story right. Document the trade-off
-  explicitly: no iframe sandbox, so the reveal route is XSS-sensitive.
+- **tetrac today:** **closed.** Two layers shipped:
+  - `useExportKey(wallet, { autoClearMs? })` → `{ reveal, clear, plaintext, loading, error }`.
+    Wraps `withDecryptedKey`; stale-reveal guard (`revealSeq` ref) so a slow decrypt can't
+    overwrite a cleared state. (`src/react/useExportKey.ts`)
+  - `<ExportKeyPanel>` (in `@tetrac/login-sdk/ui`) — opinionated UX: monospace reveal block,
+    Copy with `clipboardClearMs` auto-wipe (default 30 s), Hide button, auto-clear after
+    `autoClearMs` (default 60 s), and the `window.ReactNativeWebView.postMessage({status, privateKey})`
+    contract Shyft's export page relies on. Slot-themed (`classNames` / `styles` / `appearance`)
+    like `<LoginPanel>`. (`src/ui/ExportKeyPanel.tsx`)
+- **Security trade-off (documented):** no iframe sandbox like Privy's reveal flow — any script on
+  the reveal route can read the plaintext while it's in state. Apps should treat the route as
+  security-sensitive (strict CSP, re-auth gate). Called out in `USE_IN_CODE.md` §8 and in the
+  panel's default warning copy.
 
 ### 2.7 Sessions, persistence & status
 
@@ -215,11 +219,11 @@ src/react/
   useSolanaSigner.ts   // EXISTS: { publicKey, signTransaction, signAllTransactions, signMessage } (adapter-shaped)
   useEvmSigner.ts      // EXISTS: viem LocalAccount over withDecryptedKey
   useSigner.ts         // EXISTS (renamed from useWallet): low-level decrypt/sign/keypair primitives
-  useExportKey.ts      // NEW: { reveal, clear } over withDecryptedKey
+  useExportKey.ts      // EXISTS: { reveal, clear, plaintext, loading, error } over withDecryptedKey
 
-src/ui/                // NEW, optional entry: "@tetrac/login-sdk/ui" (tree-shakeable)
+src/ui/                // EXISTS, optional entry: "@tetrac/login-sdk/ui" (tree-shakeable)
   LoginPanel.tsx       // email / wallet / biometric, themeable — the headless-gap filler
-  ExportKeyPanel.tsx   // safe reveal: copy + auto-clear + RN-WebView postMessage
+  ExportKeyPanel.tsx   // EXISTS: safe reveal: copy + auto-clear + RN-WebView postMessage
 ```
 
 Net effect on a consuming app (measured against the Shyft migration): the hand-written
@@ -231,8 +235,9 @@ login modal becomes `<LoginPanel>` (or stays custom if the app wants).
 
 ## 5. Decisions to confirm before building
 
-1. **Ship a UI package?** (§2.2/§2.6) Recommended yes, as an optional `@tetrac/login-sdk/ui`
-   entry. Confirms the project is willing to own login + reveal UX, not just primitives.
+1. ~~**Ship a UI package?**~~ **Done** (§2.2/§2.6) — `@tetrac/login-sdk/ui` is a tree-shakeable
+   optional entry shipping `<LoginPanel>` (§2.2) and `<ExportKeyPanel>` (§2.6). Apps that don't
+   import from `/ui` pay nothing for it.
 2. ~~**Rename `useWallet` → `useVault`/`useSigner`?**~~ **Done** (§2.5) — renamed to `useSigner` to
    free `useWallets()` for the wallet-list hook. Breaking change for current consumers (next-ttc);
    coordinate the bump when they upgrade.

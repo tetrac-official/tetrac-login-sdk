@@ -61,7 +61,7 @@ user submits credentials (email+passkey / biometric / wallet-signature)
 derive appKey  (PBKDF2 / PRF / SHA256(sig))         ← all local, §1
         │
         ▼
-load cached bundle from localStorage  (tetrac:user:{publicKey})
+load cached bundle from device-bound store  (tetrac:user:{publicKey}, §7/§8)
         │
         ▼
 try decrypt wallets[0] with appKey
@@ -79,7 +79,7 @@ Consequences:
 - **No server session token** is issued. We introduce an explicit **offline session state** (§6),
   distinct from the existing `authenticated` / `session_expired` / `unauthenticated`.
 - The app key still lives in `sessionStorage` + memory **only** — the existing invariant
-  ("encryption keys never in localStorage") is preserved. Offline login re-derives it each time.
+  ("encryption keys never persisted") is preserved. Offline login re-derives it each time.
 - **No new wallets are generated** in this flow, even though the server is down (requirement #3).
   Cached ciphertext present ⇒ decrypt-only.
 
@@ -106,7 +106,7 @@ reconciler can tell "needs to be sent to the server" from "already on the server
 everything required to register later **without re-prompting and without regenerating keys**:
 
 ```jsonc
-// localStorage key: tetrac:offline:1717459200000
+// device-bound store key: tetrac:offline:1717459200000  (envelope encrypted under the device key, §7)
 {
   "publicKey": "<funds wallet pubkey = identity>",
   "authMethod": "email" | "biometric" | "wallet",
@@ -148,7 +148,7 @@ user action → ping  GET /api/auth/health   (cheap liveness; add to the route t
    └─ up    → for each tetrac:offline:* record:
                 POST register(replay stored bundle)        (§4)
                 ├─ 201 Created → move record → confirmed cache (tetrac:user:{pk}); status="synced"
-                ├─ 409 Exists  → account already registered → switch to LOGIN, then RECONCILE WALLETS (§9 edge case)
+                ├─ 409 Exists  → account already registered → switch to LOGIN, IMPORT the offline wallets, then run the MIGRATION FLOW (§11)
                 └─ network err → leave pending, try again next action
               then refresh the confirmed cache from GET /api/auth/user-data
 ```
@@ -174,60 +174,74 @@ reconcile (§5). The app key handling is unchanged: memory + `sessionStorage`, n
 
 ---
 
-## 7. Security analysis — the central trade-off (read carefully)
+## 7. Security model — device-bound cache (mandatory, not raw localStorage)
 
-Persisting the ciphertext bundle in `localStorage` **changes the threat model** and is the part of
-this design that most needs sign-off.
+The offline cache is **never** stored as plain ciphertext in `localStorage`. It is held in a
+**device-bound store**: each record (the confirmed cache and every pending offline record) is
+wrapped in a second envelope encrypted under a **device key that cannot leave this device**, then
+written to IndexedDB. This is a hard requirement of the design, not an optional hardening.
 
-**What changes.** Today the blob lives only on the server, so brute-forcing a weak passkey requires
-hitting the rate-limited backend, and the attacker must first compromise the server. With local
-caching, an attacker who can read `localStorage` (XSS, malware, a shared/persistent device) gets
-the **ciphertext + `passkeyHash`** and can mount an **offline brute-force / dictionary attack** at
-full speed against:
-- email users with a weak `passkey` (PBKDF2 is the only cost), and
-- the co-located `passkeyHash` (unsalted `SHA256` — even cheaper to test).
+**Why.** If we cached the raw AES bundle, an attacker who can read storage (XSS, malware, a
+shared/persistent device) would obtain the **ciphertext + `passkeyHash`** and could mount an
+**offline brute-force** at full speed against low-entropy email passkeys (and the co-located,
+unsalted `SHA256` `passkeyHash`). Device-binding removes the at-rest payload: an exfiltrated copy of
+storage is just an opaque envelope the attacker cannot unwrap off-device.
 
-Wallet-derived keys (`SHA256(256-bit signature)`) are not brute-forceable; biometric keys depend on
-the authenticator. The exposure is concentrated on **low-entropy email passkeys.**
+**Device key — two options (pick per `deviceBinding`):**
 
-**Mitigations (recommended, in priority order):**
-1. **Device-bind the cache envelope.** Don't store raw ciphertext+hash. Wrap the whole offline
-   record under a **device key** — a non-extractable WebCrypto key (kept in IndexedDB) or, best,
-   the **WebAuthn PRF secret**. Then mere `localStorage` exfiltration is useless without the
-   authenticator/device. For biometric users this is essentially free and very strong.
-2. **Raise PBKDF2 iterations** for email users when offline caching is enabled (config-driven;
-   default is 100k in `core/config.ts`).
-3. **Make offline caching opt-in** ("Remember this device for offline access"). Default off.
-4. **Separate "logout" from "forget device."** Per requirement, the cache survives **logout** (so
-   offline re-login is possible) — but logout must still clear the app key/session. Add an explicit
-   **"forget this device"** that wipes all `tetrac:user:*` / `tetrac:offline:*` records. Never
-   leave the cache on a device the user signed out of *and* wanted forgotten.
-5. **Don't store the raw passkey** — only `passkeyHash` (already non-reversible), or re-prompt at
-   reconcile to avoid persisting even the hash.
+| Option | Mechanism | Protects against exfiltration-at-rest | Protects against live in-page XSS | Best for |
+|---|---|---|---|---|
+| `webauthn-prf` (**recommended**) | Envelope key = the authenticator's **WebAuthn PRF** secret; unwrap requires a user gesture on the device | ✅ | ✅ (attacker can't silently invoke the authenticator) | Biometric users — essentially free; reuses the same credential that already derives their app key |
+| `webcrypto` (fallback) | Envelope key = a **non-extractable** `CryptoKey` generated via WebCrypto and kept in IndexedDB | ✅ | ⚠️ partial — a non-extractable key still *unwraps in-page*, so live XSS running in the tab can decrypt; it only stops copy-the-storage exfiltration | Email/wallet users without a PRF-capable authenticator |
 
-**Privacy.** A persisted cache reveals "an account was used on this device" to anyone who inspects
-storage. On shared devices, prefer re-prompt over persistence, or device-bind (mitigation 1).
+Because the envelope key never appears in JS (PRF) or is non-extractable (WebCrypto), copying
+`localStorage`/IndexedDB to another machine yields nothing usable.
 
-**Preserved invariant.** The app/encryption key is **never** written to `localStorage` in any flow
-— it remains memory + `sessionStorage`, re-derived on each offline login.
+**Layering.** Two independent locks now guard the secret: (1) the device envelope (this section) and
+(2) the per-user app key derived from credentials (§1). An attacker needs *both* the device **and**
+the credential. The earlier "weak email passkey" exposure only mattered when the ciphertext was
+freely readable — device-binding closes that path.
+
+**Other rules (still required):**
+- **App key never persisted.** Unchanged invariant — memory + `sessionStorage` only, re-derived on
+  each offline login. The device key wraps the *cache*, never the app key.
+- **Offline caching is opt-in** ("Remember this device for offline access"); default off.
+- **"Logout" ≠ "forget device."** The device-bound cache survives **logout** (so Flow A re-login
+  works) while logout still clears the app key/session. An explicit **"forget this device"** wipes
+  the device key and all `tetrac:user:*` / `tetrac:offline:*` records — after which the envelopes are
+  permanently undecryptable even if their bytes were copied earlier.
+- **Don't store the raw passkey** — only `passkeyHash` (inside the device envelope), or re-prompt at
+  reconcile to avoid persisting even the hash.
+
+**Privacy.** Even device-bound, the *presence* of a record reveals "an account was used here." On
+shared devices, prefer re-prompt over persistence.
+
+**Residual risk (state honestly).** The `webcrypto` fallback does not stop a live XSS payload
+executing in the authenticated tab — it can drive the non-extractable key to unwrap. Only
+`webauthn-prf` (user-gesture-gated) defends that case. Treat reveal/offline routes as
+security-sensitive (strong CSP, no untrusted third-party scripts) regardless of binding mode.
 
 ---
 
 ## 8. Storage model
 
-Preserve the current session keys; add two namespaces. (The user's proposed
-`xyz_offline_<timestamp>` becomes `tetrac:offline:{timestamp}`.)
+Preserve the current session keys (in `localStorage`/`sessionStorage`); add two namespaces that
+live in the **device-bound store** (IndexedDB, each record wrapped under the device key from §7 —
+**not raw `localStorage`**). The user's proposed `xyz_offline_<timestamp>` becomes
+`tetrac:offline:{timestamp}`.
 
-| Key | Lifetime | Cleared by | Holds |
-|---|---|---|---|
-| `ttc-auth-token`, `ttc-public-key`, `user_email` | existing | `clearSession()` | session pointers |
-| `ttc_ek` (app key) | existing — session only | logout / tab close | **app key (never persisted to localStorage)** |
-| `tetrac:user:{publicKey}` | **persists across logout** (opt-in) | "forget device" | confirmed cache: mirror of `UserData` (ciphertext bundle + `passkeyHash` + `registration`) |
-| `tetrac:offline:{timestamp}` | until reconciled | reconcile success / "forget device" | pending offline registration (§4) |
+| Key | Store | Lifetime | Cleared by | Holds |
+|---|---|---|---|---|
+| `ttc-auth-token`, `ttc-public-key`, `user_email` | localStorage (existing) | existing | `clearSession()` | session pointers (no secrets) |
+| `ttc_ek` (app key) | sessionStorage + memory (existing) | session only | logout / tab close | **app key — never persisted, never device-cached** |
+| `tetrac:user:{publicKey}` | **device-bound (IndexedDB, §7)** | **persists across logout** (opt-in) | "forget device" | confirmed cache: device-wrapped mirror of `UserData` (ciphertext bundle + `passkeyHash` + `registration`) |
+| `tetrac:offline:{timestamp}` | **device-bound (IndexedDB, §7)** | until reconciled | reconcile success / "forget device" | device-wrapped pending offline registration (§4) |
+| device key | non-extractable `CryptoKey` in IndexedDB, or WebAuthn PRF (no stored material) | persists | "forget device" | unwraps the two namespaces above |
 
-Logout clears the session (app key + token) but **keeps** `tetrac:user:*` if the user opted into
-offline access — that is what enables Flow A after a logout. "Forget device" wipes both new
-namespaces.
+Logout clears the session (app key + token) but **keeps** the device-bound `tetrac:user:*` records
+if the user opted into offline access — that is what enables Flow A after a logout. "Forget device"
+destroys the **device key first**, which renders every wrapped record permanently undecryptable, then
+wipes the records.
 
 ---
 
@@ -236,31 +250,44 @@ namespaces.
 **Config** (`core/config.ts`):
 ```ts
 offline?: {
-  enabled: boolean;                       // default false (opt-in)
-  cache: "local" | "memory";             // where the blob lives
-  deviceBinding?: "none" | "webcrypto" | "webauthn-prf";  // §7 mitigation 1
-  healthPath?: string;                   // default "health"
+  enabled: boolean;                          // default false (opt-in)
+  deviceBinding: "webauthn-prf" | "webcrypto";  // §7 — REQUIRED when enabled; no raw-localStorage mode
+  healthPath?: string;                       // default "health"
 }
 ```
 
 **Client** (`src/client/`):
-- `offlineStore.ts` — read/write/wipe the two namespaces; optional device-binding wrap.
+- `deviceKey.ts` — create/load/destroy the device key (WebAuthn PRF or non-extractable WebCrypto);
+  `wrap()` / `unwrap()` envelopes.
+- `offlineStore.ts` — read/write/wipe the two device-bound namespaces in IndexedDB; always goes
+  through `deviceKey` wrap/unwrap. Never touches raw `localStorage`.
 - `authClient.ts` — add:
-  - `loginOffline({ method, credentials })` → derive key, decrypt cache, set offline session.
-  - `registerOffline({ method, credentials })` → generate+persist pending record (Flow B).
+  - `loginOffline({ method, credentials })` → derive key, unwrap + decrypt cache, set offline session.
+  - `registerOffline({ method, credentials })` → generate + device-wrap + persist pending record (Flow B).
   - `registerPregenerated({ identity, wallets, passkeyHash?, registration?, signFn? })` → replay a
     stored bundle to the server (Flow C); **no `generateWalletBundle` call**.
-  - `reconcile()` → ping health, flush pending, refresh cache (Flow C); idempotent.
+  - `reconcile()` → ping health, flush pending, refresh cache (Flow C); idempotent. On 409 →
+    `loginThenImport()` + emit a `migration-required` event (§11).
+  - `migrateFunds({ from, toFundsWallet, connection })` and `selectSigner({ keep, drop[] })` →
+    the operations behind the migration flow (§11).
 - `session.ts` — add `authenticated_offline` to `getAuthStatus`; helpers to set/clear offline state.
 
 **React** (`src/react/`):
-- `AuthProvider` — on online login, write the confirmed cache; expose offline status.
+- `AuthProvider` — on online login, device-wrap + write the confirmed cache; expose offline status.
 - `useAuth()` — add `isOffline`, `reconcile()`, and surface `authenticated_offline`.
+- `useWalletMigration()` — exposes pending-migration state, per-wallet balances, and the
+  `migrateFunds` / `selectSigner` / `exportKey` actions for the migration UI (§11).
+
+**UI** (`src/ui/`, optional package — see `PRD_PRIVY.md` §2):
+- `<WalletMigrationModal>` — the migration flow UI (§11): lists wallets, shows balances, lets the
+  user pick the funds wallet, sweep funds, select the signer to keep, and export any wallet.
 
 **Server** (`src/server/`, `src/next/`):
 - Add a cheap `GET /api/auth/health` to the route table for the liveness ping.
-- **No change** to `register` — it already accepts a client `wallets[]` bundle, which is exactly
-  what Flow C replays.
+- **No change** to `register` — it already accepts a client `wallets[]` bundle, which Flow C replays.
+- **No change** to `import-wallet` — already appends client wallets to `UserData.wallets` (used by §11).
+- Add a `delete-wallet` (or `set-wallets`) action so dropped signer wallets can be removed
+  server-side after `selectSigner` (today the server only appends; §11 needs removal).
 
 ---
 
@@ -268,12 +295,11 @@ offline?: {
 
 1. **Same email, two offline devices (Flow B divergence).** Device A and B both offline-register
    for the same email → each generates a *different* funds keypair. Whoever reconciles first wins
-   the `email → publicKey` mapping; the second hits **409** at register. The second device's
-   offline-generated (possibly already-funded) wallet would be **orphaned**. This is the thorniest
-   correctness hazard. Options on 409: (a) login as the existing account and **`import-wallet`** the
-   orphan as an extra wallet (server already supports `import-wallet`), surfacing "you have funds in
-   a second wallet"; (b) warn and let the user export the orphan key. **Open decision** — pick a
-   default. Wallet/biometric users don't have this issue the same way (identity is the wallet/credential).
+   the `email → publicKey` mapping; the second hits **409** at register. **Resolved**: the second
+   device does not orphan its keys — it logs in to the existing account, **imports** its
+   offline-generated wallets, and runs the **wallet migration flow** so the user consolidates funds
+   and picks a signer. See **§11** for the full flow + UI. (Wallet/biometric users don't hit this:
+   their identity is the wallet/credential, not a freshly generated funds key.)
 2. **Stale cache vs server.** crypto-es AES uses a random salt, so the same plaintext re-encrypts to
    different ciphertext — but it still decrypts correctly. The **server is the source of truth for
    the wallet *set*** (e.g., wallets imported on another device); reconcile should refresh from
@@ -288,18 +314,88 @@ offline?: {
 
 ---
 
-## 11. Recommendation & phasing
+## 11. Wallet collision & migration flow
 
-1. **Phase 1 — offline login (Flow A).** Add opt-in local caching of the confirmed bundle +
-   `loginOffline` + `authenticated_offline`. Highest value, lowest risk. Ship device-binding
-   (§7.1) in the same phase for email users, since that's where the brute-force exposure is.
+When reconcile (§5) hits a **409** for an offline-registered identity, the offline-generated wallets
+are **not discarded and not orphaned**. The SDK logs the user into the existing (winning) account,
+**imports** the offline wallets, and the user ends up with **more wallets** than before — then a
+guided **migration flow** lets them consolidate. Net rule: *no funds are ever lost; the user
+explicitly chooses the surviving funds wallet and signer.*
+
+### 11.1 Resolution steps
+
+```
+reconcile() → register → 409 Exists
+        │
+        ▼
+loginWithEmail(existing account)              → online session on the winning identity
+        │
+        ▼
+import-wallet(offline wallets[])              → server appends them; user now has MORE wallets
+        │
+        ▼
+emit "migration-required" → open <WalletMigrationModal>   (§11.2)
+```
+
+The imported wallets are tagged (e.g. `origin: "offline-merge"`, carrying their
+`createdOfflineAt`) so the UI can label "imported from offline use" vs the account's original
+wallets.
+
+### 11.2 Migration UI (required deliverable)
+
+`<WalletMigrationModal>` (in `src/ui/`, driven by `useWalletMigration()`). It must provide:
+
+1. **Wallet list + balance check.** Show every wallet on the account (original + imported), grouped
+   by `chain` and `role`. For each, fetch and display the **live balance** (SOL/SPL via the app's
+   Solana `connection`; native/ERC-20 via the EVM provider). Balances drive the funds decision.
+2. **Funds-wallet migration.** Let the user pick which wallet becomes the **funds** wallet. If the
+   non-selected wallet(s) hold a balance, offer **"send funds to selected funds wallet"** — a sweep
+   transaction (`migrateFunds`) that transfers the spendable balance (minus fees/rent) from each
+   other funds wallet into the chosen one. Show amount, fee estimate, and a confirm step; report
+   per-transfer success/failure. Sweeping is **opt-in per source wallet** — never automatic.
+3. **Signer-wallet selection.** Let the user choose which `signing` wallet to **keep**. On confirm,
+   the **non-selected signer wallet(s) are deleted** (client cache + server via the new
+   `delete-wallet` action, §9). Deleting a signer is destructive, so:
+   - require explicit confirmation, and
+   - **force an export first** (see #4) for any signer being deleted that has ever been used / holds
+     a balance, so the user cannot lose a key they still need.
+4. **Export option.** Every wallet in the modal has an **Export private key** action
+   (`useExportKey` / the safe-reveal pattern from `PRD_PRIVY.md` §2.6 — local decrypt, copy with
+   auto-clear, no logging). This is mandatory for any wallet the user is about to drop, and
+   available for the rest.
+
+### 11.3 Post-migration state
+
+After the user confirms: one funds wallet per chain (funded), one signer per chain (the kept one),
+dropped signers removed server-side and from the device cache, and the confirmed cache
+(`tetrac:user:{publicKey}`, §8) re-written (device-wrapped) from the refreshed `user-data`. The
+pending `tetrac:offline:*` record is cleared. The migration is **idempotent** — re-opening the
+modal after a partial run reflects current on-chain balances and the current wallet set.
+
+### 11.4 Safety rules
+
+- **No silent deletion.** A signer is only removed after explicit selection **and** an export of any
+  at-risk key.
+- **No silent sweep.** Funds move only on per-wallet confirmation with a shown amount + fee.
+- **Failure-safe.** A failed sweep or delete leaves both wallets intact and the migration
+  re-runnable; never delete a source before its sweep confirms on-chain.
+
+---
+
+## 12. Recommendation & phasing
+
+1. **Phase 1 — offline login (Flow A) + device-bound store.** Opt-in caching of the confirmed
+   bundle, `loginOffline`, `authenticated_offline`, and the §7 device key (ship `webauthn-prf` for
+   biometric users, `webcrypto` fallback otherwise). Device-binding is in-scope from day one — there
+   is no raw-localStorage interim. Highest value, lowest risk.
 2. **Phase 2 — reconcile (Flow C) for existing users.** Health ping + cache refresh. No offline
    registration yet.
-3. **Phase 3 — offline registration (Flow B) + pending-queue reconcile.** Includes the
-   `registerPregenerated` path and the 409/divergence handling (§10.1) — gate this phase on a
-   decision for that edge case.
+3. **Phase 3 — offline registration (Flow B) + pending-queue reconcile + migration flow (§11).**
+   Includes `registerPregenerated`, the 409 → import path, the `delete-wallet`/sweep server bits, and
+   the `<WalletMigrationModal>` UI. This phase is the one that needs the most product/UX review.
 
 The whole design is consistent with tetrac's self-custody model and preserves the
-"app key never persisted" invariant. The one genuine trade-off requiring explicit sign-off is
-caching ciphertext at rest (§7); device-binding the cache is the recommended way to take that on
-without materially weakening weak-passkey email users.
+"app key never persisted" invariant. The cache is **device-bound by mandate** (§7), so caching
+ciphertext at rest does not reopen the weak-passkey brute-force path. The remaining product
+decisions live in the migration flow (§11): default sweep behavior and how aggressively to force
+exports before deleting a signer.

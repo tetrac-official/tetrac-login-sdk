@@ -39,7 +39,8 @@ npm i react next
 | `@tetrac/login-sdk/client` | browser | wallet generation, sessions, WebAuthn, `AuthClient` |
 | `@tetrac/login-sdk/server` | backend | challenge/signature/session verify, route factory |
 | `@tetrac/login-sdk/storage` | backend | `StorageAdapter` + Redis/Vercel KV/Upstash/Memory |
-| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner` |
+| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner`, `useExportKey` |
+| `@tetrac/login-sdk/ui` | browser (optional) | `LoginPanel`, `ExportKeyPanel` |
 | `@tetrac/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
 
 ## Server (Next.js App Router)

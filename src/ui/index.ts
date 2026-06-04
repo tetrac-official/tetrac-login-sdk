@@ -4,10 +4,14 @@
 // Keeping it on its own subpath preserves tree-shaking for apps that ship a
 // fully custom login UI on top of `@tetrac/login-sdk/react`.
 export { LoginPanel } from "./LoginPanel.js";
+export { ExportKeyPanel } from "./ExportKeyPanel.js";
 export type {
   LoginMethod,
   LoginPanelProps,
   LoginPanelSlot,
   LoginPanelAppearance,
   WalletConnector,
+  ExportKeyPanelProps,
+  ExportKeyPanelSlot,
+  ExportKeyPanelLabels,
 } from "./types.js";

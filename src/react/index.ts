@@ -6,3 +6,4 @@ export { useEvmSigner } from "./useEvmSigner.js";
 export { useUser, type UseUserResult } from "./useUser.js";
 export { useWallets, type WalletEntry } from "./useWallets.js";
 export { useActiveWallet, type UseActiveWalletOptions } from "./useActiveWallet.js";
+export { useExportKey, type UseExportKeyOptions, type UseExportKeyResult } from "./useExportKey.js";

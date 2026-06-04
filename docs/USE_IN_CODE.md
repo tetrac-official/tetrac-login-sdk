@@ -48,7 +48,8 @@ browser bundles — always import from the most specific subpath:
 | `@tetrac/login-sdk/client` | browser | wallet gen, sessions, WebAuthn, `AuthClient` |
 | `@tetrac/login-sdk/server` | server | route factory, session verify, signature verify |
 | `@tetrac/login-sdk/storage` | server | `StorageAdapter` + Redis/KV/Upstash adapters |
-| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner` |
+| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner`, `useExportKey` |
+| `@tetrac/login-sdk/ui` | browser (optional) | `LoginPanel`, `ExportKeyPanel` |
 | `@tetrac/login-sdk/next` | server | `createNextAuthRoutes` |
 
 ---
@@ -728,6 +729,73 @@ config stays in your app — the SDK only owns the signer.
 
 Both hooks return `null` when no wallet is passed in or the session is locked,
 so you can render conditionally without extra guards.
+
+### Exporting / revealing a private key (`useExportKey`, `<ExportKeyPanel>`)
+
+Self-custody means the plaintext private key lands in the app's DOM — there's
+no Privy-style hosted iframe sandbox. The SDK ships two layers so apps don't
+re-implement the safe-reveal UX (auto-clear timeout, clipboard wipe, RN
+WebView contract):
+
+**Hook — `useExportKey`:**
+
+```tsx
+"use client";
+import { useExportKey, useActiveWallet } from "@tetrac/login-sdk/react";
+
+function CustomReveal() {
+  const active = useActiveWallet();
+  const { reveal, clear, plaintext, loading, error } = useExportKey(active?.encrypted, {
+    autoClearMs: 60_000,
+  });
+
+  if (plaintext) {
+    return (
+      <>
+        <code>{plaintext}</code>
+        <button onClick={clear}>Hide</button>
+      </>
+    );
+  }
+  return (
+    <button onClick={() => reveal().catch(() => {})} disabled={loading}>
+      Reveal private key
+    </button>
+  );
+}
+```
+
+**Drop-in panel — `<ExportKeyPanel>`** (optional, from `@tetrac/login-sdk/ui`):
+
+```tsx
+"use client";
+import { ExportKeyPanel } from "@tetrac/login-sdk/ui";
+import { useActiveWallet } from "@tetrac/login-sdk/react";
+
+export default function ExportKeyPage() {
+  const active = useActiveWallet();
+  return (
+    <ExportKeyPanel
+      wallet={active?.encrypted}
+      autoClearMs={60_000}        // hide plaintext after 60s; pass 0 to disable
+      clipboardClearMs={30_000}   // wipe clipboard after 30s; pass 0 to disable
+    />
+  );
+}
+```
+
+The panel handles:
+- Reveal button → render the secret in a monospace block (CSS `user-select: all`).
+- "Copy" with auto-wipe of the clipboard after `clipboardClearMs`.
+- "Hide" button + auto-clear after `autoClearMs`.
+- `window.ReactNativeWebView.postMessage({status, privateKey})` so existing
+  React-Native shells (e.g. apps migrating off Privy) keep working unchanged.
+
+**Security trade-off worth surfacing in the UI:** unlike Privy's iframe
+sandbox, any script on the reveal route can read the plaintext while it's in
+state. Treat the route as security-sensitive — strict CSP, no untrusted
+third-party scripts, and consider requiring a fresh login/biometric
+re-auth before navigating users to it.
 
 ---
 
