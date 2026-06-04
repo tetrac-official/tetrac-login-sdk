@@ -1,6 +1,6 @@
 ---
 name: replace-privy
-description: Migrate a Next.js / React app from `@privy-io/react-auth` to `@tetrac/login-sdk` — replaces the custodial embedded-wallet stack (PrivyProvider, usePrivy, useWallets, useExportWallet) with the non-custodial, client-side-encrypted equivalents (AuthProvider, useAuth, useWallet, generateWalletBundle). Use when the user says "replace Privy", "swap out Privy", "remove @privy-io", "migrate off Privy", or asks how to drop Privy in favor of this SDK.
+description: Migrate a Next.js / React app from `@privy-io/react-auth` to `@tetrac/login-sdk` — replaces the custodial embedded-wallet stack (PrivyProvider, usePrivy, useWallets, useExportWallet) with the non-custodial, client-side-encrypted equivalents (AuthProvider, useAuth, useSigner, generateWalletBundle). Use when the user says "replace Privy", "swap out Privy", "remove @privy-io", "migrate off Privy", or asks how to drop Privy in favor of this SDK.
 ---
 
 # Replacing Privy with `@tetrac/login-sdk`
@@ -41,10 +41,10 @@ Two practical consequences you MUST surface to the user before starting:
 | `<PrivyProvider appId config>` | `<AuthProvider apiBaseUrl config>` (from `@tetrac/login-sdk/react`) |
 | `usePrivy() → { ready, authenticated, user, login, logout }` | `useAuth() → { status, isAuthenticated, publicKey, email, logout, registerWithEmail, loginWithEmail, connectWallet, registerWithBiometric, ... }` |
 | `useWallets()` (Solana subpath) | `useAuth().publicKey` + `user.wallets` from `/api/auth/user-data` |
-| `useExportWallet({ address })` | `useWallet().decrypt(walletBlob)` or `withDecryptedKey(walletBlob, appKey, fn)` |
+| `useExportWallet({ address })` | `useSigner().decrypt(walletBlob)` or `withDecryptedKey(walletBlob, appKey, fn)` |
 | `embeddedWallets.solana.createOnLogin: "users-without-wallets"` | Automatic — `registerWithEmail` / `registerWithBiometric` / `connectWallet` generate the bundle |
 | `user.linkedAccounts.find(a => a.walletClientType === 'privy')` | `user.wallets.find(w => w.chain === "solana" && w.role === "funds")` |
-| `solanaWallet.signTransaction({ transaction: bytes })` | Build a `Keypair` via `useWallet().solanaKeypair(walletBlob)`, then `tx.partialSign(kp)` |
+| `solanaWallet.signTransaction({ transaction: bytes })` | Build a `Keypair` via `useSigner().solanaKeypair(walletBlob)`, then `tx.partialSign(kp)` |
 | Privy's hosted UI / `appearance: {...}` | Build your own login UI; SDK is headless |
 
 Server-side: Privy talks to Privy's API. The SDK requires you to run its routes yourself — `createNextAuthRoutes({ storage })` at `app/api/auth/[...action]/route.ts`. See `docs/USE_IN_CODE.md` §3.
@@ -148,7 +148,7 @@ The existing shim presents a `useWallet()` matching `@solana/wallet-adapter-reac
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useAuth, useWallet as useSdkWallet } from "@tetrac/login-sdk/react";
+import { useAuth, useSigner } from "@tetrac/login-sdk/react";
 import { authHeaders } from "@tetrac/login-sdk/client";
 import { useWallet as useExternalWallet } from "@solana/wallet-adapter-react";
 import { Connection, PublicKey, Transaction, VersionedTransaction, Keypair } from "@solana/web3.js";
@@ -187,7 +187,7 @@ function useUserData(): UserData | null {
 
 export function useWallet() {
   const { isAuthenticated, publicKey: pubKeyStr, email, logout, connectWallet } = useAuth();
-  const sdkWallet = useSdkWallet();
+  const signer = useSigner();
   const external = useExternalWallet();             // Phantom / Solflare / Backpack
   const userData = useUserData();
 
@@ -215,22 +215,22 @@ export function useWallet() {
       if (external.signTransaction) return external.signTransaction(tx);
       if (!embeddedFunds) throw new Error("No wallet available to sign");
       // Decrypt → sign → drop the secret. Tight lifetime.
-      return sdkWallet.sign(embeddedFunds, () => {
-        const kp = sdkWallet.solanaKeypair(embeddedFunds);
+      return signer.sign(embeddedFunds, () => {
+        const kp = signer.solanaKeypair(embeddedFunds);
         if (tx instanceof Transaction) tx.partialSign(kp);
         else tx.sign([kp]);
         return tx;
       });
     };
-  }, [external.signTransaction, embeddedFunds, sdkWallet]);
+  }, [external.signTransaction, embeddedFunds, signer]);
 
   const signAllTransactions = useMemo(() => {
     return async <T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]> => {
       if (external.signAllTransactions) return external.signAllTransactions(txs);
       if (!embeddedFunds) throw new Error("No wallet available to sign");
       // One decrypt for the whole batch — same as Privy's batch behavior.
-      return sdkWallet.sign(embeddedFunds, () => {
-        const kp = sdkWallet.solanaKeypair(embeddedFunds);
+      return signer.sign(embeddedFunds, () => {
+        const kp = signer.solanaKeypair(embeddedFunds);
         for (const tx of txs) {
           if (tx instanceof Transaction) tx.partialSign(kp);
           else tx.sign([kp]);
@@ -238,7 +238,7 @@ export function useWallet() {
         return txs;
       });
     };
-  }, [external.signAllTransactions, embeddedFunds, sdkWallet]);
+  }, [external.signAllTransactions, embeddedFunds, signer]);
 
   // `login` opens your auth modal in the consuming app. Replace with a real call.
   const login = () => {
@@ -373,13 +373,13 @@ Replace with a **local reveal** — you decrypt the embedded wallet's encrypted 
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuth, useWallet } from "@tetrac/login-sdk/react";
+import { useAuth, useSigner } from "@tetrac/login-sdk/react";
 import { authHeaders } from "@tetrac/login-sdk/client";
 import type { UserData, EncryptedWallet } from "@tetrac/login-sdk/core";
 
 export default function ExportKeyPage() {
   const { isAuthenticated, status } = useAuth();
-  const { unlocked, sign } = useWallet();
+  const { unlocked, sign } = useSigner();
   const [user, setUser] = useState<UserData | null>(null);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -454,10 +454,10 @@ export default function ExportKeyPage() {
 }
 ```
 
-For `Profile.tsx` — the same logic, just inline. Replace the existing `useExportWallet` import + `handleExportWallet` body with the `useWallet().sign(walletBlob, secret => secret)` pattern. The `isEmbeddedWallet` / `walletClientName` props already come through the new `useAuthWallet` hook, so the surrounding UI doesn't change.
+For `Profile.tsx` — the same logic, just inline. Replace the existing `useExportWallet` import + `handleExportWallet` body with the `useSigner().sign(walletBlob, secret => secret)` pattern. The `isEmbeddedWallet` / `walletClientName` props already come through the new `useAuthWallet` hook, so the surrounding UI doesn't change.
 
 Key UX differences from Privy worth surfacing in your UI:
-- Privy's reveal modal forces a re-auth ceremony. The SDK's `useWallet().sign(...)` will succeed silently if the app key is hot in `sessionStorage`. For the reveal flow specifically, consider calling `logout()` + force re-auth first if you want the same friction.
+- Privy's reveal modal forces a re-auth ceremony. The SDK's `useSigner().sign(...)` will succeed silently if the app key is hot in `sessionStorage`. For the reveal flow specifically, consider calling `logout()` + force re-auth first if you want the same friction.
 - Privy's iframe sandbox protected the plaintext from XSS. With the SDK, an XSS in your page can read `revealed`. Treat the reveal route as security-sensitive (strong CSP, no untrusted third-party scripts on that route).
 
 ### Step 6 — Sweep the remaining files

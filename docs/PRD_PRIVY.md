@@ -88,51 +88,57 @@ For each capability: **Privy** (how it appears in code) → **tetrac today** (wh
 - **Privy:** `useWallets()` (root + `/solana`) returns the wallet list directly; `usePrivy().user`
   carries `linkedAccounts`. Everything you need to render "you are 0xABC…" is in a hook, already
   loaded.
-- **tetrac today:** `useAuth()` gives `publicKey` (a string, from `sessionStorage`) and `email`,
-  but **the wallet list is not in context**. To get wallets, each app must `fetch('/api/auth/user-data')`
-  itself. In Shyft's migration the app had to hand-write a `useUserData()` hook *and* the
-  external-vs-embedded "which wallet wins" selection — glue that every consumer will otherwise
-  duplicate.
-- **Recommended design:** **adopt Privy's shape here.** Move the `user-data` fetch + cache into
-  `AuthProvider` (refetch on auth change, expose via context), and ship:
-  - `useUser()` → `{ user: UserData | null, loading, refetch }`
-  - `useWallets()` → the wallet list (embedded funds/signing + any connected external), each entry
-    `{ chain, role, address, isEmbedded }`
-  - `useActiveWallet()` → the single wallet the app should sign/display with, applying the
-    "external connected wins, else embedded funds" rule **inside the SDK** (today every app
-    reimplements it).
+- **tetrac today:** **closed.** `AuthProvider` now owns the `/user-data` fetch+cache, auto-refetches
+  on auth status change, and exposes the user record through context. Shipped hooks:
+  - `useUser()` → `{ user: UserData | null, loading, refetch }` (`src/react/useUser.ts`)
+  - `useWallets()` → `WalletEntry[]` — `{ chain, role, address, isEmbedded, encrypted }`. Embedded
+    entries carry the `EncryptedWallet` blob; external entries set `encrypted: null` so the
+    consumer routes signing through their wallet adapter. (`src/react/useWallets.ts`)
+  - `useActiveWallet({ chain? = "solana" })` → `WalletEntry | null`. Applies the
+    "external connected wins, else embedded funds" rule inside the SDK. (`src/react/useActiveWallet.ts`)
+- **External wallet integration:** the SDK does not import `@solana/wallet-adapter-react` (that
+  would re-create Privy-style RPC/adapter centralization — see §2.1). Instead, `<AuthProvider>`
+  takes an `externalSolanaAddress?: string | null` prop; the app pipes Phantom/Backpack's
+  connected address in via a thin bridge component. `useActiveWallet()` then applies the
+  external-wins rule using that prop.
 
-  This is the highest-leverage change: it turns ~80 lines of per-app glue (the Shyft
-  `usePrivyWallet.ts` shim) into SDK surface.
+  Net effect: the ~180-line Shyft `usePrivyWallet.ts` shim (user-data fetch, active selection,
+  signer envelope) collapses into `useActiveWallet()` + `useSolanaSigner()` calls in app code.
 
 ### 2.5 Signing transactions & messages
 
 - **Privy:** the wallet object from `useWallets()/solana` exposes
   `signTransaction({ transaction: bytes }) → { signedTransaction: bytes }` (and a variadic batch
   form). The app never touches the key.
-- **tetrac today:** `useWallet()` (`src/react/useWallet.ts`) exposes low-level primitives —
+- **tetrac today:** `useSigner()` (`src/react/useSigner.ts`) exposes low-level primitives —
   `decrypt`, `solanaKeypair`, `sign(blob, fn)` — built on `withDecryptedKey` (`src/client/wallet.ts`),
   which decrypts only for the callback's lifetime then drops the reference. Correct and secure, but
   **the app must assemble the actual `signTransaction(tx)` itself** (deserialize → `partialSign` →
-  reserialize), as the Shyft shim does.
+  reserialize), as the Shyft shim does. (The hook was previously named `useWallet()`; renamed to
+  free `useWallets()` for the wallet-list hook in §2.4.)
 - **Recommended design:** keep the low-level `withDecryptedKey`/`sign` primitives (they're the
-  security-critical core), but **add ready-made signers** so apps don't rebuild the envelope:
-  - `useSolanaSigner()` → `{ signTransaction(tx), signAllTransactions(txs), signMessage(msg) }`
-    in `@solana/wallet-adapter-react` shape (drops straight into Anchor's `AnchorProvider`).
-  - An EVM equivalent (`useEvmSigner()` → a viem `Account`/wallet client) for parity with Privy's
-    EVM embedded wallet.
+  security-critical core), and layer **ready-made high-level signers on top** so apps don't rebuild
+  the envelope. **Shipped:**
+  - `useSolanaSigner(wallet)` → `{ publicKey, signTransaction, signAllTransactions, signMessage }`
+    in `@solana/wallet-adapter-react` / Anchor `Wallet` shape — drops straight into
+    `AnchorProvider`. Each signing call routes through `withDecryptedKey` and zeroes the secret
+    bytes on completion. (`src/react/useSolanaSigner.ts`)
+  - `useEvmSigner(wallet)` → a viem `LocalAccount` (via `toAccount`) whose `signMessage` /
+    `signTransaction` / `signTypedData` each go through `withDecryptedKey`. Plugs into
+    `createWalletClient({ account })`, wagmi custom connectors, etc. (`src/react/useEvmSigner.ts`)
 
-  **Naming fix:** the current `useWallet()` (singular) returns *sign helpers*, while the proposed
-  `useWallets()` returns a *list* — a collision waiting to happen. Rename the current hook to
-  `useVault()` or `useSigner()` and reserve `useWallet(s)` for the wallet-access hooks in 2.4.
+  Naming is collision-free: `useSigner()` returns low-level primitives,
+  `useSolanaSigner()` / `useEvmSigner()` return ready-made chain-specific signers, and
+  `useWallet(s)` is reserved for the wallet-access hooks in §2.4. Both new hooks take an explicit
+  `EncryptedWallet` argument today; once §2.4 lands they can default to `useActiveWallet()`.
 
 ### 2.6 Exporting / revealing a private key
 
 - **Privy:** `useExportWallet().exportWallet({ address })` pops Privy's **hosted reveal iframe** —
   the app never sees plaintext (XSS-isolated by the sandbox). This is the working flow in
   `Shyft.lol/src/app/export-key/page.tsx` today.
-- **tetrac today:** no export hook; the app calls `useWallet().sign(blob, secret => secret)` to get
-  the plaintext and renders it itself (the pattern documented in the migration skill).
+- **tetrac today:** no export hook; the app calls `useSigner().sign(blob, secret => secret)` to
+  get the plaintext and renders it itself (the pattern documented in the migration skill).
 - **Recommended design:** ship a first-class `useExportKey()` →
   `{ reveal(): Promise<string>, clear() }` that wraps `withDecryptedKey`, plus an **optional**
   `<ExportKeyPanel>` (in `@tetrac/login-sdk/ui`) that handles the reveal/copy/auto-clear/timeout UX
@@ -201,14 +207,14 @@ Concrete module shape that closes the gaps above. Additive — no breaking chang
 
 ```
 src/react/
-  AuthProvider.tsx     // EXTEND: also fetch+cache UserData; track activeWallet
-  useAuth.ts           // unchanged: status + auth actions
-  useUser.ts           // NEW: { user, loading, refetch } — wraps the cached user-data fetch
-  useWallets.ts        // NEW: list of {chain, role, address, isEmbedded}
-  useActiveWallet.ts   // NEW: the one wallet to sign/display with (external-wins rule lives here)
-  useSolanaSigner.ts   // NEW: { signTransaction, signAllTransactions, signMessage } (adapter-shaped)
-  useEvmSigner.ts      // NEW: viem account/wallet-client signer
-  useVault.ts          // RENAME of today's useWallet: low-level decrypt/sign/keypair primitives
+  AuthProvider.tsx     // EXISTS: also fetches+caches UserData; accepts externalSolanaAddress prop
+  useAuth.ts           // EXISTS: status + auth actions
+  useUser.ts           // EXISTS: { user, loading, refetch } — reads the cached user-data fetch
+  useWallets.ts        // EXISTS: list of {chain, role, address, isEmbedded, encrypted}
+  useActiveWallet.ts   // EXISTS: the one wallet to sign/display with (external-wins rule lives here)
+  useSolanaSigner.ts   // EXISTS: { publicKey, signTransaction, signAllTransactions, signMessage } (adapter-shaped)
+  useEvmSigner.ts      // EXISTS: viem LocalAccount over withDecryptedKey
+  useSigner.ts         // EXISTS (renamed from useWallet): low-level decrypt/sign/keypair primitives
   useExportKey.ts      // NEW: { reveal, clear } over withDecryptedKey
 
 src/ui/                // NEW, optional entry: "@tetrac/login-sdk/ui" (tree-shakeable)
@@ -227,12 +233,15 @@ login modal becomes `<LoginPanel>` (or stays custom if the app wants).
 
 1. **Ship a UI package?** (§2.2/§2.6) Recommended yes, as an optional `@tetrac/login-sdk/ui`
    entry. Confirms the project is willing to own login + reveal UX, not just primitives.
-2. **Rename `useWallet` → `useVault`/`useSigner`?** (§2.5) Needed to free `useWallets()` for the
-   wallet-list hook; it's a breaking rename for current consumers (next-ttc) — coordinate a major bump.
-3. **Provider owns the user-data fetch?** (§2.4) Recommended yes. Decide cache/refetch policy
-   (on auth change + manual `refetch`, or also on window focus).
-4. **EVM signer parity?** (§2.5) Privy auto-creates an EVM (Base) wallet; tetrac generates it via
-   `walletGen.evm` but ships no EVM signer hook. Build one only if downstream apps need EVM signing.
+2. ~~**Rename `useWallet` → `useVault`/`useSigner`?**~~ **Done** (§2.5) — renamed to `useSigner` to
+   free `useWallets()` for the wallet-list hook. Breaking change for current consumers (next-ttc);
+   coordinate the bump when they upgrade.
+3. ~~**Provider owns the user-data fetch?**~~ **Done** (§2.4) — `AuthProvider` fetches on auth
+   change, exposes through `useUser()`/`useWallets()`/`useActiveWallet()`. Cache policy: refetch
+   on `status === "authenticated"` and on manual `refetch()`; no window-focus refetch (apps that
+   want it can `useEffect(() => refetch(), [windowFocus])`).
+4. ~~**EVM signer parity?**~~ **Done** (§2.5) — `useEvmSigner()` ships a viem `LocalAccount` over
+   `withDecryptedKey`, matching the Solana parity. Apps wire it into their own viem/wagmi clients.
 5. **Keep RPC out of the provider?** (§2.1) Recommended yes — confirms we don't replicate Privy's
    RPC centralization.
 

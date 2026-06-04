@@ -48,7 +48,7 @@ browser bundles — always import from the most specific subpath:
 | `@tetrac/login-sdk/client` | browser | wallet gen, sessions, WebAuthn, `AuthClient` |
 | `@tetrac/login-sdk/server` | server | route factory, session verify, signature verify |
 | `@tetrac/login-sdk/storage` | server | `StorageAdapter` + Redis/KV/Upstash adapters |
-| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useWallet` |
+| `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner` |
 | `@tetrac/login-sdk/next` | server | `createNextAuthRoutes` |
 
 ---
@@ -300,11 +300,11 @@ export function BiometricLogin() {
 
 ```tsx
 "use client";
-import { useAuth, useWallet } from "@tetrac/login-sdk/react";
+import { useAuth, useSigner } from "@tetrac/login-sdk/react";
 
 export function Session() {
   const { status, publicKey, email, isAuthenticated, logout } = useAuth();
-  const { unlocked } = useWallet();
+  const { unlocked } = useSigner();
   if (!isAuthenticated) return <p>Not signed in.</p>;
   return (
     <div>
@@ -321,6 +321,82 @@ export function Session() {
 - `session_expired` — token + public key present, app key missing (tab was
   reloaded after closing all tabs; wallets can't be decrypted until re-auth).
 - `unauthenticated` — nothing.
+
+### Loaded wallets (`useUser`, `useWallets`, `useActiveWallet`)
+
+Once `<AuthProvider>` is mounted, it fetches `/api/auth/user-data` whenever the
+session becomes authenticated and caches the result. Three hooks read it:
+
+```tsx
+"use client";
+import { useUser, useWallets, useActiveWallet } from "@tetrac/login-sdk/react";
+
+function WalletList() {
+  const { user, loading, refetch } = useUser();
+  const wallets = useWallets();        // every wallet, embedded + external
+  const active = useActiveWallet();    // the one to sign/display with (Solana by default)
+
+  if (loading) return <p>Loading wallets…</p>;
+  if (!user) return null;
+
+  return (
+    <div>
+      <p>Active: {active?.address} ({active?.isEmbedded ? "embedded" : "external"})</p>
+      <ul>
+        {wallets.map((w) => (
+          <li key={`${w.chain}:${w.address}`}>{w.chain}/{w.role} — {w.address}</li>
+        ))}
+      </ul>
+      <button onClick={refetch}>Refetch</button>
+    </div>
+  );
+}
+```
+
+- `useUser()` → `{ user: UserData | null, loading, refetch }`. Auto-refetches on
+  login/logout; call `refetch()` after a mutation (e.g. `importWallet`).
+- `useWallets()` → `WalletEntry[]` — `{ chain, role, address, isEmbedded, encrypted }`.
+  Embedded entries carry the `EncryptedWallet` blob; external entries set `encrypted: null`.
+- `useActiveWallet({ chain? = "solana" })` → the single wallet to sign with for that chain.
+  External-connected-wins rule for Solana; embedded `funds` otherwise.
+
+**Wiring an external Solana wallet (Phantom/Backpack/etc.):** the SDK doesn't
+depend on `@solana/wallet-adapter-react` — pipe the connected address in via
+the `externalSolanaAddress` prop:
+
+```tsx
+"use client";
+import { useWallet as useSolanaWallet } from "@solana/wallet-adapter-react";
+import { AuthProvider } from "@tetrac/login-sdk/react";
+
+function AuthBridge({ children }: { children: React.ReactNode }) {
+  const external = useSolanaWallet();
+  return (
+    <AuthProvider
+      apiBaseUrl="/api/auth"
+      walletGen={{ solana: ["funds"] }}
+      externalSolanaAddress={external.publicKey?.toBase58() ?? null}
+    >
+      {children}
+    </AuthProvider>
+  );
+}
+```
+
+When `externalSolanaAddress` is set, `useActiveWallet()` returns that address
+with `isEmbedded: false` and `encrypted: null` — sign through the external
+adapter, not via `useSolanaSigner` (which only handles embedded blobs). Compose
+the two:
+
+```tsx
+const active = useActiveWallet();
+const embeddedSigner = useSolanaSigner(active?.encrypted ?? null);
+const externalSigner = useSolanaWallet();
+
+const signTransaction = active?.isEmbedded
+  ? embeddedSigner?.signTransaction
+  : externalSigner.signTransaction;
+```
 
 ---
 
@@ -526,7 +602,7 @@ const res = await fetch("/api/portfolio", { headers: authHeaders() });
 ```
 
 > The server never sees `appKey` and can never decrypt user wallets. Anything
-> that needs to spend funds must happen client-side using `useWallet` (or the
+> that needs to spend funds must happen client-side using `useSigner` (or the
 > `withDecryptedKey` helper).
 
 ---
@@ -568,9 +644,9 @@ flattenBundle(bundle);              // EncryptedWallet[] — safe to POST
 
 ```ts
 import { Transaction } from "@solana/web3.js";
-import { useWallet } from "@tetrac/login-sdk/react";
+import { useSigner } from "@tetrac/login-sdk/react";
 
-const { solanaKeypair, sign } = useWallet();
+const { solanaKeypair, sign } = useSigner();
 
 // Cheap: reconstruct a Keypair for a quick signature.
 const kp = solanaKeypair(user.wallets.find((w) => w.chain === "solana" && w.role === "signing")!);
@@ -588,9 +664,9 @@ await sign(signingWallet, async (secretHex) => {
 
 ```ts
 import { privateKeyToAccount } from "viem/accounts";
-import { useWallet } from "@tetrac/login-sdk/react";
+import { useSigner } from "@tetrac/login-sdk/react";
 
-const { sign } = useWallet();
+const { sign } = useSigner();
 const evmSigning = user.wallets.find((w) => w.chain === "evm" && w.role === "signing")!;
 
 const signature = await sign(evmSigning, async (pkHex) => {
@@ -602,6 +678,56 @@ const signature = await sign(evmSigning, async (pkHex) => {
 `withDecryptedKey` / `sign` drop the in-memory secret string as soon as the
 callback returns. Keep the callback tight — don't `await` long-running
 network calls while holding the decrypted key.
+
+### High-level signers (`useSolanaSigner`, `useEvmSigner`)
+
+The hooks above are the security-critical core. For most app code you want
+ready-made signer objects that match the conventions of the rest of the
+ecosystem — drop them into Anchor, viem, wagmi, etc., and forget about the
+decrypt envelope.
+
+**Solana — `@solana/wallet-adapter-react` shape:**
+
+```tsx
+"use client";
+import { useSolanaSigner } from "@tetrac/login-sdk/react";
+import { AnchorProvider, Program } from "@coral-xyz/anchor";
+import { Connection } from "@solana/web3.js";
+
+function useMyProgram(walletBlob, connection: Connection) {
+  const signer = useSolanaSigner(walletBlob);   // null until session unlocks
+  if (!signer) return null;
+  const provider = new AnchorProvider(connection, signer, { commitment: "confirmed" });
+  return new Program(IDL, provider);
+}
+```
+
+Returns `{ publicKey, signTransaction, signAllTransactions, signMessage }` —
+the same shape Anchor's `Wallet` interface and the Solana wallet adapter
+expect. Each signing call decrypts the secret, signs, and zeroes the secret
+bytes before returning.
+
+**EVM — viem `LocalAccount`:**
+
+```tsx
+"use client";
+import { useEvmSigner } from "@tetrac/login-sdk/react";
+import { createWalletClient, http } from "viem";
+import { base } from "viem/chains";
+
+function useViemClient(walletBlob) {
+  const account = useEvmSigner(walletBlob);   // null until session unlocks
+  if (!account) return null;
+  return createWalletClient({ account, chain: base, transport: http() });
+}
+```
+
+The returned `LocalAccount` plugs straight into `createWalletClient`, wagmi's
+custom-connector pattern, or anywhere a viem account is accepted. RPC/chain
+config stays in your app — the SDK only owns the signer.
+
+Both hooks return `null` when no wallet is passed in or the session is locked,
+so you can render conditionally without extra guards.
 
 ---
 

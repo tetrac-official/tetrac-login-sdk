@@ -113,7 +113,7 @@ adapters and React/Next bindings are optional.
 │                  route handler factories, token validation
 ├── /storage     → StorageAdapter interface + RedisAdapter (ioredis) + KVAdapter (@vercel/kv)
 │                  + UpstashAdapter (@upstash/redis)
-├── /react       → hooks (useAuth, useWallet, useAuthState) + headless components
+├── /react       → hooks (useAuth, useSigner, useAuthState) + headless components
 └── /next        → App Router route-handler factory, middleware helper
 ```
 
@@ -243,7 +243,7 @@ const { status, user, loginWithEmail, loginWithWallet, loginWithBiometric, logou
 ```
 
 - `useAuth()` — exposes the `authenticated | session_expired | unauthenticated` status model + actions.
-- `useWallet()` — access generated wallet bundle + decrypt-to-sign helpers.
+- `useSigner()` — decrypt-to-sign helpers (`decrypt`, `solanaKeypair`, `sign`) over the in-session app key.
 - Headless components (`<LoginGate>`, `<RegisterFlow>`, `<PasskeyPrompt>`) port the existing TTC popups
   as styling-agnostic primitives; the current branded versions ship as examples.
 
@@ -306,7 +306,7 @@ UPSTASH_REDIS_REST_TOKEN=...
 | **M2 — Storage adapters** | Redis / Vercel KV / Upstash adapters behind `StorageAdapter`, auto-resolve |
 | **M3 — Server** | Route-handler factory for all endpoints, challenge/signature/session, rate limiting, `verifySession` |
 | **M4 — WebAuthn/biometric** | PRF + gate modes, IndexedDB credential store, registration + re-login |
-| **M5 — React/Next bindings** | `AuthProvider`, `useAuth`/`useWallet`, headless components, Next route factory |
+| **M5 — React/Next bindings** | `AuthProvider`, `useAuth`/`useSigner`, headless components, Next route factory |
 | **M6 — Docs + example app** | README, API docs, runnable example wiring all three flows |
 | **M7 (follow-up)** | Migrate `next-ttc` to consume the SDK; deprecate in-app copies |
 

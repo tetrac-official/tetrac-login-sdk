@@ -7,7 +7,7 @@ import {
   hashPasskey,
 } from "../core/crypto.js";
 import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
-import type { AuthResult, WalletRole } from "../core/types.js";
+import type { AuthResult, UserData, WalletRole } from "../core/types.js";
 import { generateWalletBundle, flattenBundle } from "./wallet.js";
 import { setSession, clearSession, authHeaders } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
@@ -59,6 +59,15 @@ export class AuthClient {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data as { error?: string }).error ?? `Request failed (${res.status})`);
     return data as T;
+  }
+
+  /** Fetch the authenticated user's full record (identity + encrypted wallets). */
+  async fetchUserData(): Promise<UserData | null> {
+    const res = await fetch(`${this.opts.apiBaseUrl}/user-data`, { headers: authHeaders() });
+    if (res.status === 401) return null;
+    if (!res.ok) throw new Error(`user-data failed (${res.status})`);
+    const data = (await res.json().catch(() => ({}))) as { user?: UserData };
+    return data.user ?? null;
   }
 
   // --- Email + passkey ---

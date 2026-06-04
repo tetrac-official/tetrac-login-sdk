@@ -4,7 +4,7 @@ import { getAppKey } from "../client/session.js";
 import { decryptWalletSecret, toSolanaKeypair, withDecryptedKey } from "../client/wallet.js";
 import type { EncryptedWallet } from "../core/types.js";
 
-export function useWallet() {
+export function useSigner() {
   const appKey = getAppKey();
 
   const decrypt = useCallback(
