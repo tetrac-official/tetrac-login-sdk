@@ -1,9 +1,16 @@
-// Reveal-a-private-key hook. Wraps withDecryptedKey so the decrypted secret
-// lives only as long as the consumer holds it in state — `clear()` releases
-// the React reference. The SDK can't truly zero a JS string, so the auxiliary
-// UX (auto-clear timeout, clipboard timeout, CSP) ships in <ExportKeyPanel>.
+// Reveal-a-private-key hook.
+//
+// SECURITY (PRD §10 "Re-auth to reveal", docs/PRD_HOTFIX.md): reveal ALWAYS runs
+// a fresh re-authentication ceremony and derives a one-time key — it never reads
+// the ambient (possibly hot) session app key. That means a reveal cannot happen
+// silently, and repeated Reveal → Hide → Reveal each require credentials again.
+//
+// The decrypted secret lives in React state only as long as the consumer holds
+// it; `clear()` (or the auto-clear timer) releases it. JS strings can't be truly
+// zeroed, so <ExportKeyPanel> keeps the window tight (auto-clear + clipboard wipe).
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSigner } from "./useSigner.js";
+import { useAuthContext } from "./AuthProvider.js";
+import type { ReauthCredentials } from "../client/authClient.js";
 import type { EncryptedWallet } from "../core/types.js";
 
 export interface UseExportKeyOptions {
@@ -15,8 +22,11 @@ export interface UseExportKeyOptions {
 }
 
 export interface UseExportKeyResult {
-  /** Decrypts the wallet secret, stores it in state, and returns it. */
-  reveal: () => Promise<string>;
+  /**
+   * Run a re-auth ceremony and reveal the wallet's plaintext secret. Requires
+   * credentials every time — there is no silent path.
+   */
+  reveal: (reauth: ReauthCredentials) => Promise<string>;
   /** Drops the plaintext from state. */
   clear: () => void;
   /** Currently revealed plaintext, or null. */
@@ -31,7 +41,7 @@ export function useExportKey(
   wallet: EncryptedWallet | null | undefined,
   options: UseExportKeyOptions = {},
 ): UseExportKeyResult {
-  const { sign, unlocked } = useSigner();
+  const { client } = useAuthContext();
   const { autoClearMs } = options;
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -44,32 +54,31 @@ export function useExportKey(
     setError(null);
   }, []);
 
-  const reveal = useCallback(async (): Promise<string> => {
-    if (!wallet) {
-      const err = new Error("useExportKey: no wallet provided");
-      setError(err);
-      throw err;
-    }
-    if (!unlocked) {
-      const err = new Error("Session locked — sign in again to decrypt");
-      setError(err);
-      throw err;
-    }
-    const mySeq = ++revealSeq.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const secret = await sign(wallet, (s) => s);
-      if (mySeq === revealSeq.current) setPlaintext(secret);
-      return secret;
-    } catch (e) {
-      const err = e instanceof Error ? e : new Error(String(e));
-      if (mySeq === revealSeq.current) setError(err);
-      throw err;
-    } finally {
-      if (mySeq === revealSeq.current) setLoading(false);
-    }
-  }, [wallet, unlocked, sign]);
+  const reveal = useCallback(
+    async (reauth: ReauthCredentials): Promise<string> => {
+      if (!wallet) {
+        const err = new Error("useExportKey: no wallet provided");
+        setError(err);
+        throw err;
+      }
+      const mySeq = ++revealSeq.current;
+      setLoading(true);
+      setError(null);
+      try {
+        // One-time derive + decrypt behind a fresh ceremony. Does NOT arm the session.
+        const secret = await client.revealSecret(wallet, reauth);
+        if (mySeq === revealSeq.current) setPlaintext(secret);
+        return secret;
+      } catch (e) {
+        const err = e instanceof Error ? e : new Error(String(e));
+        if (mySeq === revealSeq.current) setError(err);
+        throw err;
+      } finally {
+        if (mySeq === revealSeq.current) setLoading(false);
+      }
+    },
+    [wallet, client],
+  );
 
   // Auto-clear timeout. Resets whenever a fresh plaintext is revealed.
   useEffect(() => {

@@ -7,10 +7,22 @@ import {
   hashPasskey,
 } from "../core/crypto.js";
 import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
-import type { AuthResult, UserData, WalletRole } from "../core/types.js";
-import { generateWalletBundle, flattenBundle } from "./wallet.js";
-import { setSession, clearSession, authHeaders } from "./session.js";
+import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
+import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
+import { setSession, clearSession, authHeaders, armAppKey, getEmail, configureVault } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
+
+/**
+ * Credentials for a re-authentication ceremony (unlock or reveal). Exactly one
+ * shape is supplied, matching the account's auth method:
+ *  - email:     { passkey }      (email is read from the session)
+ *  - wallet:    { signMessage }  (re-signs the fixed app-key message)
+ *  - biometric: { registration } (fresh WebAuthn assertion → PRF secret)
+ */
+export type ReauthCredentials =
+  | { passkey: string }
+  | { signMessage: (message: Uint8Array) => Promise<Uint8Array> }
+  | { registration: PasskeyRegistration };
 
 export interface WalletGenConfig {
   solana?: WalletRole[];
@@ -48,6 +60,67 @@ export class AuthClient {
   constructor(private readonly opts: AuthClientOptions) {
     this.config = resolveConfig(opts.config);
     this.walletGen = opts.walletGen ?? DEFAULT_WALLET_GEN;
+    // Apply the auto-lock / storage policy to the vault (idempotent).
+    configureVault({
+      autoLockMs: this.config.autoLockMs,
+      storageMode: this.config.appKeyStorage,
+      lockOnHide: this.config.lockOnHide,
+    });
+  }
+
+  // --- Re-authentication (unlock + reveal) ---
+
+  /**
+   * Re-derive the app key from a fresh ceremony — WITHOUT mutating the session.
+   * Used by both unlock() (which then arms it) and revealSecret() (which uses it
+   * once and discards it).
+   */
+  async deriveAppKey(creds: ReauthCredentials): Promise<string> {
+    if ("passkey" in creds) {
+      const email = getEmail();
+      if (!email) throw new Error("No email in session for passkey re-auth");
+      return deriveAppKeyFromPasskey(creds.passkey, email, this.config.pbkdf2Iterations);
+    }
+    if ("signMessage" in creds) {
+      const sig = await creds.signMessage(new TextEncoder().encode(walletAppKeyMessage()));
+      return deriveAppKeyFromSignature(bytesToHex(sig));
+    }
+    if ("registration" in creds) {
+      return derivePasskeySecret(creds.registration);
+    }
+    throw new Error("Invalid re-auth credentials");
+  }
+
+  /**
+   * Unlock the vault: re-run the ceremony, optionally validate by decrypting a
+   * known wallet, then arm the app key (restarting the auto-lock window). This is
+   * how an app re-enables signing after an auto-lock.
+   */
+  async unlock(creds: ReauthCredentials, validateWith?: EncryptedWallet): Promise<void> {
+    const appKey = await this.deriveAppKey(creds);
+    if (validateWith) {
+      try {
+        decryptWalletSecret(validateWith, appKey);
+      } catch {
+        throw new Error("Re-authentication failed — wrong credentials");
+      }
+    }
+    armAppKey(appKey);
+  }
+
+  /**
+   * Reveal a single wallet's plaintext secret behind a fresh ceremony. Derives a
+   * one-time key, decrypts, and returns the plaintext — it does NOT arm the
+   * session, so a reveal never silently extends the signing window. This is the
+   * "Re-auth to reveal" guarantee (PRD §10).
+   */
+  async revealSecret(wallet: EncryptedWallet, creds: ReauthCredentials): Promise<string> {
+    const appKey = await this.deriveAppKey(creds);
+    try {
+      return decryptWalletSecret(wallet, appKey);
+    } catch {
+      throw new Error("Re-authentication failed — wrong credentials");
+    }
   }
 
   private async post<T>(path: string, body: unknown, withAuth = false): Promise<T> {

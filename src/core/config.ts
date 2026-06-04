@@ -36,6 +36,24 @@ export interface AuthConfig {
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
   webauthn: WebAuthnConfig;
+  /**
+   * Idle window (ms) before the in-browser app key auto-locks. After it locks,
+   * signing throws VaultLockedError and the user must re-authenticate. Default 15s.
+   */
+  autoLockMs: number;
+  /**
+   * Where the app key is held while unlocked:
+   *  - "session": memory + sessionStorage (survives reload within the tab; default)
+   *  - "memory":  memory only (reload ⇒ re-auth; storage-scraping XSS finds nothing)
+   */
+  appKeyStorage: "session" | "memory";
+  /** Lock the vault when the tab becomes hidden. Default true. */
+  lockOnHide: boolean;
+  /**
+   * Revealing a plaintext private key always requires a fresh re-auth ceremony,
+   * never the ambient session key. Default true. (Reserved — v1 always re-auths.)
+   */
+  revealRequiresReauth: boolean;
 }
 
 export const DEFAULT_CONFIG: AuthConfig = {
@@ -57,6 +75,10 @@ export const DEFAULT_CONFIG: AuthConfig = {
     rpName: "TTC",
     preferPrf: true,
   },
+  autoLockMs: 15_000,
+  appKeyStorage: "session",
+  lockOnHide: true,
+  revealRequiresReauth: true,
 };
 
 /** Merge a partial override onto the defaults (shallow per top-level group). */

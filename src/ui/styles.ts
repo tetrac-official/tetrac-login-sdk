@@ -113,6 +113,15 @@ export function buildExportKeyStyles(
     },
     title: { fontSize: 20, fontWeight: 600, margin: 0 },
     description: { fontSize: 13, color: "#52525b", lineHeight: 1.5, margin: 0 },
+    input: {
+      width: "100%",
+      padding: "12px 14px",
+      borderRadius: radius,
+      border: "1px solid #d4d4d8",
+      fontSize: 15,
+      outline: "none",
+      boxSizing: "border-box",
+    },
     button: baseButton,
     primaryButton: { ...baseButton, background: accent, color: "#ffffff", borderColor: accent },
     secretBlock: {

@@ -1,7 +1,7 @@
 // React context that wraps an AuthClient and tracks auth status + user data.
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AuthClient, type AuthClientOptions } from "../client/authClient.js";
-import { getAuthStatus, getPublicKey, getEmail } from "../client/session.js";
+import { getAuthStatus, getPublicKey, getEmail, subscribeLock } from "../client/session.js";
 import type { AuthStatus, UserData } from "../core/types.js";
 
 export interface AuthContextValue {
@@ -71,9 +71,15 @@ export function AuthProvider({ children, externalSolanaAddress = null, ...option
     refresh();
   }, [refresh]);
 
-  // Auto-fetch user-data when authenticated, clear when not.
+  // Re-read status whenever the vault locks/unlocks (auto-lock, manual lock,
+  // re-auth). This is what flips `status` to "session_expired" on auto-lock.
+  useEffect(() => subscribeLock(refresh), [refresh]);
+
+  // Fetch user-data whenever an account exists (token + public key), and keep it
+  // loaded across a LOCK — a locked session still knows who you are and needs the
+  // encrypted wallets for the re-auth ceremony. Only an actual logout clears it.
   useEffect(() => {
-    if (status === "authenticated") {
+    if (publicKey) {
       void refetchUser();
     } else {
       // Bump seq so any in-flight fetch is ignored on resolution.
@@ -81,7 +87,7 @@ export function AuthProvider({ children, externalSolanaAddress = null, ...option
       setUser(null);
       setUserLoading(false);
     }
-  }, [status, publicKey, refetchUser]);
+  }, [publicKey, refetchUser]);
 
   const value = useMemo<AuthContextValue>(
     () => ({

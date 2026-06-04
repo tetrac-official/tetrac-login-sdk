@@ -106,6 +106,7 @@ export type ExportKeyPanelSlot =
   | "root"
   | "title"
   | "description"
+  | "input"
   | "button"
   | "primaryButton"
   | "secretBlock"
@@ -154,6 +155,18 @@ export interface ExportKeyPanelProps {
   title?: React.ReactNode;
   /** Description / warning text shown above the reveal button. */
   description?: React.ReactNode;
+
+  /**
+   * Reveal ALWAYS requires a fresh re-auth ceremony. For a **biometric** account
+   * the panel needs the stored registration to run the WebAuthn assertion; pass
+   * it here (the app persists it after registerWithBiometric).
+   */
+  passkeyRegistration?: PasskeyRegistration | null;
+  /**
+   * For a **wallet** account, the panel needs to re-sign the fixed app-key
+   * message to re-derive the key. Provide the connected wallet's signMessage.
+   */
+  walletSignMessage?: (message: Uint8Array) => Promise<Uint8Array>;
 
   /** Class on the outer container. */
   className?: string;

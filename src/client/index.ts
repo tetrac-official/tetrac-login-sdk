@@ -16,6 +16,14 @@ export {
   getAppKey,
   getAuthStatus,
   authHeaders,
+  armAppKey,
+  touchVault,
+  lockVault,
+  isLocked,
+  subscribeLock,
+  configureVault,
+  VaultLockedError,
+  type AppKeyStorageMode,
 } from "./session.js";
 export {
   isBiometricAvailable,
@@ -28,4 +36,5 @@ export {
   createAuthClient,
   type AuthClientOptions,
   type WalletGenConfig,
+  type ReauthCredentials,
 } from "./authClient.js";

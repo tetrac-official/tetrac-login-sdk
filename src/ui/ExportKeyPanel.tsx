@@ -1,16 +1,17 @@
-// Safe-reveal UI for an encrypted private key. Self-custody means the
-// plaintext lands in the app's DOM (there's no Privy-style iframe sandbox),
-// so this panel owns the auxiliary UX that an app should NOT have to
-// re-implement: auto-clear timeout, clipboard auto-wipe, and the
-// React-Native-WebView postMessage contract.
+// Safe-reveal UI for an encrypted private key.
 //
-// Apps that don't import from `@tetrac/login-sdk/ui` pay nothing for it.
+// SECURITY (docs/PRD_HOTFIX.md): every reveal runs a fresh re-auth ceremony —
+// passkey (email), Face ID / Touch ID (biometric), or a wallet signature
+// (wallet). The plaintext is derived one-time from those credentials, never from
+// the ambient session key, so Reveal → Hide → Reveal asks again each time. The
+// panel also owns the auxiliary UX: auto-clear timeout, clipboard auto-wipe, and
+// the React-Native-WebView postMessage contract.
 //
-// XSS note: any script on this page can read the revealed text while it's
-// in state. Treat the reveal route as security-sensitive — strong CSP, no
-// untrusted third-party scripts.
+// XSS note: any script on this page can read the revealed text while it's in
+// state. Treat the reveal route as security-sensitive — strong CSP, no untrusted
+// third-party scripts.
 import React, { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
-import { useExportKey } from "@tetrac/login-sdk/react";
+import { useExportKey, useUser, type ReauthCredentials } from "@tetrac/login-sdk/react";
 import { buildExportKeyStyles } from "./styles.js";
 import type { ExportKeyPanelProps, ExportKeyPanelSlot } from "./types.js";
 
@@ -23,15 +24,13 @@ const DEFAULT_LABELS = {
   copied: "Copied",
   hide: "Hide",
   warning:
-    "Anyone with this key controls the wallet. Never share it. The view auto-clears after a minute.",
+    "Anyone with this key controls the wallet. Never share it. Revealing requires re-authentication; the view auto-clears after a minute.",
   cleared: "Hidden",
 };
 
-// Best-effort RN-WebView bridge. Matches Privy's reveal-flow contract so
-// existing mobile shells keep working when the SDK replaces Privy.
 type RNWebViewWindow = { ReactNativeWebView?: { postMessage: (msg: string) => void } };
 function postToRN(message: object): void {
-  const rn = (typeof window !== "undefined" ? (window as unknown as RNWebViewWindow).ReactNativeWebView : undefined);
+  const rn = typeof window !== "undefined" ? (window as unknown as RNWebViewWindow).ReactNativeWebView : undefined;
   if (rn) rn.postMessage(JSON.stringify(message));
 }
 
@@ -43,6 +42,8 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
     postToReactNativeWebView = true,
     title = "Export private key",
     description,
+    passkeyRegistration,
+    walletSignMessage,
     className,
     classNames,
     styles: stylesOverride,
@@ -64,15 +65,17 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
 
   const copy = { ...DEFAULT_LABELS, ...labels };
 
-  // Passing 0 disables the hook-level auto-clear; we still pass it through so
-  // the hook owns the timer (one source of truth).
+  // The account's auth method drives which ceremony we render.
+  const { user } = useUser();
+  const method = user?.authMethod ?? null;
+
   const { reveal, clear, plaintext, loading, error } = useExportKey(wallet, {
     autoClearMs: autoClearMs > 0 ? autoClearMs : undefined,
   });
 
+  const [passkey, setPasskey] = useState("");
   const [copiedFlash, setCopiedFlash] = useState(false);
 
-  // Notify callers when a reveal lands or fails.
   useEffect(() => {
     if (plaintext) onReveal?.(plaintext);
   }, [plaintext, onReveal]);
@@ -80,7 +83,6 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
     if (error) onError?.(error);
   }, [error, onError]);
 
-  // RN-WebView postMessage: fires on both success and the most recent error.
   useEffect(() => {
     if (!postToReactNativeWebView) return;
     if (plaintext) postToRN({ status: "success", privateKey: plaintext });
@@ -90,22 +92,24 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
     if (error) postToRN({ status: "error", error: error.message });
   }, [error, postToReactNativeWebView]);
 
-  const handleReveal = useCallback(async () => {
-    try {
-      await reveal();
-    } catch {
-      // The hook captures the error in state; we surface it inline below.
-    }
-  }, [reveal]);
+  // Run the ceremony for the active method and reveal.
+  const doReveal = useCallback(
+    async (creds: ReauthCredentials) => {
+      try {
+        await reveal(creds);
+        setPasskey(""); // never keep the typed passkey around after use
+      } catch {
+        // The hook captures the error in state; surfaced inline below.
+      }
+    },
+    [reveal],
+  );
 
   const handleCopy = useCallback(async () => {
     if (!plaintext) return;
     try {
       await navigator.clipboard.writeText(plaintext);
       setCopiedFlash(true);
-      // Best-effort: overwrite the clipboard after the configured delay. Only
-      // works while the page stays focused; we can't promise it but it's
-      // significantly better than leaving the key on the clipboard indefinitely.
       if (clipboardClearMs > 0) {
         setTimeout(() => {
           navigator.clipboard.writeText("").catch(() => {
@@ -118,12 +122,100 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
     }
   }, [plaintext, clipboardClearMs]);
 
-  // Briefly flash "Copied" then revert the button label.
   useEffect(() => {
     if (!copiedFlash) return;
     const t = setTimeout(() => setCopiedFlash(false), 1500);
     return () => clearTimeout(t);
   }, [copiedFlash]);
+
+  // --- Ceremony UI (shown until a plaintext is revealed) ---
+  function renderCeremony() {
+    if (!wallet) {
+      return (
+        <span className={classNames?.muted} style={styles.muted}>
+          No wallet to export.
+        </span>
+      );
+    }
+    if (!method) {
+      return (
+        <span className={classNames?.muted} style={styles.muted}>
+          Loading account…
+        </span>
+      );
+    }
+
+    if (method === "biometric") {
+      return (
+        <>
+          <button
+            type="button"
+            className={classNames?.primaryButton}
+            style={styles.primaryButton}
+            onClick={() => passkeyRegistration && doReveal({ registration: passkeyRegistration })}
+            disabled={loading || !passkeyRegistration}
+          >
+            {loading ? "…" : "Confirm with Face ID / Touch ID to reveal"}
+          </button>
+          {!passkeyRegistration ? (
+            <span className={classNames?.muted} style={styles.muted}>
+              Pass `passkeyRegistration` to enable biometric reveal.
+            </span>
+          ) : null}
+        </>
+      );
+    }
+
+    if (method === "wallet") {
+      return (
+        <>
+          <button
+            type="button"
+            className={classNames?.primaryButton}
+            style={styles.primaryButton}
+            onClick={() => walletSignMessage && doReveal({ signMessage: walletSignMessage })}
+            disabled={loading || !walletSignMessage}
+          >
+            {loading ? "…" : "Sign with your wallet to reveal"}
+          </button>
+          {!walletSignMessage ? (
+            <span className={classNames?.muted} style={styles.muted}>
+              Pass `walletSignMessage` to enable wallet reveal.
+            </span>
+          ) : null}
+        </>
+      );
+    }
+
+    // email (default): re-enter the passkey.
+    return (
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (passkey) void doReveal({ passkey });
+        }}
+        style={{ display: "flex", flexDirection: "column", gap: 8 }}
+      >
+        <input
+          type="password"
+          autoComplete="current-password"
+          placeholder="Enter your passkey to reveal"
+          value={passkey}
+          onChange={(e) => setPasskey(e.target.value)}
+          className={classNames?.input}
+          style={styles.input}
+        />
+        <button
+          type="submit"
+          className={classNames?.primaryButton}
+          style={styles.primaryButton}
+          disabled={loading || !passkey}
+        >
+          {loading ? "…" : copy.reveal}
+        </button>
+      </form>
+    );
+  }
 
   return (
     <div
@@ -147,35 +239,17 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
       ) : null}
 
       {!plaintext ? (
-        <button
-          type="button"
-          className={classNames?.primaryButton}
-          style={styles.primaryButton}
-          onClick={handleReveal}
-          disabled={loading || !wallet}
-        >
-          {loading ? "…" : copy.reveal}
-        </button>
+        renderCeremony()
       ) : (
         <>
           <div className={classNames?.secretBlock} style={styles.secretBlock}>
             {plaintext}
           </div>
           <div className={classNames?.actions} style={styles.actions}>
-            <button
-              type="button"
-              className={classNames?.button}
-              style={styles.button}
-              onClick={handleCopy}
-            >
+            <button type="button" className={classNames?.button} style={styles.button} onClick={handleCopy}>
               {copiedFlash ? copy.copied : copy.copy}
             </button>
-            <button
-              type="button"
-              className={classNames?.button}
-              style={styles.button}
-              onClick={clear}
-            >
+            <button type="button" className={classNames?.button} style={styles.button} onClick={clear}>
               {copy.hide}
             </button>
           </div>
