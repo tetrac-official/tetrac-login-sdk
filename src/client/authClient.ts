@@ -9,7 +9,7 @@ import {
 import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
-import { setSession, clearSession, authHeaders, armAppKey, getEmail, configureVault } from "./session.js";
+import { setSession, clearSession, authHeaders, armAppKey, getAuthToken, getEmail, configureVault } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
 
 /**
@@ -290,7 +290,19 @@ export class AuthClient {
     return result;
   }
 
+  /**
+   * Log out: best-effort server-side token revocation, then clear local state.
+   * The revocation request is fired without awaiting (capturing the headers
+   * before they're cleared) so logout is instant and never blocked by the
+   * network; if it fails, the token still dies at its server-side TTL.
+   */
   logout(): void {
+    const headers = authHeaders();
+    if (getAuthToken()) {
+      void fetch(`${this.opts.apiBaseUrl}/logout`, { method: "POST", headers }).catch(() => {
+        /* best-effort — TTL is the backstop */
+      });
+    }
     clearSession();
   }
 }

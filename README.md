@@ -116,11 +116,28 @@ Defaults match `next-ttc`. Override via the `config` option on the route factory
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
+  sessionTtlSeconds: 86_400,        // session tokens expire server-side after 24h
+  trustProxyHeaders: false,         // see "Production deployment notes" below
   keyPrefixes: { challenge: "challenge:", pubKey: "pubKey:", email: "email:", rateLimit: "ratelimit:" },
   rateLimit: { windowSeconds: 60, maxAttempts: 10 },
   webauthn: { rpName: "TTC", preferPrf: true },
+  autoLockMs: 15_000,               // in-browser app key auto-locks after 15s idle
+  appKeyStorage: "session",         // "memory" = stricter: reload forces re-auth
+  lockOnHide: true,                 // lock the vault when the tab is hidden
+  revealRequiresReauth: true,       // plaintext reveal always re-runs the ceremony
 }
 ```
+
+### Production deployment notes
+
+- **Behind a trusted proxy (Vercel, Cloudflare, nginx)?** Set
+  `trustProxyHeaders: true` so per-IP rate limiting uses `x-forwarded-for`.
+  With the default `false`, proxy headers are ignored (they're client-spoofable
+  when there's no proxy) and all traffic shares one IP bucket — safe, but it
+  effectively turns the per-IP limit into a global one.
+- **Sessions expire.** Tokens die server-side after `sessionTtlSeconds` (24h
+  default) and each new login revokes the previous token. `logout()` revokes
+  the current token best-effort via `POST /logout` before clearing local state.
 
 ### Environment
 
@@ -136,9 +153,14 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 
 - Private keys: encrypted at rest (AES via `crypto-es`), never stored or transmitted in plaintext.
 - App/encryption key: memory + `sessionStorage` only — never `localStorage`, never sent to the server.
-- Web3 login: 32-byte challenge, 5-min TTL, **single-use**; signature verified with `tweetnacl`.
-- Biometric: WebAuthn `userVerification: required`; PRF preferred, IndexedDB gate fallback.
-- Dual-key (IP + identifier) rate limiting on all auth routes.
+  Auto-locks after `autoLockMs` idle; locked signers throw `VaultLockedError` until re-auth.
+- Revealing a plaintext key always re-runs the auth ceremony (passkey / wallet signature /
+  Face ID) — never the ambient session key.
+- Web3 login: 32-byte challenge, 5-min TTL, **single-use** (atomic consume); signature verified with `tweetnacl`.
+- Biometric: WebAuthn `userVerification: required`; PRF preferred; gate fallback wraps its secret
+  under a non-extractable AES-GCM key in IndexedDB.
+- Sessions: opaque 256-bit tokens, server-side TTL, revoked on re-login and logout.
+- Dual-key (IP + identifier) rate limiting on all auth routes; responses never echo credential hashes.
 
 ## Develop
 

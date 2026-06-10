@@ -201,13 +201,21 @@ async function gateStore(credentialId: string, secret: string): Promise<void> {
 // key handle to recover the hex secret. Returns null if no record exists.
 async function gateLoad(credentialId: string): Promise<string | null> {
   const db = await openDb();
-  const record = await new Promise<GateRecord | undefined>((resolve, reject) => {
+  const record = await new Promise<GateRecord | string | undefined>((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
     const req = tx.objectStore(STORE).get(credentialId);
-    req.onsuccess = () => resolve(req.result as GateRecord | undefined);
+    req.onsuccess = () => resolve(req.result as GateRecord | string | undefined);
     req.onerror = () => reject(req.error);
   });
   if (!record) return null;
+
+  // Legacy record (pre-wrap format): the secret was stored as a plaintext hex
+  // string. Use it this once and rewrap it under a fresh non-extractable key —
+  // gateStore overwrites the record, so the readable copy is gone after this.
+  if (typeof record === "string") {
+    await gateStore(credentialId, record);
+    return record;
+  }
 
   const plain = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: record.iv },

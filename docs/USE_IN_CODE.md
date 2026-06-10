@@ -102,8 +102,9 @@ That exposes:
 | `POST` | `/api/auth/login-wallet` | Web3 wallet login (verifies tweetnacl signature) |
 | `POST` | `/api/auth/connect-wallet` | Login-or-register a Web3 wallet in one round trip |
 | `POST` | `/api/auth/import-wallet` | Import an external wallet into an existing account |
+| `POST` | `/api/auth/logout` | Revoke the presented session token (always returns `200 { ok: true }`) |
 | `GET`  | `/api/auth/user-data` | Return UserData for the current session |
-| `GET`  | `/api/auth/search-wallet?publicKey=...` | Existence check |
+| `GET`  | `/api/auth/search-wallet?publicKey=...` | Existence check (IP rate-limited) |
 
 ### With config overrides
 
@@ -121,6 +122,8 @@ export const { GET, POST } = createNextAuthRoutes({
     challengeTtlSeconds: 120,                  // tighter replay window
     rateLimit: { windowSeconds: 60, maxAttempts: 5 },
     webauthn: { rpName: "Acme", preferPrf: true },
+    sessionTtlSeconds: 86_400,                 // session tokens expire after 24h
+    trustProxyHeaders: true,                   // REQUIRED behind Vercel/CF/nginx for per-IP limits
     // sessionHeader / publicKeyHeader / keyPrefixes also overridable
   },
 });
@@ -739,12 +742,20 @@ WebView contract):
 
 **Hook — `useExportKey`:**
 
+Every reveal runs a **fresh re-auth ceremony** — `reveal(creds)` takes the
+`ReauthCredentials` for the account's method (`{ passkey }` for email,
+`{ signMessage }` for wallet, `{ registration }` for biometric) and derives a
+one-time key. It never reads the ambient session key, so Reveal → Hide →
+Reveal asks for credentials again each time.
+
 ```tsx
 "use client";
+import { useState } from "react";
 import { useExportKey, useActiveWallet } from "@tetrac/login-sdk/react";
 
 function CustomReveal() {
   const active = useActiveWallet();
+  const [passkey, setPasskey] = useState("");
   const { reveal, clear, plaintext, loading, error } = useExportKey(active?.encrypted, {
     autoClearMs: 60_000,
   });
@@ -758,9 +769,12 @@ function CustomReveal() {
     );
   }
   return (
-    <button onClick={() => reveal().catch(() => {})} disabled={loading}>
-      Reveal private key
-    </button>
+    <>
+      <input type="password" value={passkey} onChange={(e) => setPasskey(e.target.value)} />
+      <button onClick={() => reveal({ passkey }).catch(() => {})} disabled={loading || !passkey}>
+        Reveal private key
+      </button>
+    </>
   );
 }
 ```
@@ -785,11 +799,16 @@ export default function ExportKeyPage() {
 ```
 
 The panel handles:
-- Reveal button → render the secret in a monospace block (CSS `user-select: all`).
+- The **re-auth ceremony** for the account's method before any decrypt: passkey
+  field (email), "Sign with your wallet" (wallet — pass `walletSignMessage`),
+  or "Confirm with Face ID / Touch ID" (biometric — pass `passkeyRegistration`).
+- Reveal → render the secret in a monospace block (CSS `user-select: all`).
 - "Copy" with auto-wipe of the clipboard after `clipboardClearMs`.
 - "Hide" button + auto-clear after `autoClearMs`.
-- `window.ReactNativeWebView.postMessage({status, privateKey})` so existing
-  React-Native shells (e.g. apps migrating off Privy) keep working unchanged.
+- Optionally `window.ReactNativeWebView.postMessage({status, privateKey})` for
+  React-Native shells (e.g. apps migrating off Privy). **Off by default** — it
+  posts the plaintext key to the host shell, so set
+  `postToReactNativeWebView={true}` only inside an RN WebView you control.
 
 **Security trade-off worth surfacing in the UI:** unlike Privy's iframe
 sandbox, any script on the reveal route can read the plaintext while it's in
@@ -845,6 +864,11 @@ const config: Partial<AuthConfig> = {
   },
   rateLimit: { windowSeconds: 60, maxAttempts: 5 },
   webauthn: { rpId: "auth.example.com", rpName: "Example", preferPrf: true },
+  sessionTtlSeconds: 86_400,   // server-side session token TTL (revoked on re-login/logout)
+  trustProxyHeaders: true,     // only when behind a trusted proxy (Vercel/CF/nginx)
+  autoLockMs: 15_000,          // client vault auto-lock idle window
+  appKeyStorage: "session",    // or "memory" — reload forces re-auth, XSS finds no stored key
+  lockOnHide: true,            // lock the vault when the tab is hidden
 };
 ```
 
@@ -885,6 +909,22 @@ adapter works on both.
 **Rate limiting is dual-key.** Each route is limited per-IP **and**
 per-identifier (email or pubKey). Defaults: 10 attempts / 60s. Override per
 deployment via `config.rateLimit`.
+
+**Behind a proxy? Set `trustProxyHeaders: true`.** By default the server
+ignores `x-forwarded-for` / `x-real-ip` (they're client-spoofable when no
+trusted proxy sets them), which collapses all traffic into one shared IP
+bucket. On Vercel, Cloudflare, or behind nginx those headers ARE trustworthy —
+enable the flag there or the per-IP limit is effectively global.
+
+**Sessions expire and are revoked.** Tokens die server-side after
+`sessionTtlSeconds` (24h default); each new login revokes the previous token,
+and `logout()` fires a best-effort `POST /logout` revocation before clearing
+local state. A user idle past the TTL lands in `session_expired` and re-auths.
+
+**Signers honor the vault lock.** After `autoLockMs` idle (15s default) the
+app key is dropped; `useSigner` / `useSolanaSigner` / `useEvmSigner` throw
+`VaultLockedError` (the chain-specific hooks return `null` once re-rendered).
+Catch it and route the user through `useAuth().reauthenticate(creds)`.
 
 **Account collisions.** `register` returns `409 Account already exists` when
 the `publicKey` is taken. Catch and fall back to `login` (see the email signup
