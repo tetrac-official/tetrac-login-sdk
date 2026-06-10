@@ -40,9 +40,17 @@ export async function issueSession(
   user: UserData,
   config: AuthConfig,
 ): Promise<string> {
+  // Revoke the user's previous token (single active session) before minting a
+  // new one, so an old leaked token can't outlive the next login.
+  const previous = user.authToken;
+  if (typeof previous === "string" && previous) {
+    await revokeSession(storage, previous, config);
+  }
   const token = generateSessionToken();
-  // token -> publicKey lookup so verifySession is O(1).
-  await storage.set(sessionKey(token, config), user.publicKey);
+  // token -> publicKey lookup so verifySession is O(1); expires with the configured TTL.
+  await storage.set(sessionKey(token, config), user.publicKey, {
+    exSeconds: config.sessionTtlSeconds,
+  });
   user.authToken = token;
   await persistUser(storage, user, config);
   return token;

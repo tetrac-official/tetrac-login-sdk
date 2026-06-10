@@ -47,4 +47,10 @@ export class MemoryAdapter implements StorageAdapter {
     const e = this.alive(key);
     if (e) e.expiresAt = this.now() + seconds * 1000;
   }
+
+  async getdel(key: string): Promise<string | null> {
+    const value = this.alive(key)?.value ?? null;
+    this.store.delete(key);
+    return value;
+  }
 }

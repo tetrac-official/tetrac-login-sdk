@@ -8,16 +8,21 @@ export interface KvLike {
   del(key: string): Promise<unknown>;
   incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<unknown>;
+  getdel<T = string>(key: string): Promise<T | null>;
 }
 
 class KvAdapter implements StorageAdapter {
   constructor(private readonly client: KvLike) {}
 
-  async get(key: string): Promise<string | null> {
-    const v = await this.client.get<string>(key);
+  // Both clients may auto-deserialize JSON, so a stored blob comes back as an object.
+  // Return strings as-is and re-stringify everything else so it round-trips through JSON.parse.
+  private coerce(v: unknown): string | null {
     if (v == null) return null;
-    // Both clients may auto-deserialize; coerce back to a string for our string-only values.
-    return typeof v === "string" ? v : String(v);
+    return typeof v === "string" ? v : JSON.stringify(v);
+  }
+
+  async get(key: string): Promise<string | null> {
+    return this.coerce(await this.client.get<string>(key));
   }
 
   async set(key: string, value: string, opts?: SetOptions): Promise<void> {
@@ -34,6 +39,10 @@ class KvAdapter implements StorageAdapter {
 
   async expire(key: string, seconds: number): Promise<void> {
     await this.client.expire(key, seconds);
+  }
+
+  async getdel(key: string): Promise<string | null> {
+    return this.coerce(await this.client.getdel<string>(key));
   }
 }
 

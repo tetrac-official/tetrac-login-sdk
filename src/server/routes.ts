@@ -7,12 +7,14 @@ import { json, error, clientIp, readJson } from "./http.js";
 import { checkRateLimit } from "./rateLimit.js";
 import { issueChallenge, consumeChallenge } from "./challenge.js";
 import { verifySolanaSignature } from "./signature.js";
+import { timingSafeEqual } from "../core/crypto.js";
 import {
   persistUser,
   getUserByPublicKey,
   resolvePublicKeyByEmail,
   issueSession,
   verifySession,
+  revokeSession,
 } from "./session.js";
 
 export interface AuthHandlerOptions {
@@ -27,6 +29,7 @@ export interface AuthHandlers {
   login(req: Request): Promise<Response>;
   loginWallet(req: Request): Promise<Response>;
   connectWallet(req: Request): Promise<Response>;
+  logout(req: Request): Promise<Response>;
   userData(req: Request): Promise<Response>;
   searchWallet(req: Request): Promise<Response>;
   importWallet(req: Request): Promise<Response>;
@@ -38,7 +41,12 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
 
   // Apply dual-key (IP + identifier) rate limiting; returns a 429 Response or null.
   async function rateLimited(req: Request, identifier?: string): Promise<Response | null> {
-    const ip = await checkRateLimit(storage, clientIp(req), config.rateLimit, config.keyPrefixes);
+    const ip = await checkRateLimit(
+      storage,
+      clientIp(req, config.trustProxyHeaders),
+      config.rateLimit,
+      config.keyPrefixes,
+    );
     if (!ip.allowed) return error("Rate limit exceeded", 429);
     if (identifier) {
       const id = await checkRateLimit(storage, identifier, config.rateLimit, config.keyPrefixes);
@@ -47,8 +55,33 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return null;
   }
 
+  // Client-safe copy of a user record: never echo the passkeyHash or the session
+  // token back to the browser (the token travels only in AuthResult.authToken).
+  function publicUser(user: UserData): UserData {
+    const { passkeyHash: _passkeyHash, authToken: _authToken, ...safe } = user;
+    return safe as UserData;
+  }
+
   function asResult(user: UserData): AuthResult {
-    return { publicKey: user.publicKey, authToken: String(user.authToken), user };
+    return { publicKey: user.publicKey, authToken: String(user.authToken), user: publicUser(user) };
+  }
+
+  // Validate a client-supplied wallets[] payload. Returns an error Response (400)
+  // or null when the array is acceptable. Bounds the count and each entry's shape.
+  function validateWallets(wallets: unknown): Response | null {
+    if (!Array.isArray(wallets)) return error("wallets must be an array");
+    if (wallets.length > 16) return error("too many wallets");
+    for (const w of wallets) {
+      if (!w || typeof w !== "object") return error("invalid wallet entry");
+      const e = w as Record<string, unknown>;
+      if (typeof e.publicKey !== "string" || typeof e.encryptedSecret !== "string") {
+        return error("invalid wallet entry");
+      }
+      if (typeof e.role !== "string" || !e.role) return error("invalid wallet entry");
+      if (e.chain !== "solana" && e.chain !== "evm") return error("invalid wallet entry");
+      if (e.encryptedSecret.length > 8192) return error("encryptedSecret too large");
+    }
+    return null;
   }
 
   return {
@@ -74,6 +107,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         challenge?: string;
       }>(req);
       if (!body?.publicKey) return error("publicKey required");
+      if (body.wallets !== undefined) {
+        const invalid = validateWallets(body.wallets);
+        if (invalid) return invalid;
+      }
 
       const limited = await rateLimited(req, body.email ?? body.publicKey);
       if (limited) return limited;
@@ -130,7 +167,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const publicKey = await resolvePublicKeyByEmail(storage, body.email, config);
       if (!publicKey) return error("Invalid credentials", 401);
       const user = await getUserByPublicKey(storage, publicKey, config);
-      if (!user || user.passkeyHash !== body.passkeyHash) {
+      // Timing-safe hash compare; a missing stored hash is always invalid (and the
+      // compare still runs so absence vs mismatch aren't distinguishable by timing).
+      if (!user || !timingSafeEqual(user.passkeyHash ?? "", body.passkeyHash)) {
         return error("Invalid credentials", 401);
       }
       await issueSession(storage, user, config);
@@ -171,6 +210,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!body?.publicKey || !body.signature || !body.challenge) {
         return error("publicKey, signature and challenge required");
       }
+      if (body.wallets !== undefined) {
+        const invalid = validateWallets(body.wallets);
+        if (invalid) return invalid;
+      }
 
       const limited = await rateLimited(req, body.publicKey);
       if (limited) return limited;
@@ -202,15 +245,27 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       return json(asResult(user), isNew ? 201 : 200);
     },
 
+    // Revoke the current session. Always returns 200 { ok: true } and never leaks
+    // whether the presented token was valid.
+    async logout(req) {
+      const token = req.headers.get(config.sessionHeader);
+      const publicKey = req.headers.get(config.publicKeyHeader);
+      const user = await verifySession(storage, token, publicKey, config);
+      if (user && token) await revokeSession(storage, token, config);
+      return json({ ok: true });
+    },
+
     async userData(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
       const user = await verifySession(storage, token, publicKey, config);
       if (!user) return error("Unauthorized", 401);
-      return json({ user });
+      return json({ user: publicUser(user) });
     },
 
     async searchWallet(req) {
+      const limited = await rateLimited(req);
+      if (limited) return limited;
       const publicKey = new URL(req.url).searchParams.get("publicKey");
       if (!publicKey) return error("publicKey required");
       const user = await getUserByPublicKey(storage, publicKey, config);
@@ -225,9 +280,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
 
       const body = await readJson<{ wallets?: EncryptedWallet[] }>(req);
       if (!body?.wallets?.length) return error("wallets required");
+      const invalid = validateWallets(body.wallets);
+      if (invalid) return invalid;
       user.wallets = [...user.wallets, ...body.wallets];
       await persistUser(storage, user, config);
-      return json({ user });
+      return json({ user: publicUser(user) });
     },
   };
 }

@@ -33,6 +33,14 @@ export interface AuthConfig {
   sessionHeader: string;
   /** Header carrying the user's public key. */
   publicKeyHeader: string;
+  /** TTL applied to issued session tokens, in seconds. Default 86400 (24h). */
+  sessionTtlSeconds: number;
+  /**
+   * When false (default), the server ignores x-forwarded-for / x-real-ip for
+   * client-IP derivation — safer default that prevents rate-limit spoofing.
+   * Set true only when behind a trusted proxy that sets those headers.
+   */
+  trustProxyHeaders: boolean;
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
   webauthn: WebAuthnConfig;
@@ -61,6 +69,8 @@ export const DEFAULT_CONFIG: AuthConfig = {
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
+  sessionTtlSeconds: 86_400,
+  trustProxyHeaders: false,
   keyPrefixes: {
     challenge: "challenge:",
     pubKey: "pubKey:",

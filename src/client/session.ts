@@ -66,10 +66,12 @@ export function configureVault(opts: {
 }
 
 function bindHideHandler(): void {
-  if (!hasWindow() || hideHandlerBound || !lockOnHide) return;
+  // Bind once, but RE-CHECK lockOnHide at fire time — so configureVault({
+  // lockOnHide:false }) disables hide-locking even after the listener is bound.
+  if (!hasWindow() || hideHandlerBound) return;
   hideHandlerBound = true;
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") lockVault();
+    if (lockOnHide && document.visibilityState === "hidden") lockVault();
   });
 }
 
@@ -154,6 +156,19 @@ export function isLocked(): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Pure, side-effect-free snapshot of vault usability for useSyncExternalStore.
+ * Returns true when the key is currently usable. Unlike isLocked() this never
+ * re-hydrates from sessionStorage, mutates state, or reschedules the timer — so
+ * it returns a stable value across calls within a render (no infinite loop).
+ * Re-hydration still happens via isLocked()/getAppKey() on the actual use path.
+ */
+export function lockSnapshot(): boolean {
+  if (!memoryAppKey) return false;
+  if (lockDeadline != null && nowMs() > lockDeadline) return false;
+  return true;
 }
 
 export function getAuthToken(): string | null {

@@ -39,7 +39,7 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
     wallet,
     autoClearMs = DEFAULT_AUTO_CLEAR_MS,
     clipboardClearMs = DEFAULT_CLIPBOARD_CLEAR_MS,
-    postToReactNativeWebView = true,
+    postToReactNativeWebView = false,
     title = "Export private key",
     description,
     passkeyRegistration,

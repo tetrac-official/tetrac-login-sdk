@@ -147,7 +147,13 @@ export interface ExportKeyPanelProps {
   /**
    * When the host page is a React Native WebView, post the result back via
    * `window.ReactNativeWebView.postMessage(...)`. Matches the contract Privy's
-   * hosted reveal flow uses. Default true; harmless outside RN WebView.
+   * hosted reveal flow uses.
+   *
+   * Default **false**. This posts the revealed *plaintext* private key to the
+   * host shell (`window.ReactNativeWebView`), so it must only be enabled when
+   * the panel is rendered inside a trusted RN WebView you control (e.g. Shyft).
+   * Leaving it off means a generic web consumer never exfiltrates the key to an
+   * ambient host bridge; RN hosts opt in explicitly by setting this `true`.
    */
   postToReactNativeWebView?: boolean;
 

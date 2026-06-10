@@ -14,4 +14,6 @@ export interface StorageAdapter {
   incr(key: string): Promise<number>;
   /** Set/refresh a key's TTL in seconds. */
   expire(key: string, seconds: number): Promise<void>;
+  /** Atomically get a key's value and delete it; used for single-use challenges. */
+  getdel(key: string): Promise<string | null>;
 }

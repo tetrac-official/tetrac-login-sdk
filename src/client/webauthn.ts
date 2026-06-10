@@ -4,8 +4,11 @@
 //  - PRF (preferred): derive a high-entropy secret from the authenticator's PRF
 //    extension. The secret never leaves the Secure Enclave's derivation and is
 //    not stored anywhere — it is re-derived on each unlock.
-//  - Gate (fallback): when PRF is unavailable, keep a random secret in IndexedDB
-//    that can only be read after a successful userVerification assertion.
+//  - Gate (fallback): when PRF is unavailable, keep a random secret that can
+//    only be read after a successful userVerification assertion. The secret is
+//    never persisted readably: it is wrapped under a NON-EXTRACTABLE AES-GCM
+//    CryptoKey (PRD §3) which IndexedDB structured-clones, so any script on the
+//    origin sees only the opaque key handle + IV + ciphertext, never the plaintext.
 import type { WebAuthnConfig } from "../core/config.js";
 
 export interface PasskeyRegistration {
@@ -106,6 +109,12 @@ export async function registerPasskey(
   return reg;
 }
 
+function fromHex(hex: string): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(new ArrayBuffer(hex.length / 2));
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
 /**
  * Unlock and return the passkey-derived secret (hex). For PRF mode this is the
  * PRF output; for gate mode it is the stored secret, returned only after a
@@ -142,9 +151,21 @@ export async function derivePasskeySecret(reg: PasskeyRegistration): Promise<str
 }
 
 // --- Minimal IndexedDB store for gate-mode secrets ---
+//
+// The stored record is { cryptoKey, iv, ciphertext }: the cryptoKey is a
+// non-extractable AES-GCM key (structured-cloned by IndexedDB — its bytes are
+// never exposed to JS), and the hex secret is held only as AES-GCM ciphertext.
+// Reading the record back yields nothing usable without crypto.subtle.decrypt,
+// which can only run via the in-memory non-extractable key handle.
 
 const DB_NAME = "ttc_passkey_store";
 const STORE = "gate_secrets";
+
+interface GateRecord {
+  cryptoKey: CryptoKey;
+  iv: Uint8Array<ArrayBuffer>;
+  ciphertext: ArrayBuffer;
+}
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -155,22 +176,43 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
+// Wrap: generate a non-extractable AES-GCM key, encrypt the hex secret under it
+// with a random 12-byte IV, and persist only the opaque key + IV + ciphertext.
 async function gateStore(credentialId: string, secret: string): Promise<void> {
+  const cryptoKey = await crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    false, // non-extractable: raw key bytes can never be read back out
+    ["encrypt", "decrypt"],
+  );
+  const iv = randomBytes(12);
+  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, fromHex(secret));
+  const record: GateRecord = { cryptoKey, iv, ciphertext };
+
   const db = await openDb();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(secret, credentialId);
+    tx.objectStore(STORE).put(record, credentialId);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
+// Unwrap: load the record and decrypt the ciphertext with the non-extractable
+// key handle to recover the hex secret. Returns null if no record exists.
 async function gateLoad(credentialId: string): Promise<string | null> {
   const db = await openDb();
-  return new Promise((resolve, reject) => {
+  const record = await new Promise<GateRecord | undefined>((resolve, reject) => {
     const tx = db.transaction(STORE, "readonly");
     const req = tx.objectStore(STORE).get(credentialId);
-    req.onsuccess = () => resolve((req.result as string) ?? null);
+    req.onsuccess = () => resolve(req.result as GateRecord | undefined);
     req.onerror = () => reject(req.error);
   });
+  if (!record) return null;
+
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: record.iv },
+    record.cryptoKey,
+    record.ciphertext,
+  );
+  return toHex(new Uint8Array(plain));
 }

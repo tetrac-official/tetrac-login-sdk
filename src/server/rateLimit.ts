@@ -20,6 +20,13 @@ export async function checkRateLimit(
   const key = `${prefixes.rateLimit}${identifier}`;
   const count = await storage.incr(key);
   if (count === 1) {
+    // First hit in a window: stamp the TTL.
+    await storage.expire(key, config.windowSeconds);
+  } else if (count > config.maxAttempts) {
+    // Self-heal: if a crash between a prior incr and its expire left the counter
+    // wedged over the limit with no TTL, it would block this identifier forever.
+    // Re-applying expire here is cheap and idempotent and guarantees the counter
+    // can drain. (When a TTL already exists this just refreshes the window tail.)
     await storage.expire(key, config.windowSeconds);
   }
   return {

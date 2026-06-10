@@ -56,4 +56,19 @@ describe("vault lock model", () => {
     expect(e).toBeInstanceOf(Error);
     expect(e.name).toBe("VaultLockedError");
   });
+
+  // M6 — lockOnHide must be toggleable after the first bind. In the node env there
+  // is no `document`, so the visibilitychange handler is never bound; we just assert
+  // configureVault accepts the flag (both ways) and never throws, and that arm/lock
+  // behavior is unaffected by the flag value.
+  it("configureVault accepts lockOnHide both ways without affecting arm/lock", () => {
+    expect(() => configureVault({ lockOnHide: false, autoLockMs: 10_000, storageMode: "memory" })).not.toThrow();
+    armAppKey("deadbeef");
+    expect(getAppKey()).toBe("deadbeef"); // arm still works with hide-locking disabled
+
+    expect(() => configureVault({ lockOnHide: true })).not.toThrow();
+    expect(getAppKey()).toBe("deadbeef"); // toggling the flag doesn't disturb the key
+    lockVault();
+    expect(getAppKey()).toBeNull(); // explicit lock still works
+  });
 });

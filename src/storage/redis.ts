@@ -8,6 +8,7 @@ export interface RedisLike {
   del(key: string): Promise<unknown>;
   incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<unknown>;
+  getdel(key: string): Promise<string | null>;
 }
 
 export class RedisAdapter implements StorageAdapter {
@@ -35,5 +36,9 @@ export class RedisAdapter implements StorageAdapter {
 
   async expire(key: string, seconds: number): Promise<void> {
     await this.client.expire(key, seconds);
+  }
+
+  async getdel(key: string): Promise<string | null> {
+    return this.client.getdel(key);
   }
 }

@@ -1,5 +1,16 @@
 // App-key derivation, secret encryption, hashing, and CSPRNG helpers.
 // Uses crypto-es so blobs are byte-for-byte compatible with next-ttc.
+//
+// Compat-locked cryptography notes (documented, not changed — see docs/5-PRD-FABLE-AUDIT.md §4):
+//  (D1) crypto-es AES.encrypt/decrypt below is OpenSSL-KDF + AES-CBC with NO authentication
+//       tag, so ciphertext tampering is undetectable (decrypt either yields garbage or throws).
+//       Moving to authenticated AES-GCM would break byte-compat with next-ttc, so it is deferred
+//       to a future versioned migration rather than this pass.
+//  (D2) hashPasskey is an unsalted single SHA-256, kept identical to next-ttc for compat. A salted
+//       slow verifier (e.g. Argon2/PBKDF2) is the future hardening path.
+//  (D3) deriveAppKeyFromPasskey defaults to 100k PBKDF2 iterations, below current OWASP guidance
+//       (~600k), but kept for deterministic cross-device recovery compat. pbkdf2Iterations is
+//       configurable for new deployments.
 import CryptoES from "crypto-es";
 
 /**
@@ -65,4 +76,19 @@ export function generateSessionToken(): string {
 /** Generate a 256-bit wallet-login challenge (64 hex chars). */
 export function generateChallenge(): string {
   return randomHex(32);
+}
+
+/**
+ * Constant-time comparison of two hex strings. Used server-side to compare
+ * credential hashes without leaking timing about how many characters matched.
+ * Does the full XOR-accumulate scan regardless of input; a length mismatch still
+ * runs over the longer string and returns false. Pure, no Node 'crypto' needed.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }

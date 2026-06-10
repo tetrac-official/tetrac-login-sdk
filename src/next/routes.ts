@@ -29,6 +29,7 @@ export function createNextAuthRoutes(opts: AuthHandlerOptions) {
     "login-wallet": handlers.loginWallet,
     "connect-wallet": handlers.connectWallet,
     "import-wallet": handlers.importWallet,
+    logout: handlers.logout,
   };
 
   const getRoutes: Record<string, (req: Request) => Promise<Response>> = {
