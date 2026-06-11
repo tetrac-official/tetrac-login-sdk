@@ -34,6 +34,27 @@ export interface AuthHandlers {
   importWallet(req: Request): Promise<Response>;
 }
 
+// --- request input validators (v0.2.1 Change 4) ---
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const HEX64_RE = /^[0-9a-f]{64}$/i;
+
+function validateEmail(email: string): string | null {
+  if (email.length > 320 || !EMAIL_RE.test(email)) return "Invalid email format";
+  return null;
+}
+
+function validatePublicKey(key: string): string | null {
+  // Loose by design: publicKey may be a Solana base58 key, an EVM 0x address, or a
+  // biometric identity id — so we only enforce no surrounding whitespace + a length bound.
+  if (!key || key.trim() !== key || key.length > 128) return "Invalid publicKey format";
+  return null;
+}
+
+function validateAuthPublicKey(key: string): string | null {
+  if (!HEX64_RE.test(key)) return "Invalid authPublicKey format"; // ed25519 public key, 32 bytes hex
+  return null;
+}
+
 export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
   const { storage } = opts;
   const config = resolveConfig(opts.config);
@@ -77,6 +98,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (typeof e.publicKey !== "string" || typeof e.encryptedSecret !== "string") {
         return error("invalid wallet entry");
       }
+      if (e.publicKey.length > 128) return error("wallet publicKey too long");
       if (typeof e.role !== "string" || !e.role) return error("invalid wallet entry");
       if (e.chain !== "solana" && e.chain !== "evm") return error("invalid wallet entry");
       if (e.encryptedSecret.length > 8192) return error("encryptedSecret too large");
@@ -91,6 +113,14 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const limited = await rateLimited(req);
       if (limited) return limited;
       const body = await readJson<{ publicKey?: string; email?: string }>(req);
+      if (body?.publicKey) {
+        const e = validatePublicKey(body.publicKey);
+        if (e) return error(e);
+      }
+      if (body?.email) {
+        const e = validateEmail(body.email);
+        if (e) return error(e);
+      }
       // Wallet flow passes publicKey; email/biometric flow passes the account email
       // (or internal biometric id), which we resolve to the identity publicKey.
       let publicKey = body?.publicKey ?? null;
@@ -117,6 +147,16 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         pbkdf2Iterations?: number;
       }>(req);
       if (!body?.publicKey) return error("publicKey required");
+      const pkErr = validatePublicKey(body.publicKey);
+      if (pkErr) return error(pkErr);
+      if (body.email) {
+        const emailErr = validateEmail(body.email);
+        if (emailErr) return error(emailErr);
+      }
+      if (body.authPublicKey) {
+        const apErr = validateAuthPublicKey(body.authPublicKey);
+        if (apErr) return error(apErr);
+      }
       if (body.wallets !== undefined) {
         const invalid = validateWallets(body.wallets);
         if (invalid) return invalid;
@@ -199,6 +239,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!body?.publicKey || !body.signature || !body.challenge) {
         return error("publicKey, signature and challenge required");
       }
+      const pkErr = validatePublicKey(body.publicKey);
+      if (pkErr) return error(pkErr);
 
       const limited = await rateLimited(req, body.publicKey);
       if (limited) return limited;
@@ -228,6 +270,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!body?.publicKey || !body.signature || !body.challenge) {
         return error("publicKey, signature and challenge required");
       }
+      const pkErr = validatePublicKey(body.publicKey);
+      if (pkErr) return error(pkErr);
       if (body.wallets !== undefined) {
         const invalid = validateWallets(body.wallets);
         if (invalid) return invalid;

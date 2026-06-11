@@ -33,7 +33,7 @@ let lockTimer: ReturnType<typeof setTimeout> | null = null;
 
 // --- vault config (set by configureVault, defaults match DEFAULT_CONFIG) ---
 let autoLockMs = 15_000;
-let storageMode: AppKeyStorageMode = "session";
+let storageMode: AppKeyStorageMode = "memory";
 let lockOnHide = true;
 let hideHandlerBound = false;
 

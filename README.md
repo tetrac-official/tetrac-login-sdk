@@ -153,7 +153,7 @@ Defaults match `next-ttc`. Override via the `config` option on the route factory
   rateLimit: { windowSeconds: 60, maxAttempts: 10 },
   webauthn: { rpName: "TTC", preferPrf: true },
   autoLockMs: 15_000,               // in-browser app key auto-locks after 15s idle
-  appKeyStorage: "session",         // "memory" = stricter: reload forces re-auth
+  appKeyStorage: "memory",          // default; "session" persists across reload (XSS-readable)
   lockOnHide: true,                 // lock the vault when the tab is hidden
   revealRequiresReauth: true,       // plaintext reveal always re-runs the ceremony
 }

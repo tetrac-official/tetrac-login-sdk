@@ -139,21 +139,29 @@ describe("SERVERSIDE-4 — import-wallet appends with NO total cap (record-bloat
   });
 });
 
-describe("SERVERSIDE-11 — no format/length validation on publicKey / email", () => {
-  it("accepts an empty email and a whitespace publicKey (201)", async () => {
+describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKey / email (400)", () => {
+  it("rejects a whitespace-padded publicKey", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: "   ", email: "", authPublicKey: "abc", authMethod: "email", wallets: [] }),
+      req({ publicKey: "   ", email: "a@b.com", authPublicKey: "a".repeat(64), authMethod: "email", wallets: [] }),
     );
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
   });
 
-  it("accepts a 100k-character publicKey (storage-waste)", async () => {
+  it("rejects a 100k-character publicKey (length bound)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: "x".repeat(100_000), authPublicKey: "abc", authMethod: "email", wallets: [] }),
+      req({ publicKey: "x".repeat(100_000), email: "a@b.com", authPublicKey: "a".repeat(64), authMethod: "email", wallets: [] }),
     );
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a malformed email", async () => {
+    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const res = await h.register(
+      req({ publicKey: SOL_PUB, email: "not-an-email", authPublicKey: "a".repeat(64), authMethod: "email", wallets: [] }),
+    );
+    expect(res.status).toBe(400);
   });
 });
 

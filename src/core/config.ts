@@ -77,8 +77,8 @@ export interface AuthConfig {
   autoLockMs: number;
   /**
    * Where the app key is held while unlocked:
-   *  - "session": memory + sessionStorage (survives reload within the tab; default)
-   *  - "memory":  memory only (reload ⇒ re-auth; storage-scraping XSS finds nothing)
+   *  - "memory":  memory only (reload ⇒ re-auth; storage-scraping XSS finds nothing) — DEFAULT
+   *  - "session": memory + sessionStorage (survives reload within the tab; XSS-readable, opt-in)
    */
   appKeyStorage: "session" | "memory";
   /** Lock the vault when the tab becomes hidden. Default true. */
@@ -112,7 +112,7 @@ export const DEFAULT_CONFIG: AuthConfig = {
     preferPrf: true,
   },
   autoLockMs: 15_000,
-  appKeyStorage: "session",
+  appKeyStorage: "memory",
   lockOnHide: true,
   revealRequiresReauth: true,
 };
