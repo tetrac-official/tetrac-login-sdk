@@ -38,6 +38,24 @@ let hideHandlerBound = false;
 
 const listeners = new Set<() => void>();
 
+// Hooks fired on clearSession() (i.e. logout). Lets feature modules purge their
+// own device-local state on logout WITHOUT session.ts importing them (which
+// would create a cycle). biometricUnlock.ts registers its blob purge here.
+const clearHooks = new Set<() => void>();
+
+/**
+ * Register a callback fired on every clearSession() (logout). Returns an
+ * unregister fn. Hooks are best-effort and must not throw — a throwing hook is
+ * swallowed so one feature's cleanup can't block logout. Used by
+ * biometricUnlock to purge wrapped blobs + gate secrets on logout.
+ */
+export function registerSessionClearHook(fn: () => void): () => void {
+  clearHooks.add(fn);
+  return () => {
+    clearHooks.delete(fn);
+  };
+}
+
 const hasWindow = (): boolean => typeof window !== "undefined";
 const nowMs = (): number => Date.now();
 
@@ -195,6 +213,15 @@ export function clearSession(): void {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(PUBKEY_KEY);
     localStorage.removeItem(EMAIL_KEY);
+  }
+  // Fire feature cleanup hooks (e.g. purge biometric-unlock blobs). Best-effort:
+  // a throwing hook must never block logout.
+  for (const hook of clearHooks) {
+    try {
+      hook();
+    } catch {
+      /* ignore — logout cleanup is best-effort */
+    }
   }
   notify();
 }

@@ -32,6 +32,12 @@ export {
   type PasskeyRegistration,
 } from "./webauthn.js";
 export {
+  hasBiometricUnlock,
+  enableBiometricUnlock,
+  unlockViaBiometric,
+  disableBiometricUnlock,
+} from "./biometricUnlock.js";
+export {
   AuthClient,
   createAuthClient,
   type AuthClientOptions,

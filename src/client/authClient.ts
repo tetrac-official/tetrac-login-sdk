@@ -11,18 +11,37 @@ import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
 import { setSession, clearSession, authHeaders, armAppKey, getAuthToken, getEmail, configureVault } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
+import {
+  enableBiometricUnlock,
+  unlockViaBiometric,
+  disableBiometricUnlock,
+  hasBiometricUnlock,
+  unwrapAppKey,
+} from "./biometricUnlock.js";
 
 /**
  * Credentials for a re-authentication ceremony (unlock or reveal). Exactly one
  * shape is supplied, matching the account's auth method:
- *  - email:     { passkey }      (email is read from the session)
- *  - wallet:    { signMessage }  (re-signs the fixed app-key message)
- *  - biometric: { registration } (fresh WebAuthn assertion → PRF secret)
+ *  - email:     { passkey }         (email is read from the session)
+ *  - wallet:    { signMessage }     (re-signs the fixed app-key message)
+ *  - biometric: { registration }    (biometric-PRIMARY; the derived secret IS the app key)
+ *  - any:       { biometricUnlock } (the derived secret UNWRAPS a stored app key)
+ *
+ * IMPORTANT DISTINCTION (do not confuse — this is the bug this feature prevents):
+ *  - `{ registration }`    = biometric-PRIMARY account. derivePasskeySecret(reg)
+ *    IS the app key (registerWithBiometric made it so). Valid ONLY for accounts
+ *    created with registerWithBiometric.
+ *  - `{ biometricUnlock }` = OPTIONAL unlock layer on ANY account. The derived
+ *    secret does NOT equal the app key — it HKDF-derives an AES key that UNWRAPS
+ *    a previously-stored blob of the account's real app key.
+ *  They are NOT interchangeable: feeding `{ registration }` for an email/web3
+ *  account derives the wrong key and locks the user out — use `{ biometricUnlock }`.
  */
 export type ReauthCredentials =
   | { passkey: string }
   | { signMessage: (message: Uint8Array) => Promise<Uint8Array> }
-  | { registration: PasskeyRegistration };
+  | { registration: PasskeyRegistration }
+  | { biometricUnlock: PasskeyRegistration };
 
 export interface WalletGenConfig {
   solana?: WalletRole[];
@@ -86,7 +105,15 @@ export class AuthClient {
       return deriveAppKeyFromSignature(bytesToHex(sig));
     }
     if ("registration" in creds) {
+      // Biometric-PRIMARY: the passkey secret IS the app key.
       return derivePasskeySecret(creds.registration);
+    }
+    if ("biometricUnlock" in creds) {
+      // Optional unlock layer (ANY account): the secret UNWRAPS the stored app key.
+      // A fresh assertion runs every call, so revealSecret keeps its "re-auth to
+      // reveal" guarantee and unlock() restarts the auto-lock window as usual.
+      const secret = await derivePasskeySecret(creds.biometricUnlock);
+      return unwrapAppKey(creds.biometricUnlock.credentialId, secret);
     }
     throw new Error("Invalid re-auth credentials");
   }
@@ -288,6 +315,37 @@ export class AuthClient {
     });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
     return result;
+  }
+
+  // --- Optional biometric UNLOCK (any account) ---
+  //
+  // Thin delegations so createAuthClient() consumers get the same API as the
+  // standalone client functions. See biometricUnlock.ts for the full contract.
+  // NOTE: this is the OPTIONAL unlock layer (`{ biometricUnlock }`), NOT the
+  // biometric-PRIMARY flow (registerWithBiometric / `{ registration }`).
+
+  /** True if a biometric-unlock blob is registered on this device. Sync. */
+  hasBiometricUnlock(): boolean {
+    return hasBiometricUnlock();
+  }
+
+  /**
+   * Wrap the CURRENT vault app key under a freshly-registered passkey and persist
+   * it (vault must be unlocked, else VaultLockedError). Returns the registration
+   * to persist for unlockViaBiometric/disableBiometricUnlock.
+   */
+  enableBiometricUnlock(userName: string): Promise<PasskeyRegistration> {
+    return enableBiometricUnlock(this.config.webauthn, userName);
+  }
+
+  /** Touch ID -> unwrap the stored app key -> re-arm the vault for any account. */
+  unlockViaBiometric(registration: PasskeyRegistration): Promise<void> {
+    return unlockViaBiometric(registration);
+  }
+
+  /** Remove the wrapped blob + gate secret + on-device marker for a credential. */
+  disableBiometricUnlock(registration: PasskeyRegistration): Promise<void> {
+    return disableBiometricUnlock(registration);
   }
 
   /**

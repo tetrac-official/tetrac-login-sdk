@@ -106,6 +106,37 @@ flattenBundle(bundle);               // public keys + ciphertext only -> safe to
 const kp = toSolanaKeypair(bundle.solana.funds, appKey);
 ```
 
+### Optional biometric unlock (any account)
+
+Any account — **email, Web3, or biometric-primary** — can opt into unlocking the vault (and
+revealing/​signing) with a device biometric (Touch ID / Face ID) instead of re-entering a passkey
+or re-signing a wallet message. The biometric secret does **not** replace the app key (that only
+works for biometric-primary accounts); it **wraps** the account's existing app key with
+HKDF-SHA-256 + AES-256-GCM. Enable requires an unlocked vault; unlock always needs a fresh
+assertion, so a storage-scraping XSS reads ciphertext it can never open. It is per-device and
+**never** the recovery path — the account's primary credential stays the cross-device fallback.
+
+```tsx
+import { useBiometricUnlock } from "@tetrac/login-sdk/react";
+
+function BiometricToggle() {
+  const { available, isEnabled, enable, disable, unlock, loading } = useBiometricUnlock();
+  if (!available) return null;
+  return isEnabled
+    ? <button disabled={loading} onClick={() => disable()}>Disable biometric unlock</button>
+    : <button disabled={loading} onClick={() => enable("a@b.com")}>Enable biometric unlock</button>;
+  // After an auto-lock, call unlock() to re-arm the vault via Touch ID.
+}
+```
+
+Once enabled, reveal/​unlock anywhere `ReauthCredentials` is accepted via the new
+`{ biometricUnlock: registration }` variant (e.g. `reveal({ biometricUnlock: reg })`). Do **not**
+confuse it with `{ registration }`, which is the biometric-**primary** flow where the secret *is*
+the app key — the two resolve to different keys and are not interchangeable. The same functions are
+available standalone from `@tetrac/login-sdk/client`
+(`enableBiometricUnlock` / `unlockViaBiometric` / `disableBiometricUnlock` / `hasBiometricUnlock`)
+and as `AuthClient` methods. Full design: [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
+
 ## Configuration
 
 Defaults match `next-ttc`. Override via the `config` option on the route factory / `AuthClient`:
@@ -159,6 +190,10 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 - Web3 login: 32-byte challenge, 5-min TTL, **single-use** (atomic consume); signature verified with `tweetnacl`.
 - Biometric: WebAuthn `userVerification: required`; PRF preferred; gate fallback wraps its secret
   under a non-extractable AES-GCM key in IndexedDB.
+- Optional biometric unlock (any account): the current app key is wrapped with HKDF-SHA-256 +
+  authenticated AES-256-GCM under a passkey secret and stored per-device; unwrapping always needs a
+  fresh biometric assertion. Purged on `disableBiometricUnlock` and on logout (`clearSession`).
+  See [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
 - Sessions: opaque 256-bit tokens, server-side TTL, revoked on re-login and logout.
 - Dual-key (IP + identifier) rate limiting on all auth routes; responses never echo credential hashes.
 

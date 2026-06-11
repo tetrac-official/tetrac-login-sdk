@@ -59,6 +59,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
+    "smoke:biometric": "npm run build && node scripts/smoke-biometric.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

@@ -18,7 +18,7 @@ export interface PasskeyRegistration {
   mode: "prf" | "gate";
 }
 
-function b64urlEncode(buf: ArrayBuffer | Uint8Array): string {
+export function b64urlEncode(buf: ArrayBuffer | Uint8Array): string {
   const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
   let str = "";
   for (const b of bytes) str += String.fromCharCode(b);
@@ -27,7 +27,7 @@ function b64urlEncode(buf: ArrayBuffer | Uint8Array): string {
 
 // Allocate over a concrete ArrayBuffer so the result is a BufferSource
 // (WebAuthn options reject the generic Uint8Array<ArrayBufferLike>).
-function b64urlDecode(s: string): Uint8Array<ArrayBuffer> {
+export function b64urlDecode(s: string): Uint8Array<ArrayBuffer> {
   const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/") + pad;
   const bin = atob(b64);
@@ -160,6 +160,12 @@ export async function derivePasskeySecret(reg: PasskeyRegistration): Promise<str
 
 const DB_NAME = "ttc_passkey_store";
 const STORE = "gate_secrets";
+// Biometric-unlock wrapped-key blobs live in the SAME database (see
+// biometricUnlock.ts). Both stores are created by the shared opener below at
+// DB version 2, so the two modules never race to open the DB at different
+// versions (a mismatch would throw IndexedDB VersionError on the lower open).
+const UNLOCK_STORE = "unlock_blobs";
+const DB_VERSION = 2;
 
 interface GateRecord {
   cryptoKey: CryptoKey;
@@ -167,14 +173,29 @@ interface GateRecord {
   ciphertext: ArrayBuffer;
 }
 
-function openDb(): Promise<IDBDatabase> {
+/**
+ * Open the shared "ttc_passkey_store" IndexedDB at the current version, creating
+ * BOTH object stores ("gate_secrets" + "unlock_blobs") on upgrade. Exported so
+ * biometricUnlock.ts reuses the exact same opener — there must be exactly one
+ * source of truth for the DB version and its schema.
+ */
+export function openPasskeyDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      // Create each store only if absent — handles both fresh installs and the
+      // v1 -> v2 upgrade (where gate_secrets already exists).
+      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+      if (!db.objectStoreNames.contains(UNLOCK_STORE)) db.createObjectStore(UNLOCK_STORE);
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 }
+
+/** @deprecated internal alias retained for the gate helpers below. */
+const openDb = openPasskeyDb;
 
 // Wrap: generate a non-extractable AES-GCM key, encrypt the hex secret under it
 // with a random 12-byte IV, and persist only the opaque key + IV + ciphertext.
@@ -224,3 +245,21 @@ async function gateLoad(credentialId: string): Promise<string | null> {
   );
   return toHex(new Uint8Array(plain));
 }
+
+/**
+ * Delete the gate secret for a credential. Used by disableBiometricUnlock /
+ * logout purge so a removed credential leaves no recoverable secret behind.
+ * No-op for PRF credentials (which never stored a gate secret).
+ */
+export async function gateDelete(credentialId: string): Promise<void> {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(credentialId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** Name of the object store that holds biometric-unlock wrapped blobs. */
+export const UNLOCK_BLOBS_STORE = UNLOCK_STORE;
