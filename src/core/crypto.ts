@@ -1,16 +1,12 @@
 // App-key derivation, secret encryption, hashing, and CSPRNG helpers.
-// Uses crypto-es so blobs are byte-for-byte compatible with next-ttc.
+// Key derivation + hashing use crypto-es; secret encryption uses Web Crypto AES-256-GCM.
 //
-// Compat-locked cryptography notes (documented, not changed — see docs/5-PRD-FABLE-AUDIT.md §4):
-//  (D1) crypto-es AES.encrypt/decrypt below is OpenSSL-KDF + AES-CBC with NO authentication
-//       tag, so ciphertext tampering is undetectable (decrypt either yields garbage or throws).
-//       Moving to authenticated AES-GCM would break byte-compat with next-ttc, so it is deferred
-//       to a future versioned migration rather than this pass.
-//  (D2) hashPasskey is an unsalted single SHA-256, kept identical to next-ttc for compat. A salted
-//       slow verifier (e.g. Argon2/PBKDF2) is the future hardening path.
-//  (D3) deriveAppKeyFromPasskey defaults to 100k PBKDF2 iterations, below current OWASP guidance
-//       (~600k), but kept for deterministic cross-device recovery compat. pbkdf2Iterations is
-//       configurable for new deployments.
+// Cryptography notes:
+//  (D1) RESOLVED — secret encryption is authenticated AES-256-GCM via Web Crypto (encryptSecret/
+//       decryptSecret below); tampering throws on decrypt. Intentionally breaks byte-compat with the
+//       legacy crypto-es AES-CBC format — no backward-compat path (old CBC blobs do not decrypt).
+//  (D2) hashPasskey is an unsalted single SHA-256 (future hardening: salted slow verifier — Change 3).
+//  (D3) deriveAppKeyFromPasskey defaults to 100k PBKDF2 (future: 600k — Change 2).
 import CryptoES from "crypto-es";
 
 /**
@@ -43,16 +39,56 @@ export function hashPasskey(passkey: string): string {
   return CryptoES.SHA256(passkey).toString(CryptoES.enc.Hex);
 }
 
-/** Encrypt a secret (e.g. hex private key) under the app key. Returns ciphertext string. */
-export function encryptSecret(plaintext: string, appKey: string): string {
-  return CryptoES.AES.encrypt(plaintext, appKey).toString();
+function appKeyToBytes(appKey: string): Uint8Array<ArrayBuffer> {
+  // App key is 64 hex chars (256-bit, from PBKDF2 / SHA-256) -> 32 raw bytes. No 0x prefix.
+  const out = new Uint8Array(new ArrayBuffer(appKey.length / 2));
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(appKey.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
-/** Decrypt a secret produced by encryptSecret. Throws if the key is wrong / blob is corrupt. */
-export function decryptSecret(ciphertext: string, appKey: string): string {
-  const out = CryptoES.AES.decrypt(ciphertext, appKey).toString(CryptoES.enc.Utf8);
-  if (!out) throw new Error("Decryption failed: wrong key or corrupted ciphertext");
+function b64urlEncode(bytes: Uint8Array): string {
+  let s = "";
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function b64urlDecode(s: string): Uint8Array<ArrayBuffer> {
+  const pad = s.length % 4 ? "=".repeat(4 - (s.length % 4)) : "";
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  const out = new Uint8Array(new ArrayBuffer(bin.length));
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+async function importAesGcmKey(appKey: string, usage: KeyUsage[]): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", appKeyToBytes(appKey), { name: "AES-GCM" }, false, usage);
+}
+
+/**
+ * Encrypt a secret (e.g. hex private key) under the app key with AES-256-GCM.
+ * Returns "${b64url(iv)}:${b64url(ciphertext+tag)}". Authenticated (AEAD).
+ */
+export async function encryptSecret(plaintext: string, appKey: string): Promise<string> {
+  const key = await importAesGcmKey(appKey, ["encrypt"]);
+  const iv = new Uint8Array(new ArrayBuffer(12));
+  crypto.getRandomValues(iv); // 96-bit CSPRNG IV
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return `${b64urlEncode(iv)}:${b64urlEncode(new Uint8Array(ct))}`;
+}
+
+/** Decrypt a secret produced by encryptSecret. Throws on wrong key or tampering (GCM auth tag). */
+export async function decryptSecret(ciphertext: string, appKey: string): Promise<string> {
+  const parts = ciphertext.split(":");
+  if (parts.length !== 2) throw new Error("Decryption failed: malformed ciphertext");
+  const iv = b64urlDecode(parts[0]!);
+  const ct = b64urlDecode(parts[1]!);
+  const key = await importAesGcmKey(appKey, ["decrypt"]);
+  try {
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+    return new TextDecoder().decode(plain);
+  } catch {
+    throw new Error("Decryption failed: wrong key or corrupted ciphertext");
+  }
 }
 
 /** Cryptographically-secure random hex string, edge- and Node-safe. */

@@ -127,7 +127,7 @@ export class AuthClient {
     const appKey = await this.deriveAppKey(creds);
     if (validateWith) {
       try {
-        decryptWalletSecret(validateWith, appKey);
+        await decryptWalletSecret(validateWith, appKey);
       } catch {
         throw new Error("Re-authentication failed — wrong credentials");
       }
@@ -144,7 +144,7 @@ export class AuthClient {
   async revealSecret(wallet: EncryptedWallet, creds: ReauthCredentials): Promise<string> {
     const appKey = await this.deriveAppKey(creds);
     try {
-      return decryptWalletSecret(wallet, appKey);
+      return await decryptWalletSecret(wallet, appKey);
     } catch {
       throw new Error("Re-authentication failed — wrong credentials");
     }
@@ -175,7 +175,7 @@ export class AuthClient {
   /** Register an email/passkey account; generates and encrypts wallets client-side. */
   async registerWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, this.config.pbkdf2Iterations);
-    const bundle = generateWalletBundle({ appKey, ...this.walletGen });
+    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const identity = bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
 
@@ -251,7 +251,7 @@ export class AuthClient {
   }): Promise<AuthResult> {
     const { appKey, signatureHex, challenge } = await this.walletHandshake(params.publicKey, params.signMessage);
     // Sent only if the wallet is new; the server ignores it for returning wallets.
-    const bundle = generateWalletBundle({ appKey, ...this.walletGen });
+    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const result = await this.post<AuthResult>("connect-wallet", {
       publicKey: params.publicKey,
       signature: signatureHex,
@@ -269,7 +269,7 @@ export class AuthClient {
   }): Promise<AuthResult> {
     const { appKey, signatureHex, challenge } = await this.walletHandshake(params.publicKey, params.signMessage);
     // The connected wallet is the funds identity; generate extra (e.g. signing) wallets.
-    const bundle = generateWalletBundle({ appKey, ...this.walletGen });
+    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const result = await this.post<AuthResult>("register", {
       publicKey: params.publicKey,
       authMethod: "wallet",
@@ -287,7 +287,7 @@ export class AuthClient {
   async registerWithBiometric(params: { userName: string }): Promise<{ result: AuthResult; registration: PasskeyRegistration }> {
     const registration = await registerPasskey(this.config.webauthn, params.userName);
     const appKey = await derivePasskeySecret(registration);
-    const bundle = generateWalletBundle({ appKey, ...this.walletGen });
+    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const identity = bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
 

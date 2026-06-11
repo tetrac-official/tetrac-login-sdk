@@ -47,44 +47,44 @@ describe("PBKDF2 iteration determinism (C3)", () => {
     expect(a).toBe(b);
   });
 
-  it("encrypted secrets under different iteration counts are not interchangeable", () => {
+  it("encrypted secrets under different iteration counts are not interchangeable", async () => {
     const key100k = deriveAppKeyFromPasskey(passkey, email, 100_000);
     const key600k = deriveAppKeyFromPasskey(passkey, email, 600_000);
     const secret = randomHex(32);
 
-    const ct100k = encryptSecret(secret, key100k);
-    const ct600k = encryptSecret(secret, key600k);
+    const ct100k = await encryptSecret(secret, key100k);
+    const ct600k = await encryptSecret(secret, key600k);
 
     // Each key decrypts its own ciphertext
-    expect(decryptSecret(ct100k, key100k)).toBe(secret);
-    expect(decryptSecret(ct600k, key600k)).toBe(secret);
+    expect(await decryptSecret(ct100k, key100k)).toBe(secret);
+    expect(await decryptSecret(ct600k, key600k)).toBe(secret);
 
-    // Cross-decrypt fails (different keys)
-    expect(() => decryptSecret(ct100k, key600k)).toThrow();
-    expect(() => decryptSecret(ct600k, key100k)).toThrow();
-  });
+    // Cross-decrypt fails (different keys; AES-GCM auth-tag mismatch)
+    await expect(decryptSecret(ct100k, key600k)).rejects.toThrow();
+    await expect(decryptSecret(ct600k, key100k)).rejects.toThrow();
+  }, 30_000); // 600k PBKDF2 derivations are slow; raise the per-test timeout
 
-  it("changing default from 100k to 600k does not break existing users", () => {
+  it("changing default from 100k to 600k does not break existing users", async () => {
     // Simulate a user registered with 100k iterations
     const email = "legacy@example.com";
     const passkey = "legacy-passkey";
     const legacyKey = deriveAppKeyFromPasskey(passkey, email, 100_000);
-    const legacySecret = encryptSecret("legacy-wallet-key", legacyKey);
+    const legacySecret = await encryptSecret("legacy-wallet-key", legacyKey);
 
     // New default would be 600k
     const newDefaultKey = deriveAppKeyFromPasskey(passkey, email, 600_000);
 
     // Legacy user on new default CANNOT decrypt (wrong key)
-    expect(() => decryptSecret(legacySecret, newDefaultKey)).toThrow();
+    await expect(decryptSecret(legacySecret, newDefaultKey)).rejects.toThrow();
 
     // But legacy user using their creation-time iteration count still works
-    expect(decryptSecret(legacySecret, legacyKey)).toBe("legacy-wallet-key");
+    expect(await decryptSecret(legacySecret, legacyKey)).toBe("legacy-wallet-key");
 
     // CONCLUSION: changing the default is safe for new users; existing users
     // must continue using their creation-time iteration count. This is
     // already handled by the config parameter being per-deployment and
     // the deterministic nature of PBKDF2(email, passkey, iterations).
-  });
+  }, 30_000); // 600k PBKDF2 derivation is slow; raise the per-test timeout
 });
 
 describe("PBKDF2 config plumbing", () => {

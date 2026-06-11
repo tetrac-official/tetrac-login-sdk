@@ -28,40 +28,40 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 /** Generate one Solana keypair and return its public key + encrypted secret (hex of the 64-byte secret). */
-function generateSolanaWallet(role: WalletRole, appKey: string): EncryptedWallet {
+async function generateSolanaWallet(role: WalletRole, appKey: string): Promise<EncryptedWallet> {
   const kp = Keypair.generate();
   const secretHex = bytesToHex(kp.secretKey);
   return {
     chain: "solana",
     role,
     publicKey: kp.publicKey.toBase58(),
-    encryptedSecret: encryptSecret(secretHex, appKey),
+    encryptedSecret: await encryptSecret(secretHex, appKey),
   };
 }
 
 /** Generate one EVM keypair via viem and return its address + encrypted private key (0x hex). */
-function generateEvmWallet(role: WalletRole, appKey: string): EncryptedWallet {
+async function generateEvmWallet(role: WalletRole, appKey: string): Promise<EncryptedWallet> {
   const privateKey = generatePrivateKey(); // 0x-prefixed 32-byte hex
   const account = privateKeyToAccount(privateKey);
   return {
     chain: "evm",
     role,
     publicKey: account.address,
-    encryptedSecret: encryptSecret(privateKey, appKey),
+    encryptedSecret: await encryptSecret(privateKey, appKey),
   };
 }
 
 /** Generate a role-keyed bundle of encrypted wallets across the requested chains. */
-export function generateWalletBundle(input: GenerateWalletBundleInput): GeneratedWalletBundle {
+export async function generateWalletBundle(input: GenerateWalletBundleInput): Promise<GeneratedWalletBundle> {
   const bundle: GeneratedWalletBundle = {};
   if (input.solana?.length) {
     const wallets: ChainWallets = {};
-    for (const role of input.solana) wallets[role] = generateSolanaWallet(role, input.appKey);
+    for (const role of input.solana) wallets[role] = await generateSolanaWallet(role, input.appKey);
     bundle.solana = wallets;
   }
   if (input.evm?.length) {
     const wallets: ChainWallets = {};
-    for (const role of input.evm) wallets[role] = generateEvmWallet(role, input.appKey);
+    for (const role of input.evm) wallets[role] = await generateEvmWallet(role, input.appKey);
     bundle.evm = wallets;
   }
   return bundle;
@@ -78,13 +78,13 @@ export function flattenBundle(bundle: GeneratedWalletBundle): EncryptedWallet[] 
 }
 
 /** Decrypt a wallet's secret. For Solana: 64-byte secret hex. For EVM: 0x private key. */
-export function decryptWalletSecret(wallet: EncryptedWallet, appKey: string): string {
+export async function decryptWalletSecret(wallet: EncryptedWallet, appKey: string): Promise<string> {
   return decryptSecret(wallet.encryptedSecret, appKey);
 }
 
 /** Reconstruct a Solana Keypair from an encrypted wallet. */
-export function toSolanaKeypair(wallet: EncryptedWallet, appKey: string): Keypair {
-  return Keypair.fromSecretKey(hexToBytes(decryptWalletSecret(wallet, appKey)));
+export async function toSolanaKeypair(wallet: EncryptedWallet, appKey: string): Promise<Keypair> {
+  return Keypair.fromSecretKey(hexToBytes(await decryptWalletSecret(wallet, appKey)));
 }
 
 /**
@@ -96,7 +96,7 @@ export async function withDecryptedKey<T>(
   appKey: string,
   fn: (secret: string) => Promise<T> | T,
 ): Promise<T> {
-  let secret: string | null = decryptWalletSecret(wallet, appKey);
+  let secret: string | null = await decryptWalletSecret(wallet, appKey);
   try {
     return await fn(secret);
   } finally {
