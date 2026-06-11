@@ -1,6 +1,6 @@
 // High-level browser auth client. Orchestrates key derivation, client-side wallet
 // generation, the API round-trips, and session storage for all three methods.
-import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
+import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } from "../core/config.js";
 import {
   deriveAppKeyFromPasskey,
   deriveAppKeyFromSignature,
@@ -9,7 +9,7 @@ import {
 import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
-import { setSession, clearSession, authHeaders, armAppKey, getAuthToken, getEmail, configureVault } from "./session.js";
+import { setSession, clearSession, authHeaders, armAppKey, getAuthToken, getEmail, getPbkdf2Iterations, configureVault } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
 import {
   enableBiometricUnlock,
@@ -98,7 +98,9 @@ export class AuthClient {
     if ("passkey" in creds) {
       const email = getEmail();
       if (!email) throw new Error("No email in session for passkey re-auth");
-      return deriveAppKeyFromPasskey(creds.passkey, email, this.config.pbkdf2Iterations);
+      // Use the iteration count pinned for this account at registration (legacy: 100k fallback).
+      const iterations = getPbkdf2Iterations() ?? 100_000;
+      return deriveAppKeyFromPasskey(creds.passkey, email, iterations);
     }
     if ("signMessage" in creds) {
       const sig = await creds.signMessage(new TextEncoder().encode(walletAppKeyMessage()));
@@ -174,7 +176,8 @@ export class AuthClient {
 
   /** Register an email/passkey account; generates and encrypts wallets client-side. */
   async registerWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
-    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, this.config.pbkdf2Iterations);
+    const iterations = PBKDF2_ITERATIONS[this.config.securityLevel];
+    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const identity = bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
@@ -185,19 +188,23 @@ export class AuthClient {
       passkeyHash: hashPasskey(params.passkey),
       authMethod: "email",
       wallets: flattenBundle(bundle),
+      pbkdf2Iterations: iterations, // pin the count per-user so future level changes don't orphan this account
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email, pbkdf2Iterations: iterations });
     return result;
   }
 
   /** Log in with email + passkey. Re-derives the app key to unlock wallets. */
   async loginWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
-    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, this.config.pbkdf2Iterations);
     const result = await this.post<AuthResult>("login", {
       email: params.email,
       passkeyHash: hashPasskey(params.passkey),
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email });
+    // Re-derive with the iteration count pinned at registration; legacy accounts (no
+    // stored count) fall back to 100k — which is exactly what they were created with.
+    const iterations = result.user?.pbkdf2Iterations ?? 100_000;
+    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations);
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email, pbkdf2Iterations: iterations });
     return result;
   }
 

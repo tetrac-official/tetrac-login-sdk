@@ -16,7 +16,7 @@ import {
   decryptSecret,
   timingSafeEqual,
 } from "../src/core/crypto";
-import { DEFAULT_CONFIG } from "../src/core/config";
+import { DEFAULT_CONFIG, PBKDF2_ITERATIONS } from "../src/core/config";
 import { WALLET_APP_KEY_MESSAGE, walletAppKeyMessage } from "../src/core/index";
 
 const sha256hex = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
@@ -33,13 +33,13 @@ describe("C1 — server-stored passkeyHash is unsalted single SHA-256 (GPU-crack
     expect(hashPasskey("hunter2")).toBe(hashPasskey("hunter2"));
   });
 
-  it("END-TO-END: a leaked {passkeyHash, email, ciphertext} is offline-crackable → full wallet recovery", () => {
+  it("END-TO-END: a leaked {passkeyHash, email, ciphertext} is offline-crackable → full wallet recovery", async () => {
     // What the server stores for an email user (all of it leaks together on a DB compromise):
     const realPasskey = "letmein"; // weak, in any wordlist
     const email = "victim@example.com";
     const leakedPasskeyHash = hashPasskey(realPasskey);
     const appKey = deriveAppKeyFromPasskey(realPasskey, email);
-    const leakedCiphertext = encryptSecret(ORIGINAL, appKey);
+    const leakedCiphertext = await encryptSecret(ORIGINAL, appKey);
 
     // Attacker brute-forces the FAST unsalted hash (NOT the 100k PBKDF2):
     const dictionary = ["123456", "password", "letmein", "qwerty"];
@@ -51,14 +51,14 @@ describe("C1 — server-stored passkeyHash is unsalted single SHA-256 (GPU-crack
 
     // Recovered passkey + the (public) email re-derive the appKey and decrypt the wallet:
     const recoveredKey = deriveAppKeyFromPasskey(cracked!, email);
-    expect(decryptSecret(leakedCiphertext, recoveredKey)).toBe(ORIGINAL);
+    expect(await decryptSecret(leakedCiphertext, recoveredKey)).toBe(ORIGINAL);
   });
 });
 
-describe("H2 — KDF uses email as salt and 100k iterations (< OWASP 600k), no domain separation", () => {
-  it("default iteration count is 100k, below the 600k guidance", () => {
-    expect(DEFAULT_CONFIG.pbkdf2Iterations).toBe(100_000);
-    expect(DEFAULT_CONFIG.pbkdf2Iterations).toBeLessThan(600_000);
+describe("H2 — iteration count RESOLVED (default 600k); salt is still the email (open)", () => {
+  it("default security level is 2 = 600k, meeting OWASP 2023 (H2 iteration count RESOLVED)", () => {
+    expect(DEFAULT_CONFIG.securityLevel).toBe(2);
+    expect(PBKDF2_ITERATIONS[DEFAULT_CONFIG.securityLevel]).toBeGreaterThanOrEqual(600_000);
   });
 
   it("salt is exactly the normalized email (public, predictable, low-entropy)", () => {
@@ -73,48 +73,24 @@ describe("H2 — KDF uses email as salt and 100k iterations (< OWASP 600k), no d
   });
 });
 
-describe("H1 — wallet secrets use unauthenticated AES-CBC (no MAC; tampering ≈ wrong key)", () => {
-  const GENERIC = /Decryption failed|Malformed UTF-8/i;
-  const INTEGRITY = /integrity|authentic|tag|MAC/i;
-
-  it("ciphertext is the bare OpenSSL 'Salted__' blob — there is no authentication-tag field", () => {
-    const raw = Buffer.from(encryptSecret("topsecret", "k".repeat(64)), "base64");
-    expect(raw.subarray(0, 8).toString("latin1")).toBe("Salted__"); // = "Salted__" + 8-byte salt + ciphertext
+describe("H1 RESOLVED — wallet secrets use authenticated AES-256-GCM (tampering throws)", () => {
+  it("ciphertext is GCM format b64url(iv):b64url(ct+tag), not the legacy Salted__ blob", async () => {
+    const ct = await encryptSecret(ORIGINAL, "ab".repeat(32));
+    expect(ct.split(":")).toHaveLength(2);
+    expect(ct.startsWith("U2FsdGVk")).toBe(false); // U2FsdGVk = base64 of "Salted__"
   });
 
-  it("a wrong key fails with only a GENERIC error (never an integrity error)", () => {
-    const ct = encryptSecret(ORIGINAL, "k".repeat(64));
-    let msg = "";
-    try { decryptSecret(ct, "j".repeat(64)); } catch (e: any) { msg = e.message; }
-    expect(msg).toMatch(GENERIC);
-    expect(msg).not.toMatch(INTEGRITY);
+  it("a wrong key throws (GCM auth-tag mismatch)", async () => {
+    const ct = await encryptSecret(ORIGINAL, "ab".repeat(32));
+    await expect(decryptSecret(ct, "cd".repeat(32))).rejects.toThrow();
   });
 
-  it("tampering is INDISTINGUISHABLE from a wrong key — no AEAD detects it", () => {
-    const key = "k".repeat(64);
-    const ct = encryptSecret(ORIGINAL, key);
-
-    const outcomes: Array<{ threw: boolean; msg?: string; out?: string }> = [];
-    for (let i = 12; i < ct.length - 2; i += 3) {
-      const flipped = ct[i] === "A" ? "B" : "A";
-      const bad = ct.slice(0, i) + flipped + ct.slice(i + 1);
-      try {
-        outcomes.push({ threw: false, out: decryptSecret(bad, key) });
-      } catch (e: any) {
-        outcomes.push({ threw: true, msg: e.message });
-      }
-    }
-
-    // Every tampered blob either (a) silently decrypts to some plaintext (CBC malleability)
-    // or (b) throws the SAME generic error as a wrong key. None reports an integrity failure.
-    for (const o of outcomes) {
-      if (o.threw) {
-        expect(o.msg).toMatch(GENERIC);
-        expect(o.msg).not.toMatch(INTEGRITY);
-      } else {
-        expect(typeof o.out).toBe("string"); // returned a value with no integrity check at all
-      }
-    }
+  it("tampering is DETECTED — any ciphertext bitflip throws (no silent garbage)", async () => {
+    const key = "ab".repeat(32);
+    const ct = await encryptSecret(ORIGINAL, key);
+    const [iv, body] = ct.split(":");
+    const flipped = body![0] === "A" ? "B" : "A";
+    await expect(decryptSecret(`${iv}:${flipped}${body!.slice(1)}`, key)).rejects.toThrow();
   });
 });
 

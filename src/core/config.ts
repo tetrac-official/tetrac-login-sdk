@@ -24,9 +24,35 @@ export interface WebAuthnConfig {
   preferPrf: boolean;
 }
 
+/** Developer-chosen key-derivation strength. Higher = stronger but slower. */
+export type SecurityLevel = 1 | 2 | 3;
+
+/**
+ * PBKDF2-HMAC-SHA256 iteration counts per security level, for the email/passkey
+ * app-key derivation. Higher = stronger brute-force resistance but slower
+ * derivation (more login/unlock latency). The developer picks the level; the
+ * resolved iteration COUNT is what gets pinned per-user, so the choice stays
+ * stable even if this mapping is retuned later.
+ *   1 = 100k   — fastest (~1.2s on M-series); below OWASP 2023, legacy/compat only
+ *   2 = 600k   — OWASP 2023 minimum (~7s); recommended default
+ *   3 = 1.0M   — future-proof (~12s); highest latency
+ * Affects email/passkey accounts only — wallet uses SHA-256(sig), biometric uses PRF.
+ */
+export const PBKDF2_ITERATIONS: Record<SecurityLevel, number> = {
+  1: 100_000,
+  2: 600_000,
+  3: 1_000_000,
+};
+
 export interface AuthConfig {
-  /** PBKDF2 iterations for deriving the app key from passkey + email. */
-  pbkdf2Iterations: number;
+  /**
+   * Key-derivation strength for email/passkey accounts: 1=100k, 2=600k (default),
+   * 3=1M PBKDF2-HMAC-SHA256 iterations (see PBKDF2_ITERATIONS). Trades login/unlock
+   * latency for brute-force resistance. The resolved iteration COUNT is pinned
+   * per-user at registration (UserData.pbkdf2Iterations), so it stays stable for
+   * existing accounts even if the default level changes later.
+   */
+  securityLevel: SecurityLevel;
   /** TTL for wallet-login challenges, in seconds. */
   challengeTtlSeconds: number;
   /** Header carrying the opaque session token. */
@@ -65,7 +91,7 @@ export interface AuthConfig {
 }
 
 export const DEFAULT_CONFIG: AuthConfig = {
-  pbkdf2Iterations: 100_000,
+  securityLevel: 2,
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",

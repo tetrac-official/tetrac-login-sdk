@@ -14,6 +14,7 @@ const TOKEN_KEY = "ttc-auth-token";
 const PUBKEY_KEY = "ttc-public-key";
 const EMAIL_KEY = "user_email";
 const EK_KEY = "ttc_ek"; // app/encryption key — sessionStorage only (when storageMode==="session")
+const EK_ITER_KEY = "ttc_pbkdf2_iter"; // per-user PBKDF2 iteration count, pinned at register/login
 
 /** Thrown by signer/decrypt helpers when the vault is locked. */
 export class VaultLockedError extends Error {
@@ -120,11 +121,16 @@ export function setSession(params: {
   authToken: string;
   appKey: string;
   email?: string;
+  /** PBKDF2 iteration count this account's app key was derived with (email users). */
+  pbkdf2Iterations?: number;
 }): void {
   if (!hasWindow()) return;
   localStorage.setItem(TOKEN_KEY, params.authToken);
   localStorage.setItem(PUBKEY_KEY, params.publicKey);
   if (params.email) localStorage.setItem(EMAIL_KEY, params.email);
+  if (typeof params.pbkdf2Iterations === "number") {
+    localStorage.setItem(EK_ITER_KEY, String(params.pbkdf2Iterations));
+  }
   armAppKey(params.appKey);
 }
 
@@ -201,6 +207,15 @@ export function getEmail(): string | null {
   return hasWindow() ? localStorage.getItem(EMAIL_KEY) : null;
 }
 
+/** PBKDF2 iteration count pinned for this account (email users), or null if unset/legacy. */
+export function getPbkdf2Iterations(): number | null {
+  if (!hasWindow()) return null;
+  const raw = localStorage.getItem(EK_ITER_KEY);
+  if (raw == null) return null;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** The app/encryption key, or null when the vault is locked. */
 export function getAppKey(): string | null {
   if (isLocked()) return null;
@@ -213,6 +228,7 @@ export function clearSession(): void {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(PUBKEY_KEY);
     localStorage.removeItem(EMAIL_KEY);
+    localStorage.removeItem(EK_ITER_KEY);
   }
   // Fire feature cleanup hooks (e.g. purge biometric-unlock blobs). Best-effort:
   // a throwing hook must never block logout.

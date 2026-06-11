@@ -333,3 +333,40 @@ describe("proxy-header trust (M4)", () => {
     expect((await make("3.3.3.3")).status).toBe(429); // spoofing the IP didn't help
   });
 });
+
+// --- v0.2.1 Change 2: per-user PBKDF2 iteration count (Option A) ---
+
+describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
+  it("register stores pbkdf2Iterations and login returns it (pinned per-user)", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage });
+    const passkeyHash = hashPasskey("derived-app-key");
+
+    const reg = await h.register(
+      req({
+        publicKey: "SoLIter1111111111111111111111111111111111111",
+        email: "iter@example.com",
+        passkeyHash,
+        authMethod: "email",
+        pbkdf2Iterations: 600_000,
+        wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
+      }),
+    );
+    expect(reg.status).toBe(201);
+    expect((await reg.json()).user.pbkdf2Iterations).toBe(600_000);
+
+    // Login returns the same pinned count so the client re-derives the same app key.
+    const login = await h.login(req({ email: "iter@example.com", passkeyHash }));
+    expect((await login.json()).user.pbkdf2Iterations).toBe(600_000);
+  });
+
+  it("legacy account (no count sent) stores none — client falls back to 100k", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage });
+    const passkeyHash = hashPasskey("legacy");
+    const reg = await h.register(
+      req({ publicKey: "SoLLegacy111111111111111111111111111111111", email: "legacy@example.com", passkeyHash, authMethod: "email", wallets: [] }),
+    );
+    expect((await reg.json()).user.pbkdf2Iterations).toBeUndefined();
+  });
+});

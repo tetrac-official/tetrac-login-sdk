@@ -14,8 +14,7 @@ import {
   encryptSecret,
   decryptSecret,
 } from "../src/core/crypto";
-import { resolveConfig, type AuthConfig } from "../src/core/config";
-import { AuthClient, createAuthClient } from "../src/client/authClient";
+import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig } from "../src/core/config";
 import { armAppKey, getAppKey, lockVault, configureVault } from "../src/client/session";
 import { hashPasskey } from "../src/core/crypto";
 
@@ -87,33 +86,20 @@ describe("PBKDF2 iteration determinism (C3)", () => {
   }, 30_000); // 600k PBKDF2 derivation is slow; raise the per-test timeout
 });
 
-describe("PBKDF2 config plumbing", () => {
-  it("resolveConfig applies custom pbkdf2Iterations", () => {
-    const config = resolveConfig({ pbkdf2Iterations: 600_000 });
-    expect(config.pbkdf2Iterations).toBe(600_000);
+describe("security level → PBKDF2 iteration plumbing", () => {
+  it("PBKDF2_ITERATIONS maps levels 1/2/3 to 100k/600k/1M; resolveConfig is secure-by-default (level 2)", () => {
+    expect(PBKDF2_ITERATIONS[1]).toBe(100_000);
+    expect(PBKDF2_ITERATIONS[2]).toBe(600_000);
+    expect(PBKDF2_ITERATIONS[3]).toBe(1_000_000);
+    expect(resolveConfig().securityLevel).toBe(2); // default level 2 = 600k (OWASP)
+    expect(resolveConfig({ securityLevel: 1 }).securityLevel).toBe(1);
+    expect(resolveConfig({ securityLevel: 3 }).securityLevel).toBe(3);
   });
 
-  it("AuthClient passes pbkdf2Iterations to deriveAppKeyFromPasskey", () => {
-    const client = createAuthClient({
-      apiBaseUrl: "http://localhost:9999",
-      config: { pbkdf2Iterations: 300_000 },
-    });
-
-    // We can't directly observe the iteration count used internally,
-    // but we can verify the config was resolved correctly via deriveAppKey.
-    // This is an architectural test: the config flows from AuthClientOptions
-    // → resolveConfig → AuthClient.config → passed to deriveAppKeyFromPasskey.
-    // The deriveAppKeyFromPasskey function itself is pure and tested above.
-  });
-
-  it("different iteration counts in config produce different app keys", () => {
-    const email = "test@test.com";
-    const passkey = "pw";
-    const low = deriveAppKeyFromPasskey(passkey, email, 100_000);
-    const med = deriveAppKeyFromPasskey(passkey, email, 300_000);
-    const high = deriveAppKeyFromPasskey(passkey, email, 600_000);
-    // All three should be distinct
-    expect(new Set([low, med, high]).size).toBe(3);
+  it("different iteration counts produce different app keys (migration safety)", () => {
+    const low = deriveAppKeyFromPasskey("pw", "test@test.com", PBKDF2_ITERATIONS[1]);
+    const high = deriveAppKeyFromPasskey("pw", "test@test.com", PBKDF2_ITERATIONS[2]);
+    expect(low).not.toBe(high);
   });
 });
 

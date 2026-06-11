@@ -45,6 +45,8 @@ export interface UserData {
   /** Encrypted wallet blobs, flattened for storage. */
   wallets: EncryptedWallet[];
   createdAt: number;
+  /** PBKDF2 iteration count used to derive the app key (email users). Pinned at registration. */
+  pbkdf2Iterations?: number;
   [extra: string]: unknown;
 }
 

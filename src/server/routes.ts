@@ -105,6 +105,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         wallets?: EncryptedWallet[];
         signature?: string;
         challenge?: string;
+        pbkdf2Iterations?: number;
       }>(req);
       if (!body?.publicKey) return error("publicKey required");
       if (body.wallets !== undefined) {
@@ -149,6 +150,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         passkeyHash: body.passkeyHash,
         authMethod: body.authMethod ?? "email",
         wallets: body.wallets ?? [],
+        // PBKDF2 iteration count the client derived the app key with (email users);
+        // pinned so the same count is used on every future login/unlock. Undefined for
+        // wallet/biometric (they don't use PBKDF2).
+        pbkdf2Iterations: body.pbkdf2Iterations,
         // Real timestamp is stamped by the runtime; tests can inject via storage.
         createdAt: Date.now(),
       };
