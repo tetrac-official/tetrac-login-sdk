@@ -169,7 +169,7 @@ describe("rate limit integration in route handlers", () => {
       h.register(req({
         publicKey: "pk-1",
         email: "test@example.com",
-        passkeyHash: "a".repeat(64),
+        authPublicKey: "a".repeat(64),
         authMethod: "email",
         wallets: [],
       }));

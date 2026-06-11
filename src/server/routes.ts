@@ -6,8 +6,7 @@ import type { AuthResult, EncryptedWallet, UserData } from "../core/types.js";
 import { json, error, clientIp, readJson } from "./http.js";
 import { checkRateLimit } from "./rateLimit.js";
 import { issueChallenge, consumeChallenge } from "./challenge.js";
-import { verifySolanaSignature } from "./signature.js";
-import { timingSafeEqual } from "../core/crypto.js";
+import { verifySolanaSignature, verifyAuthSignature } from "./signature.js";
 import {
   persistUser,
   getUserByPublicKey,
@@ -55,10 +54,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return null;
   }
 
-  // Client-safe copy of a user record: never echo the passkeyHash or the session
-  // token back to the browser (the token travels only in AuthResult.authToken).
+  // Client-safe copy of a user record: never echo the session token back to the
+  // browser (it travels only in AuthResult.authToken). authPublicKey is public key
+  // material, so it is safe to include.
   function publicUser(user: UserData): UserData {
-    const { passkeyHash: _passkeyHash, authToken: _authToken, ...safe } = user;
+    const { authToken: _authToken, ...safe } = user;
     return safe as UserData;
   }
 
@@ -90,17 +90,26 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async challenge(req) {
       const limited = await rateLimited(req);
       if (limited) return limited;
-      const body = await readJson<{ publicKey?: string }>(req);
-      if (!body?.publicKey) return error("publicKey required");
-      const challenge = await issueChallenge(storage, body.publicKey, config);
-      return json({ challenge });
+      const body = await readJson<{ publicKey?: string; email?: string }>(req);
+      // Wallet flow passes publicKey; email/biometric flow passes the account email
+      // (or internal biometric id), which we resolve to the identity publicKey.
+      let publicKey = body?.publicKey ?? null;
+      if (!publicKey && body?.email) {
+        publicKey = await resolvePublicKeyByEmail(storage, body.email, config);
+      }
+      if (!publicKey) return error("publicKey or email required");
+      const challenge = await issueChallenge(storage, publicKey, config);
+      // Email accounts also need their pinned PBKDF2 iteration count to re-derive the
+      // appKey (and thus the auth keypair) before signing — public, not secret.
+      const user = body?.email ? await getUserByPublicKey(storage, publicKey, config) : null;
+      return json({ challenge, pbkdf2Iterations: user?.pbkdf2Iterations });
     },
 
     async register(req) {
       const body = await readJson<{
         publicKey?: string;
         email?: string;
-        passkeyHash?: string;
+        authPublicKey?: string;
         authMethod?: UserData["authMethod"];
         wallets?: EncryptedWallet[];
         signature?: string;
@@ -140,14 +149,14 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge)) {
           return error("Signature verification failed", 401);
         }
-      } else if (!body.passkeyHash) {
-        return error("passkeyHash required for email/biometric registration");
+      } else if (!body.authPublicKey) {
+        return error("authPublicKey required for email/biometric registration");
       }
 
       const user: UserData = {
         publicKey: body.publicKey,
         email: body.email,
-        passkeyHash: body.passkeyHash,
+        authPublicKey: body.authPublicKey,
         authMethod: body.authMethod ?? "email",
         wallets: body.wallets ?? [],
         // PBKDF2 iteration count the client derived the app key with (email users);
@@ -163,8 +172,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     },
 
     async login(req) {
-      const body = await readJson<{ email?: string; passkeyHash?: string }>(req);
-      if (!body?.email || !body.passkeyHash) return error("email and passkeyHash required");
+      const body = await readJson<{ email?: string; signature?: string; challenge?: string }>(req);
+      if (!body?.email || !body.signature || !body.challenge) {
+        return error("email, signature and challenge required");
+      }
 
       const limited = await rateLimited(req, body.email);
       if (limited) return limited;
@@ -172,9 +183,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const publicKey = await resolvePublicKeyByEmail(storage, body.email, config);
       if (!publicKey) return error("Invalid credentials", 401);
       const user = await getUserByPublicKey(storage, publicKey, config);
-      // Timing-safe hash compare; a missing stored hash is always invalid (and the
-      // compare still runs so absence vs mismatch aren't distinguishable by timing).
-      if (!user || !timingSafeEqual(user.passkeyHash ?? "", body.passkeyHash)) {
+      // Single-use challenge + ed25519 signature against the stored auth public key.
+      // The server holds no passkey-derived secret; auth is proof-of-control of the key.
+      const ok = await consumeChallenge(storage, publicKey, body.challenge, config);
+      if (!ok) return error("Invalid or expired challenge", 401);
+      if (!user || !user.authPublicKey || !verifyAuthSignature(user.authPublicKey, body.signature, body.challenge)) {
         return error("Invalid credentials", 401);
       }
       await issueSession(storage, user, config);

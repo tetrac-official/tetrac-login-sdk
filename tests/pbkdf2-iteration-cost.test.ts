@@ -16,7 +16,6 @@ import {
 } from "../src/core/crypto";
 import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig } from "../src/core/config";
 import { armAppKey, getAppKey, lockVault, configureVault } from "../src/client/session";
-import { hashPasskey } from "../src/core/crypto";
 
 function randomHex(n: number): string {
   const b = new Uint8Array(n);

@@ -9,49 +9,28 @@
 import { createHash } from "crypto";
 import CryptoES from "crypto-es";
 import {
-  hashPasskey,
   deriveAppKeyFromPasskey,
   deriveAppKeyFromSignature,
   encryptSecret,
   decryptSecret,
   timingSafeEqual,
 } from "../src/core/crypto";
+import { deriveAuthPublicKey } from "../src/client/authKey";
 import { DEFAULT_CONFIG, PBKDF2_ITERATIONS } from "../src/core/config";
 import { WALLET_APP_KEY_MESSAGE, walletAppKeyMessage } from "../src/core/index";
 
 const sha256hex = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const ORIGINAL = "0x" + "11".repeat(32);
 
-describe("C1 — server-stored passkeyHash is unsalted single SHA-256 (GPU-crackable, bypasses PBKDF2)", () => {
-  it("hashPasskey is exactly ONE round of plain, unsalted SHA-256 (no work factor)", () => {
-    expect(hashPasskey("password")).toBe(sha256hex("password"));
-    expect(hashPasskey("correct horse battery staple")).toBe(sha256hex("correct horse battery staple"));
-  });
-
-  it("is unsalted: the same passkey for different users yields the SAME stored hash", () => {
-    // ⇒ a single rainbow table attacks all email users; identical passkeys are visible in a leak.
-    expect(hashPasskey("hunter2")).toBe(hashPasskey("hunter2"));
-  });
-
-  it("END-TO-END: a leaked {passkeyHash, email, ciphertext} is offline-crackable → full wallet recovery", async () => {
-    // What the server stores for an email user (all of it leaks together on a DB compromise):
-    const realPasskey = "letmein"; // weak, in any wordlist
-    const email = "victim@example.com";
-    const leakedPasskeyHash = hashPasskey(realPasskey);
-    const appKey = deriveAppKeyFromPasskey(realPasskey, email);
-    const leakedCiphertext = await encryptSecret(ORIGINAL, appKey);
-
-    // Attacker brute-forces the FAST unsalted hash (NOT the 100k PBKDF2):
-    const dictionary = ["123456", "password", "letmein", "qwerty"];
-    let cracked: string | null = null;
-    for (const guess of dictionary) {
-      if (timingSafeEqual(hashPasskey(guess), leakedPasskeyHash)) { cracked = guess; break; }
-    }
-    expect(cracked).toBe(realPasskey); // recovered from the hash alone
-
-    // Recovered passkey + the (public) email re-derive the appKey and decrypt the wallet:
-    const recoveredKey = deriveAppKeyFromPasskey(cracked!, email);
-    expect(await decryptSecret(leakedCiphertext, recoveredKey)).toBe(ORIGINAL);
+describe("C1 RESOLVED — no passkey hash on the server (signature auth)", () => {
+  it("the stored credential is an ed25519 auth public key derived from (not equal to) the appKey", () => {
+    // The unsalted-SHA-256 passkeyHash was removed in v0.2.1 Change 3. Email/biometric
+    // accounts now authenticate by signing a challenge with a derived auth keypair; the
+    // server stores only this public key — there is no fast hash to GPU-crack offline.
+    const appKey = deriveAppKeyFromPasskey("letmein", "victim@example.com");
+    const authPub = deriveAuthPublicKey(appKey);
+    expect(authPub).toMatch(/^[0-9a-f]{64}$/); // 32-byte ed25519 public key (hex)
+    expect(authPub).not.toBe(appKey); // domain-separated from the wallet-encryption key
   });
 });
 

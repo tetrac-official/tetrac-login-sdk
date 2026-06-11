@@ -2,8 +2,10 @@ import { Keypair } from "@solana/web3.js";
 import nacl from "tweetnacl";
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
-import { hashPasskey } from "../src/core/crypto";
 import { walletLoginMessage } from "../src/core/index";
+import { registerEmail, loginEmail } from "./_auth-helpers";
+
+const APP_KEY = "ab".repeat(32); // fixed 64-hex app key for email-auth tests (any hex works)
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {
@@ -18,29 +20,25 @@ function bytesToHex(b: Uint8Array): string {
 }
 
 describe("email auth flow", () => {
-  it("registers then logs in with the same passkey hash", async () => {
+  it("registers then logs in via challenge + auth-keypair signature", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const passkeyHash = hashPasskey("derived-app-key");
 
-    const reg = await h.register(
-      req({
-        publicKey: "SoLPubKey1111111111111111111111111111111111",
-        email: "user@example.com",
-        passkeyHash,
-        authMethod: "email",
-        wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
-      }),
-    );
+    const reg = await registerEmail(h, {
+      publicKey: "SoLPubKey1111111111111111111111111111111111",
+      email: "user@example.com",
+      appKey: APP_KEY,
+      wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
+    });
     expect(reg.status).toBe(201);
     const regBody = await reg.json();
     expect(regBody.authToken).toHaveLength(64);
 
-    const login = await h.login(req({ email: "user@example.com", passkeyHash }));
+    const login = await loginEmail(h, { email: "user@example.com", appKey: APP_KEY });
     expect(login.status).toBe(200);
-    const loginBody = await login.json();
-    expect(loginBody.publicKey).toBe(regBody.publicKey);
+    expect((await login.json()).publicKey).toBe(regBody.publicKey);
 
-    const bad = await h.login(req({ email: "user@example.com", passkeyHash: "wrong" }));
+    // A wrong appKey yields a wrong signature → rejected.
+    const bad = await loginEmail(h, { email: "user@example.com", appKey: "cd".repeat(32) });
     expect(bad.status).toBe(401);
   });
 });
@@ -146,18 +144,14 @@ describe("rate limiting", () => {
 async function registerEmailUser(opts?: Parameters<typeof createAuthHandlers>[0]) {
   const storage = opts?.storage ?? new MemoryAdapter();
   const h = createAuthHandlers({ ...opts, storage });
-  const passkeyHash = hashPasskey("derived-app-key");
-  const reg = await h.register(
-    req({
-      publicKey: "SoLPubKey1111111111111111111111111111111111",
-      email: "user@example.com",
-      passkeyHash,
-      authMethod: "email",
-      wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
-    }),
-  );
+  const reg = await registerEmail(h, {
+    publicKey: "SoLPubKey1111111111111111111111111111111111",
+    email: "user@example.com",
+    appKey: APP_KEY,
+    wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
+  });
   const body = await reg.json();
-  return { h, storage, body, passkeyHash };
+  return { h, storage, body, appKey: APP_KEY };
 }
 
 describe("session lifecycle (H1)", () => {
@@ -179,11 +173,11 @@ describe("session lifecycle (H1)", () => {
   });
 
   it("a new login revokes the previous session token", async () => {
-    const { h, storage, body, passkeyHash } = await registerEmailUser();
+    const { h, storage, body, appKey } = await registerEmailUser();
     const firstToken = body.authToken;
     expect(await storage.get(`pubKey:session:${firstToken}`)).toBe(body.publicKey);
 
-    const login = await h.login(req({ email: "user@example.com", passkeyHash }));
+    const login = await loginEmail(h, { email: "user@example.com", appKey });
     const loginBody = await login.json();
     expect(loginBody.authToken).not.toBe(firstToken);
     // Old token is revoked; only the new one resolves.
@@ -207,12 +201,10 @@ describe("session lifecycle (H1)", () => {
 
 describe("timing-safe credential compare (H2)", () => {
   it("accepts the correct passkey hash and rejects a wrong one", async () => {
-    const { h, passkeyHash } = await registerEmailUser();
-    const good = await h.login(req({ email: "user@example.com", passkeyHash }));
+    const { h, appKey } = await registerEmailUser();
+    const good = await loginEmail(h, { email: "user@example.com", appKey });
     expect(good.status).toBe(200);
-    const bad = await h.login(
-      req({ email: "user@example.com", passkeyHash: hashPasskey("not-the-key") }),
-    );
+    const bad = await loginEmail(h, { email: "user@example.com", appKey: "cd".repeat(32) });
     expect(bad.status).toBe(401);
   });
 });
@@ -337,36 +329,33 @@ describe("proxy-header trust (M4)", () => {
 // --- v0.2.1 Change 2: per-user PBKDF2 iteration count (Option A) ---
 
 describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
-  it("register stores pbkdf2Iterations and login returns it (pinned per-user)", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
-    const passkeyHash = hashPasskey("derived-app-key");
-
-    const reg = await h.register(
-      req({
-        publicKey: "SoLIter1111111111111111111111111111111111111",
-        email: "iter@example.com",
-        passkeyHash,
-        authMethod: "email",
-        pbkdf2Iterations: 600_000,
-        wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
-      }),
-    );
+  it("register stores pbkdf2Iterations; challenge + login return it (pinned per-user)", async () => {
+    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const reg = await registerEmail(h, {
+      publicKey: "SoLIter1111111111111111111111111111111111111",
+      email: "iter@example.com",
+      appKey: APP_KEY,
+      pbkdf2Iterations: 600_000,
+      wallets: [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" }],
+    });
     expect(reg.status).toBe(201);
     expect((await reg.json()).user.pbkdf2Iterations).toBe(600_000);
 
-    // Login returns the same pinned count so the client re-derives the same app key.
-    const login = await h.login(req({ email: "iter@example.com", passkeyHash }));
+    // The challenge response carries the pinned count so the client can re-derive the appKey.
+    const ch = await (await h.challenge(req({ email: "iter@example.com" }))).json();
+    expect(ch.pbkdf2Iterations).toBe(600_000);
+
+    const login = await loginEmail(h, { email: "iter@example.com", appKey: APP_KEY });
     expect((await login.json()).user.pbkdf2Iterations).toBe(600_000);
   });
 
-  it("legacy account (no count sent) stores none — client falls back to 100k", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
-    const passkeyHash = hashPasskey("legacy");
-    const reg = await h.register(
-      req({ publicKey: "SoLLegacy111111111111111111111111111111111", email: "legacy@example.com", passkeyHash, authMethod: "email", wallets: [] }),
-    );
+  it("legacy account (no count) stores none — client falls back to 100k", async () => {
+    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const reg = await registerEmail(h, {
+      publicKey: "SoLLegacy111111111111111111111111111111111",
+      email: "legacy@example.com",
+      appKey: APP_KEY,
+    });
     expect((await reg.json()).user.pbkdf2Iterations).toBeUndefined();
   });
 });

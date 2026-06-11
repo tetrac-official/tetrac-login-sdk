@@ -1,7 +1,6 @@
 import {
   deriveAppKeyFromPasskey,
   deriveAppKeyFromSignature,
-  hashPasskey,
   encryptSecret,
   decryptSecret,
   randomHex,
@@ -28,10 +27,6 @@ describe("key derivation", () => {
     expect(deriveAppKeyFromSignature(sig)).toHaveLength(64);
   });
 
-  it("hashes passkeys deterministically", () => {
-    expect(hashPasskey("pw")).toBe(hashPasskey("pw"));
-    expect(hashPasskey("pw")).not.toBe(hashPasskey("pw2"));
-  });
 });
 
 describe("secret encryption", () => {

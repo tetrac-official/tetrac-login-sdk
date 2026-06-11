@@ -4,8 +4,8 @@ import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } f
 import {
   deriveAppKeyFromPasskey,
   deriveAppKeyFromSignature,
-  hashPasskey,
 } from "../core/crypto.js";
+import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
 import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
@@ -185,7 +185,7 @@ export class AuthClient {
     const result = await this.post<AuthResult>("register", {
       publicKey: identity.publicKey,
       email: params.email,
-      passkeyHash: hashPasskey(params.passkey),
+      authPublicKey: deriveAuthPublicKey(appKey),
       authMethod: "email",
       wallets: flattenBundle(bundle),
       pbkdf2Iterations: iterations, // pin the count per-user so future level changes don't orphan this account
@@ -196,14 +196,17 @@ export class AuthClient {
 
   /** Log in with email + passkey. Re-derives the app key to unlock wallets. */
   async loginWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
-    const result = await this.post<AuthResult>("login", {
-      email: params.email,
-      passkeyHash: hashPasskey(params.passkey),
-    });
-    // Re-derive with the iteration count pinned at registration; legacy accounts (no
-    // stored count) fall back to 100k — which is exactly what they were created with.
-    const iterations = result.user?.pbkdf2Iterations ?? 100_000;
+    // 1) Fetch a single-use challenge + the account's pinned PBKDF2 iteration count.
+    const { challenge, pbkdf2Iterations } = await this.post<{ challenge: string; pbkdf2Iterations?: number }>(
+      "challenge",
+      { email: params.email },
+    );
+    // 2) Re-derive the appKey (legacy accounts: 100k fallback) and sign the challenge
+    //    with the derived auth keypair — the server stores only the matching public key.
+    const iterations = pbkdf2Iterations ?? 100_000;
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations);
+    const signature = signAuthChallenge(appKey, challenge);
+    const result = await this.post<AuthResult>("login", { email: params.email, signature, challenge });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email, pbkdf2Iterations: iterations });
     return result;
   }
@@ -304,8 +307,8 @@ export class AuthClient {
       publicKey: identity.publicKey,
       email: internalEmail,
       authMethod: "biometric",
-      // Bind the credential to the account via a hash so re-login can verify.
-      passkeyHash: hashPasskey(appKey),
+      // Auth keypair derived from the PRF/gate secret; server stores only its public key.
+      authPublicKey: deriveAuthPublicKey(appKey),
       wallets: flattenBundle(bundle),
     });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
@@ -314,12 +317,13 @@ export class AuthClient {
 
   /** Biometric re-login: unlock the passkey secret and authenticate. */
   async loginWithBiometric(params: { registration: PasskeyRegistration }): Promise<AuthResult> {
+    // Resolve the internal identity, fetch a challenge, then prove control by signing it
+    // with the auth keypair derived from the PRF/gate secret (released by Touch ID).
+    const email = biometricEmail(params.registration);
+    const { challenge } = await this.post<{ challenge: string }>("challenge", { email });
     const appKey = await derivePasskeySecret(params.registration);
-    const result = await this.post<AuthResult>("login", {
-      // Resolve the same internal identity created at registration.
-      email: biometricEmail(params.registration),
-      passkeyHash: hashPasskey(appKey),
-    });
+    const signature = signAuthChallenge(appKey, challenge);
+    const result = await this.post<AuthResult>("login", { email, signature, challenge });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
     return result;
   }

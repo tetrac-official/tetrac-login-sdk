@@ -8,7 +8,7 @@
 //  - Two concurrent connect-wallet calls (upsert race)
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
-import { hashPasskey } from "../src/core/crypto";
+import { registerEmail, loginEmail } from "./_auth-helpers";
 import { issueChallenge, consumeChallenge } from "../src/server/challenge";
 import type { AuthConfig } from "../src/core/config";
 import { walletLoginMessage } from "../src/core/index";
@@ -94,19 +94,13 @@ describe("session issuance revocation", () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
 
-    const passkeyHash = hashPasskey("test-key");
+    const appKey = "ab".repeat(32);
     const pk = "SolSessionRevoke1111111111111111111111111";
 
-    await h.register(req({
-      publicKey: pk,
-      email: "seq@test.com",
-      passkeyHash,
-      authMethod: "email",
-      wallets: [],
-    }));
+    await registerEmail(h, { publicKey: pk, email: "seq@test.com", appKey });
 
     // First login
-    const login1 = await h.login(req({ email: "seq@test.com", passkeyHash }));
+    const login1 = await loginEmail(h, { email: "seq@test.com", appKey });
     expect(login1.status).toBe(200);
     const body1 = await login1.json();
 
@@ -117,7 +111,7 @@ describe("session issuance revocation", () => {
     expect(ud1.status).toBe(200);
 
     // Second login (sequential)
-    const login2 = await h.login(req({ email: "seq@test.com", passkeyHash }));
+    const login2 = await loginEmail(h, { email: "seq@test.com", appKey });
     expect(login2.status).toBe(200);
     const body2 = await login2.json();
 
@@ -140,15 +134,8 @@ describe("concurrent registration race", () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
 
-    const passkeyHash = hashPasskey("pw");
     const makeReg = (pk: string) =>
-      h.register(req({
-        publicKey: pk,
-        email: "duplicate@test.com",
-        passkeyHash,
-        authMethod: "email",
-        wallets: [],
-      }));
+      registerEmail(h, { publicKey: pk, email: "duplicate@test.com", appKey: "ab".repeat(32) });
 
     // Two registrations with the SAME email but DIFFERENT public keys
     const [r1, r2] = await Promise.all([

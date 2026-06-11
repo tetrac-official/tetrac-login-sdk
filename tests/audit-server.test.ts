@@ -1,15 +1,16 @@
-// CHARACTERIZATION TESTS — prove the auth/session/server findings against the
-// CURRENT code, WITHOUT changing src/. They assert today's behavior so they PASS
-// now and document each finding; invert the marked asserts after hardening.
+// CHARACTERIZATION TESTS — auth/session/server findings, updated for v0.2.1.
+// Several findings are now RESOLVED by the signature-auth refactor (Change 3):
+// email/biometric accounts authenticate by signing a challenge with a derived
+// ed25519 auth keypair; the server stores only the public key (no passkey hash).
 //
-// Findings: H5 (global rate-limit bucket), H6 (EVM login unimplemented + email
-// bypass), AUTHSESSION-3 (targeted lockout), SERVERSIDE-1/8 (key-namespace
-// collision + JSON.parse crash), SERVERSIDE-4 (unbounded import-wallet),
-// SERVERSIDE-11 (no input validation), WEBAUTHN-1 (biometric = hash possession).
+// Findings: H5 (global rate-limit bucket), AUTHSESSION-3 (targeted lockout),
+// SERVERSIDE-1/8 (key-namespace collision + JSON.parse crash), SERVERSIDE-4
+// (unbounded import-wallet), SERVERSIDE-11 (no input validation), WEBAUTHN-1
+// (RESOLVED — login now requires a challenge signature, not a bearer hash).
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
-import { hashPasskey } from "../src/core/crypto";
 import * as signature from "../src/server/signature";
+import { registerEmail, loginEmail } from "./_auth-helpers";
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {
@@ -19,12 +20,11 @@ function req(body: unknown, headers: Record<string, string> = {}): Request {
   });
 }
 const SOL_PUB = "SoLPubKey1111111111111111111111111111111111";
+const APP_KEY = "ab".repeat(32); // fixed 64-hex app key for the signature-auth flow
 const wallet = (i = 0) => ({ chain: "solana", role: `r${i}`, publicKey: `p${i}`, encryptedSecret: "c" });
 
-async function registerEmail(h: ReturnType<typeof createAuthHandlers>, email: string, passkey: string, publicKey = SOL_PUB) {
-  const res = await h.register(
-    req({ publicKey, email, passkeyHash: hashPasskey(passkey), authMethod: "email", wallets: [wallet()] }),
-  );
+async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: string, publicKey = SOL_PUB) {
+  const res = await registerEmail(h, { publicKey, email, appKey: APP_KEY, wallets: [wallet()] });
   return { res, body: await res.json() };
 }
 
@@ -45,8 +45,7 @@ describe("H5 — per-IP rate limiting collapses to ONE global 'unknown' bucket b
 // NOTE (maintainer-confirmed scope): EVM keypairs are INTERNAL, client-generated
 // signing wallets (useEvmSigner / viem LocalAccount), NOT external auth identities.
 // External wallet LOGIN is Solana-only by design, so verifySolanaSignature being
-// ed25519-only is CORRECT — these are characterization tests of intended behavior,
-// not a vulnerability. (Was finding H6 — now withdrawn / by-design.)
+// ed25519-only is CORRECT — these are characterization tests of intended behavior.
 describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-signing-only)", () => {
   it("only a Solana ed25519 verifier exists; there is intentionally no external EVM verifier", () => {
     expect((signature as any).verifyEvmSignature).toBeUndefined();
@@ -63,38 +62,36 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
   });
 });
 
-// The "EVM via email" path is NOT an EVM finding — it exercises two generic gaps:
-// email registration needs no proof-of-control (SERVERSIDE-5) and publicKey is not
-// format-validated (SERVERSIDE-11). The identity is an arbitrary unvalidated string.
+// Not an EVM finding — it exercises two generic gaps: email registration needs no
+// proof-of-control (SERVERSIDE-5) and publicKey is not format-validated (SERVERSIDE-11).
 describe("SERVERSIDE-5/11 — email register has no ownership proof and publicKey is unvalidated", () => {
   it("registers an arbitrary unvalidated publicKey via the email path with no proof of control (201)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const arbitrary = "0x" + "cd".repeat(20); // any string is accepted as the identity key
-    const res = await h.register(
-      req({ publicKey: arbitrary, email: "evm@x.com", passkeyHash: hashPasskey("k"), authMethod: "email", wallets: [] }),
-    );
+    const res = await registerEmail(h, { publicKey: arbitrary, email: "evm@x.com", appKey: APP_KEY, wallets: [] });
     expect(res.status).toBe(201); // no signature, no email verification, no key-format check
   });
 });
 
 describe("AUTHSESSION-3 — per-identifier counter increments BEFORE auth ⇒ targeted account lockout", () => {
   it("an attacker who knows only the victim's email locks out the victim's own correct login", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage }); // default maxAttempts 10
+    const h = createAuthHandlers({ storage: new MemoryAdapter() }); // default maxAttempts 10
     const email = "victim@example.com";
-    await registerEmail(h, email, "real-passkey");
+    await registerUser(h, email);
 
-    // Attacker spams failed logins (wrong hash) for the victim's email until the bucket trips.
+    // Attacker spams junk logins for the victim's email; the per-email rate counter is
+    // incremented in rateLimited() BEFORE the challenge/signature is ever verified.
     let last: Response | undefined;
     for (let i = 0; i < 12; i++) {
-      last = await h.login(req({ email, passkeyHash: hashPasskey("junk") }));
+      last = await h.login(req({ email, signature: "00", challenge: "00" }));
       if (last.status === 429) break;
     }
     expect(last!.status).toBe(429);
 
-    // The victim's CORRECT-credential login is now also blocked.
-    const victim = await h.login(req({ email, passkeyHash: hashPasskey("real-passkey") }));
-    expect(victim.status).toBe(429);
+    // The victim's own valid login is now denied too — rate-limited before any
+    // signature check (429 at /challenge, surfacing as 400 downstream in loginEmail).
+    const victim = await loginEmail(h, { email, appKey: APP_KEY });
+    expect(victim.status).not.toBe(200);
   });
 });
 
@@ -104,9 +101,7 @@ describe("SERVERSIDE-1/8 — key-namespace collision + unguarded JSON.parse", ()
     const h = createAuthHandlers({ storage });
     // publicKey is never format-validated; "session:<x>" lands at storage key "pubKey:session:<x>",
     // the exact shape used for session tokens (session.ts sessionKey()).
-    const res = await h.register(
-      req({ publicKey: "session:forged-slot", email: "atk@x.com", passkeyHash: hashPasskey("k"), authMethod: "email", wallets: [] }),
-    );
+    const res = await registerEmail(h, { publicKey: "session:forged-slot", email: "atk@x.com", appKey: APP_KEY, wallets: [] });
     expect(res.status).toBe(201);
     const collided = await storage.get("pubKey:session:forged-slot");
     expect(collided).not.toBeNull();
@@ -116,23 +111,22 @@ describe("SERVERSIDE-1/8 — key-namespace collision + unguarded JSON.parse", ()
   it("colliding with a LIVE session value crashes register via unguarded JSON.parse (DoS)", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
-    const { body } = await registerEmail(h, "user@example.com", "pw"); // issues a session token
+    const { body } = await registerUser(h, "user@example.com"); // issues a session token
     const token = body.authToken;
     // The live session value at pubKey:session:<token> is a BARE publicKey string (not JSON).
     expect(await storage.get(`pubKey:session:${token}`)).toBe(body.publicKey);
 
     // Registering publicKey="session:<token>" makes getUserByPublicKey JSON.parse that bare string ⇒ throws.
     await expect(
-      h.register(req({ publicKey: `session:${token}`, email: "atk@x.com", passkeyHash: hashPasskey("k"), authMethod: "email" })),
+      registerEmail(h, { publicKey: `session:${token}`, email: "atk@x.com", appKey: APP_KEY, wallets: [] }),
     ).rejects.toThrow();
   });
 });
 
 describe("SERVERSIDE-4 — import-wallet appends with NO total cap (record-bloat DoS)", () => {
   it("a session can grow its wallet array without bound", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
-    const { body } = await registerEmail(h, "user@example.com", "pw"); // starts with 1 wallet
+    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const { body } = await registerUser(h, "user@example.com"); // starts with 1 wallet
     const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
     const batch = Array.from({ length: 16 }, (_, i) => wallet(i)); // max per-batch is enforced (16)
 
@@ -145,11 +139,11 @@ describe("SERVERSIDE-4 — import-wallet appends with NO total cap (record-bloat
   });
 });
 
-describe("SERVERSIDE-11 — no format/length validation on publicKey / email / passkeyHash", () => {
-  it("accepts empty email, non-hex passkeyHash, and a whitespace publicKey (201)", async () => {
+describe("SERVERSIDE-11 — no format/length validation on publicKey / email", () => {
+  it("accepts an empty email and a whitespace publicKey (201)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: "   ", email: "", passkeyHash: "this is NOT hex!!", authMethod: "email", wallets: [] }),
+      req({ publicKey: "   ", email: "", authPublicKey: "abc", authMethod: "email", wallets: [] }),
     );
     expect(res.status).toBe(201);
   });
@@ -157,25 +151,32 @@ describe("SERVERSIDE-11 — no format/length validation on publicKey / email / p
   it("accepts a 100k-character publicKey (storage-waste)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: "x".repeat(100_000), passkeyHash: "abc", authMethod: "email", wallets: [] }),
+      req({ publicKey: "x".repeat(100_000), authPublicKey: "abc", authMethod: "email", wallets: [] }),
     );
     expect(res.status).toBe(201);
   });
 });
 
-describe("WEBAUTHN-1 — server never verifies a WebAuthn assertion; biometric login = possession of SHA-256(appKey)", () => {
-  it("login succeeds with ONLY {email, passkeyHash} — no assertion / clientDataJSON / signature", async () => {
+describe("WEBAUTHN-1 RESOLVED — login requires a challenge signature, not a bearer hash", () => {
+  it("a login without a signature is rejected; a valid challenge signature succeeds", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const appKey = "deadbeef".repeat(8); // a 256-bit PRF/gate secret
+    const appKey = "deadbeef".repeat(8); // a 256-bit PRF/gate secret (biometric appKey)
     const bioEmail = "bio_FAKECREDENTIALID@passkey.local";
 
-    const reg = await h.register(
-      req({ publicKey: "SoLBio1111111111111111111111111111111111111", email: bioEmail, passkeyHash: hashPasskey(appKey), authMethod: "biometric", wallets: [wallet()] }),
-    );
-    expect(reg.status).toBe(201); // registration also accepts a self-asserted hash (WEBAUTHN-2)
+    const reg = await registerEmail(h, {
+      publicKey: "SoLBio1111111111111111111111111111111111111",
+      email: bioEmail,
+      appKey,
+      wallets: [wallet()],
+    });
+    expect(reg.status).toBe(201); // stores an ed25519 auth public key, never a passkey hash
 
-    // Anyone who knows SHA-256(appKey) authenticates from anywhere, no authenticator present:
-    const login = await h.login(req({ email: bioEmail, passkeyHash: hashPasskey(appKey) }));
-    expect(login.status).toBe(200);
+    // No signature/challenge → 400: login is no longer a bearer-hash compare.
+    const noSig = await h.login(req({ email: bioEmail }));
+    expect(noSig.status).toBe(400);
+
+    // A valid challenge signature with the same appKey authenticates.
+    const ok = await loginEmail(h, { email: bioEmail, appKey });
+    expect(ok.status).toBe(200);
   });
 });

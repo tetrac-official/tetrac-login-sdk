@@ -18,6 +18,7 @@
 //  - Verifies the auth boundary: Solana = Web3 auth, EVM = internal signing only
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
+import { registerEmail, loginEmail } from "./_auth-helpers";
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {
@@ -81,18 +82,17 @@ describe("EVM wallet — design intent (C2)", () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
 
-    const reg = await h.register(req({
+    const reg = await registerEmail(h, {
       publicKey: evmAddress,
       email: "evm-user@test.com",
-      passkeyHash: "a".repeat(64),
-      authMethod: "email",
+      appKey: "ab".repeat(32),
       wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "encrypted-key" }],
-    }));
+    });
 
     expect(reg.status).toBe(201);
 
-    // Login with email+passkey works (no wallet proof needed — correct)
-    const login = await h.login(req({ email: "evm-user@test.com", passkeyHash: "a".repeat(64) }));
+    // Login via the signature flow works (no wallet proof needed — correct)
+    const login = await loginEmail(h, { email: "evm-user@test.com", appKey: "ab".repeat(32) });
     expect(login.status).toBe(200);
     const body = await login.json();
     expect(body.publicKey).toBe(evmAddress);

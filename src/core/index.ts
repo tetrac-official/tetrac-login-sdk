@@ -21,3 +21,12 @@ export const WALLET_APP_KEY_MESSAGE =
 export function walletAppKeyMessage(): string {
   return WALLET_APP_KEY_MESSAGE;
 }
+
+/**
+ * Message an email/biometric account signs (with its derived ed25519 auth keypair)
+ * to log in. The challenge is single-use and server-issued; signing it proves control
+ * of the account's auth key without the server ever storing a passkey hash.
+ */
+export function authLoginMessage(challenge: string): string {
+  return `Sign in to your TTC account: ${challenge}`;
+}

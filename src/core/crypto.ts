@@ -34,11 +34,6 @@ export function deriveAppKeyFromSignature(signatureHex: string): string {
   return CryptoES.SHA256(signatureHex).toString(CryptoES.enc.Hex);
 }
 
-/** SHA-256 hash of the passkey, sent to the server for verification (never plaintext). */
-export function hashPasskey(passkey: string): string {
-  return CryptoES.SHA256(passkey).toString(CryptoES.enc.Hex);
-}
-
 function appKeyToBytes(appKey: string): Uint8Array<ArrayBuffer> {
   // App key is 64 hex chars (256-bit, from PBKDF2 / SHA-256) -> 32 raw bytes. No 0x prefix.
   const out = new Uint8Array(new ArrayBuffer(appKey.length / 2));
