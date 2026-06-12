@@ -7,7 +7,9 @@
 // SHA-256(appId:email) salt), H4 (domain-unbound key message → appId-bound message),
 // CRYPTO-5 (timingSafeEqual is correct — confirms the "disproven" reconciliation).
 import { createHash } from "crypto";
-import CryptoES from "crypto-es";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
+import { utf8ToBytes, bytesToHex } from "@noble/hashes/utils.js";
 import {
   deriveAppKeyFromPasskey,
   deriveAppKeyFromSignature,
@@ -41,15 +43,13 @@ describe("H2 RESOLVED — 600k iterations + domain-separated salt (no longer the
   });
 
   it("the salt is SHA-256(appId : email), NOT the bare email", () => {
-    // Old (vulnerable) behavior used the bare normalized email as the salt:
-    const bareEmailSalt = CryptoES.PBKDF2("pw", "a@b.com", { keySize: 256 / 32, iterations: 100_000 })
-      .toString(CryptoES.enc.Hex);
+    // Old (vulnerable) behavior used the bare normalized email as the PBKDF2 salt:
+    const bareEmailSalt = bytesToHex(pbkdf2(sha256, utf8ToBytes("pw"), utf8ToBytes("a@b.com"), { c: 100_000, dkLen: 32 }));
     expect(deriveAppKeyFromPasskey("pw", "A@B.com  ", 100_000, "ttc")).not.toBe(bareEmailSalt);
 
     // …it now matches a derivation whose salt is SHA-256("ttc:a@b.com"):
-    const domainSalt = CryptoES.SHA256("ttc:a@b.com");
-    const expected = CryptoES.PBKDF2("pw", domainSalt, { keySize: 256 / 32, iterations: 100_000 })
-      .toString(CryptoES.enc.Hex);
+    const domainSalt = sha256(utf8ToBytes("ttc:a@b.com"));
+    const expected = bytesToHex(pbkdf2(sha256, utf8ToBytes("pw"), domainSalt, { c: 100_000, dkLen: 32 }));
     expect(deriveAppKeyFromPasskey("pw", "A@B.com  ", 100_000, "ttc")).toBe(expected);
   });
 

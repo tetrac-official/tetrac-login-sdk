@@ -22,7 +22,7 @@ export interface EncryptedWallet {
   role: WalletRole;
   /** base58 (Solana) or 0x-hex (EVM) public identifier — safe to send to the server. */
   publicKey: string;
-  /** Ciphertext of the secret key (crypto-es AES). Never plaintext. */
+  /** Ciphertext of the secret key (AES-256-GCM, "iv:ct+tag" b64url). Never plaintext. */
   encryptedSecret: string;
 }
 

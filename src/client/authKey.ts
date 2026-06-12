@@ -6,24 +6,13 @@
 // are independent. ed25519 via tweetnacl — the same primitive the server already
 // verifies for wallet logins.
 import nacl from "tweetnacl";
-import CryptoES from "crypto-es";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { utf8ToBytes, bytesToHex } from "@noble/hashes/utils.js";
 import { authLoginMessage } from "../core/index.js";
 
-function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(new ArrayBuffer(hex.length / 2));
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  let hex = "";
-  for (const b of bytes) hex += b.toString(16).padStart(2, "0");
-  return hex;
-}
-
 /** 32-byte ed25519 seed = SHA-256("ttc-auth-v1:" + appKey). appKey is already high-entropy. */
-function authSeed(appKey: string): Uint8Array<ArrayBuffer> {
-  return hexToBytes(CryptoES.SHA256("ttc-auth-v1:" + appKey).toString(CryptoES.enc.Hex));
+function authSeed(appKey: string): Uint8Array {
+  return sha256(utf8ToBytes("ttc-auth-v1:" + appKey));
 }
 
 /** Public key (hex) of the account's auth keypair — the only auth credential the server stores. */

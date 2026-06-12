@@ -1,13 +1,15 @@
 // App-key derivation, secret encryption, hashing, and CSPRNG helpers.
-// Key derivation + hashing use crypto-es; secret encryption uses Web Crypto AES-256-GCM.
+// Key derivation + hashing use @noble/hashes (sync, audited); secret encryption
+// uses Web Crypto AES-256-GCM (encryptSecret/decryptSecret). No crypto-es.
 //
 // Cryptography notes:
-//  (D1) RESOLVED — secret encryption is authenticated AES-256-GCM via Web Crypto (encryptSecret/
-//       decryptSecret below); tampering throws on decrypt. Intentionally breaks byte-compat with the
-//       legacy crypto-es AES-CBC format — no backward-compat path (old CBC blobs do not decrypt).
-//  (D2) hashPasskey is an unsalted single SHA-256 (future hardening: salted slow verifier — Change 3).
-//  (D3) deriveAppKeyFromPasskey defaults to 100k PBKDF2 (future: 600k — Change 2).
-import CryptoES from "crypto-es";
+//  (D1) Secret encryption is authenticated AES-256-GCM via Web Crypto; tampering
+//       throws on decrypt. Ciphertext is "iv:ct+tag" (b64url) — no legacy CBC compat.
+//  (D2) The PBKDF2 iteration count comes from config.securityLevel (default 600k),
+//       is pinned per-user, and is passed in to deriveAppKeyFromPasskey.
+import { sha256 } from "@noble/hashes/sha2.js";
+import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
+import { utf8ToBytes, bytesToHex } from "@noble/hashes/utils.js";
 
 /**
  * Deterministically derive the 256-bit app (encryption) key for email/passkey
@@ -25,11 +27,9 @@ export function deriveAppKeyFromPasskey(
   appId = "ttc",
 ): string {
   // SHA-256(appId : email) → a fixed-length, domain-separated, per-user salt.
-  const salt = CryptoES.SHA256(`${appId}:${email.toLowerCase().trim()}`);
-  return CryptoES.PBKDF2(passkey, salt, {
-    keySize: 256 / 32, // word count (32-bit words) -> 256-bit key
-    iterations,
-  }).toString(CryptoES.enc.Hex);
+  const salt = sha256(utf8ToBytes(`${appId}:${email.toLowerCase().trim()}`));
+  // PBKDF2-HMAC-SHA256 → 32-byte (256-bit) derived key, hex-encoded.
+  return bytesToHex(pbkdf2(sha256, utf8ToBytes(passkey), salt, { c: iterations, dkLen: 32 }));
 }
 
 /**
@@ -37,7 +37,7 @@ export function deriveAppKeyFromPasskey(
  * Recoverable on any device by re-signing the same challenge message.
  */
 export function deriveAppKeyFromSignature(signatureHex: string): string {
-  return CryptoES.SHA256(signatureHex).toString(CryptoES.enc.Hex);
+  return bytesToHex(sha256(utf8ToBytes(signatureHex)));
 }
 
 function appKeyToBytes(appKey: string): Uint8Array<ArrayBuffer> {

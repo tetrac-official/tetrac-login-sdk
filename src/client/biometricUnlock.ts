@@ -16,9 +16,8 @@
 // a successful userVerification assertion. Storage-scraping XSS reads ciphertext
 // it can never unwrap.
 //
-// CRYPTO (PRD §4): NEW data, no byte-compat constraint, so this uses NATIVE
-// WebCrypto authenticated encryption (AES-256-GCM) — NOT the compat-locked
-// crypto-es AES-CBC used for wallets. The AES key is HKDF-SHA-256 of the passkey
+// CRYPTO (PRD §4): authenticated encryption via NATIVE WebCrypto AES-256-GCM (the
+// same primitive wallet secrets now use). The AES key is HKDF-SHA-256 of the passkey
 // secret (the raw PRF/gate secret is NEVER used directly as a key).
 import type { WebAuthnConfig } from "../core/config.js";
 import { armAppKey, getAppKey, VaultLockedError, registerSessionClearHook } from "./session.js";
