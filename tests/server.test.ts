@@ -84,6 +84,31 @@ describe("wallet auth flow", () => {
     );
     expect(res.status).toBe(401);
   });
+
+  it("a forged register signature does NOT burn the challenge (verify-before-consume)", async () => {
+    // Griefing guard: register() verifies the signature before consuming the single-use
+    // challenge, so an attacker who knows the (public) wallet key + a pending challenge
+    // can't delete it by submitting a forged signature.
+    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const kp = Keypair.generate();
+    const pubKey = kp.publicKey.toBase58();
+    const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
+
+    // Attacker's forged attempt is rejected…
+    const forged = await h.register(
+      req({ publicKey: pubKey, authMethod: "wallet", wallets: [], signature: "00".repeat(64), challenge }),
+    );
+    expect(forged.status).toBe(401);
+
+    // …and the challenge survives, so the real owner can still register with it.
+    const sig = bytesToHex(
+      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge)), kp.secretKey),
+    );
+    const real = await h.register(
+      req({ publicKey: pubKey, authMethod: "wallet", wallets: [], signature: sig, challenge }),
+    );
+    expect(real.status).toBe(201);
+  });
 });
 
 describe("connect-wallet (upsert)", () => {
@@ -163,7 +188,7 @@ describe("session lifecycle (H1)", () => {
       storage,
       config: { sessionTtlSeconds: 100 },
     });
-    const sessionStoreKey = `pubKey:session:${body.authToken}`;
+    const sessionStoreKey = `session:${body.authToken}`;
 
     expect(await storage.get(sessionStoreKey)).toBe(body.publicKey); // alive now
     now += 99_000; // still inside the 100s TTL
@@ -175,27 +200,27 @@ describe("session lifecycle (H1)", () => {
   it("a new login revokes the previous session token", async () => {
     const { h, storage, body, appKey } = await registerEmailUser();
     const firstToken = body.authToken;
-    expect(await storage.get(`pubKey:session:${firstToken}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:${firstToken}`)).toBe(body.publicKey);
 
     const login = await loginEmail(h, { email: "user@example.com", appKey });
     const loginBody = await login.json();
     expect(loginBody.authToken).not.toBe(firstToken);
     // Old token is revoked; only the new one resolves.
-    expect(await storage.get(`pubKey:session:${firstToken}`)).toBeNull();
-    expect(await storage.get(`pubKey:session:${loginBody.authToken}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:${firstToken}`)).toBeNull();
+    expect(await storage.get(`session:${loginBody.authToken}`)).toBe(body.publicKey);
   });
 
   it("logout revokes the presented session token and always returns 200 { ok }", async () => {
     const { h, storage, body } = await registerEmailUser();
     const token = body.authToken;
-    expect(await storage.get(`pubKey:session:${token}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:${token}`)).toBe(body.publicKey);
 
     const res = await h.logout(
       req({}, { "ttc-auth-token": token, "ttc-public-key": body.publicKey }),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(await storage.get(`pubKey:session:${token}`)).toBeNull(); // revoked
+    expect(await storage.get(`session:${token}`)).toBeNull(); // revoked
   });
 });
 
@@ -317,8 +342,9 @@ describe("proxy-header trust (M4)", () => {
   it("with trustProxyHeaders default false, x-forwarded-for does not change the rate-limit identity", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } } });
-    // Different spoofed IPs each request — they all share the "unknown" bucket
-    // because the proxy header is untrusted, so the limit still trips.
+    // Different spoofed IPs each request, but untrusted x-forwarded-for is ignored
+    // entirely, so spoofing it buys nothing: the same publicKey "k" keeps hitting its
+    // own per-target bucket and the limit still trips.
     const make = (ip: string) => h.challenge(req({ publicKey: "k" }, { "x-forwarded-for": ip }));
     expect((await make("1.1.1.1")).status).toBe(200);
     expect((await make("2.2.2.2")).status).toBe(200);

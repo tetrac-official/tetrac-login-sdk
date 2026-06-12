@@ -5,6 +5,9 @@ export interface KeyPrefixes {
   challenge: string;
   /** UserData blob: `${pubKey}{publicKey}`. */
   pubKey: string;
+  /** Session token -> publicKey: `${session}{token}` — disjoint from pubKey so an
+   *  attacker-chosen publicKey can never collide with the session-token keyspace. */
+  session: string;
   /** email -> publicKey lookup: `${email}{address}`. */
   email: string;
   /** Rate-limit counters: `${rateLimit}{identifier}`. */
@@ -67,6 +70,16 @@ export interface AuthConfig {
    * Set true only when behind a trusted proxy that sets those headers.
    */
   trustProxyHeaders: boolean;
+  /**
+   * Number of trusted reverse-proxy hops in front of the app. Only consulted when
+   * trustProxyHeaders is true: the client IP is taken as the rightmost
+   * x-forwarded-for entry AFTER skipping this many hops. Proxies APPEND to XFF on
+   * the right, so the rightmost entries are set by infrastructure you control and
+   * are not client-spoofable, whereas the leftmost entry is client-supplied.
+   *   0 = take the rightmost entry (single trusted edge — e.g. Vercel). DEFAULT.
+   *   1 = skip one of your own proxies, etc.
+   */
+  trustedProxyHops: number;
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
   webauthn: WebAuthnConfig;
@@ -75,12 +88,6 @@ export interface AuthConfig {
    * signing throws VaultLockedError and the user must re-authenticate. Default 15s.
    */
   autoLockMs: number;
-  /**
-   * Where the app key is held while unlocked:
-   *  - "memory":  memory only (reload ⇒ re-auth; storage-scraping XSS finds nothing) — DEFAULT
-   *  - "session": memory + sessionStorage (survives reload within the tab; XSS-readable, opt-in)
-   */
-  appKeyStorage: "session" | "memory";
   /** Lock the vault when the tab becomes hidden. Default true. */
   lockOnHide: boolean;
   /**
@@ -88,6 +95,8 @@ export interface AuthConfig {
    * never the ambient session key. Default true. (Reserved — v1 always re-auths.)
    */
   revealRequiresReauth: boolean;
+  /** Max total wallets a single user record may hold — import-wallet cap (record-bloat DoS guard). */
+  maxWalletsPerUser: number;
 }
 
 export const DEFAULT_CONFIG: AuthConfig = {
@@ -97,9 +106,11 @@ export const DEFAULT_CONFIG: AuthConfig = {
   publicKeyHeader: "ttc-public-key",
   sessionTtlSeconds: 86_400,
   trustProxyHeaders: false,
+  trustedProxyHops: 0,
   keyPrefixes: {
     challenge: "challenge:",
     pubKey: "pubKey:",
+    session: "session:",
     email: "email:",
     rateLimit: "ratelimit:",
   },
@@ -112,9 +123,9 @@ export const DEFAULT_CONFIG: AuthConfig = {
     preferPrf: true,
   },
   autoLockMs: 15_000,
-  appKeyStorage: "memory",
   lockOnHide: true,
   revealRequiresReauth: true,
+  maxWalletsPerUser: 64,
 };
 
 /** Merge a partial override onto the defaults (shallow per top-level group). */

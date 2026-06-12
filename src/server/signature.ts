@@ -6,6 +6,10 @@ import { walletLoginMessage, authLoginMessage } from "../core/index.js";
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
   if (clean.length % 2 !== 0) throw new Error("Invalid hex signature length");
+  // Reject non-hex characters explicitly. Without this, parseInt("GG",16) yields NaN
+  // and silently coerces to a 0 byte — still fails the signature check, but failing
+  // loudly here keeps the intent clear and avoids treating garbage as a zero key.
+  if (!/^[0-9a-fA-F]*$/.test(clean)) throw new Error("Invalid hex characters");
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);

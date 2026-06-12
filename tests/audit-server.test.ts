@@ -3,12 +3,15 @@
 // email/biometric accounts authenticate by signing a challenge with a derived
 // ed25519 auth keypair; the server stores only the public key (no passkey hash).
 //
-// Findings: H5 (global rate-limit bucket), AUTHSESSION-3 (targeted lockout),
-// SERVERSIDE-1/8 (key-namespace collision + JSON.parse crash), SERVERSIDE-4
-// (unbounded import-wallet), SERVERSIDE-11 (no input validation), WEBAUTHN-1
-// (RESOLVED — login now requires a challenge signature, not a bearer hash).
+// Findings, now all RESOLVED: H5 (global rate-limit bucket → per-target buckets),
+// AUTHSESSION-3 (targeted lockout → verify-first/penalize-on-failure), SERVERSIDE-1/8
+// (key-namespace collision + JSON.parse crash), SERVERSIDE-4 (unbounded import-wallet),
+// SERVERSIDE-11 (no input validation), WEBAUTHN-1 (login now requires a challenge
+// signature, not a bearer hash).
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
+import { getUserByPublicKey } from "../src/server/session";
+import { DEFAULT_CONFIG } from "../src/core/config";
 import * as signature from "../src/server/signature";
 import { registerEmail, loginEmail } from "./_auth-helpers";
 
@@ -28,17 +31,49 @@ async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: str
   return { res, body: await res.json() };
 }
 
-describe("H5 — per-IP rate limiting collapses to ONE global 'unknown' bucket by default", () => {
-  it("distinct clients/targets share one bucket on /challenge ⇒ one client locks out everyone", async () => {
+describe("H5 RESOLVED — challenge rate limiting is per-target, not a shared global bucket", () => {
+  it("distinct publicKeys get independent buckets ⇒ one abuser can't lock out everyone", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
       config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
-    // trustProxyHeaders defaults false ⇒ clientIp() === "unknown" for ALL clients, and /challenge
-    // passes no per-identity identifier, so these three DIFFERENT public keys share one counter.
+    // trustProxyHeaders defaults false ⇒ the SDK no longer gates on the shared "unknown"
+    // IP bucket; each /challenge is rate-limited on its OWN resolved-publicKey counter, so
+    // hammering one target can't exhaust a global bucket and lock out the others.
     expect((await h.challenge(req({ publicKey: "AAA" }))).status).toBe(200);
     expect((await h.challenge(req({ publicKey: "BBB" }))).status).toBe(200);
-    expect((await h.challenge(req({ publicKey: "CCC" }))).status).toBe(429); // global lockout
+    expect((await h.challenge(req({ publicKey: "CCC" }))).status).toBe(200); // NO global lockout
+    // The per-target limit still bites when a SINGLE target is flooded…
+    expect((await h.challenge(req({ publicKey: "AAA" }))).status).toBe(200); // AAA #2 (== limit)
+    expect((await h.challenge(req({ publicKey: "AAA" }))).status).toBe(429); // AAA #3 (> limit)
+    // …and a different target is unaffected by that flood.
+    expect((await h.challenge(req({ publicKey: "BBB" }))).status).toBe(200);
+  });
+});
+
+describe("challenge UNKNOWN-email rate limiting (WI-4 enumeration hardening)", () => {
+  it("untrusted: repeated /challenge for the SAME unknown email is throttled (was previously unlimited)", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+    });
+    // Unknown email resolves to no publicKey ⇒ 400, but the request is now rate-limited
+    // (the limit moved BEFORE resolution, so unknown emails no longer escape it).
+    const probe = () => h.challenge(req({ email: "ghost@example.com" }));
+    expect((await probe()).status).toBe(400);
+    expect((await probe()).status).toBe(400);
+    expect((await probe()).status).toBe(429); // 3rd same-email probe throttled
+  });
+
+  it("trusted proxy: unknown-email probes from one source IP are IP-throttled across DIFFERENT emails", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { trustProxyHeaders: true, rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+    });
+    const probe = (email: string) => h.challenge(req({ email }, { "x-forwarded-for": "1.2.3.4" }));
+    expect((await probe("a@ghost.com")).status).toBe(400);
+    expect((await probe("b@ghost.com")).status).toBe(400);
+    expect((await probe("c@ghost.com")).status).toBe(429); // IP bucket curbs enumeration
   });
 });
 
@@ -73,69 +108,71 @@ describe("SERVERSIDE-5/11 — email register has no ownership proof and publicKe
   });
 });
 
-describe("AUTHSESSION-3 — per-identifier counter increments BEFORE auth ⇒ targeted account lockout", () => {
-  it("an attacker who knows only the victim's email locks out the victim's own correct login", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() }); // default maxAttempts 10
+describe("AUTHSESSION-3 RESOLVED — a valid login is never blocked by an attacker's failed attempts", () => {
+  it("the victim's correct login still succeeds after an attacker exhausts the failure limit", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
+    });
     const email = "victim@example.com";
     await registerUser(h, email);
 
-    // Attacker spams junk logins for the victim's email; the per-email rate counter is
-    // incremented in rateLimited() BEFORE the challenge/signature is ever verified.
+    // Attacker spams junk logins for the victim's email. Each FAILS auth (bad signature),
+    // and only failed attempts feed the counter, so after maxAttempts the attacker is
+    // throttled. Crucially, a junk signature never reaches consumeChallenge, so it can't
+    // even burn a pending challenge.
     let last: Response | undefined;
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 6; i++) {
       last = await h.login(req({ email, signature: "00", challenge: "00" }));
-      if (last.status === 429) break;
     }
-    expect(last!.status).toBe(429);
+    expect(last!.status).toBe(429); // attacker throttled
 
-    // The victim's own valid login is now denied too — rate-limited before any
-    // signature check (429 at /challenge, surfacing as 400 downstream in loginEmail).
+    // The victim's OWN correct login still succeeds — auth is verified BEFORE the rate
+    // counter is touched, so a valid signature bypasses the attacker's failure throttle.
     const victim = await loginEmail(h, { email, appKey: APP_KEY });
-    expect(victim.status).not.toBe(200);
+    expect(victim.status).toBe(200);
   });
 });
 
-describe("SERVERSIDE-1/8 — key-namespace collision + unguarded JSON.parse", () => {
-  it("an unauthenticated attacker can WRITE into the session-token keyspace (pubKey:session:*)", async () => {
+describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.parse is guarded", () => {
+  it("a 'session:'-prefixed publicKey cannot collide with the session-token store", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
-    // publicKey is never format-validated; "session:<x>" lands at storage key "pubKey:session:<x>",
-    // the exact shape used for session tokens (session.ts sessionKey()).
-    const res = await registerEmail(h, { publicKey: "session:forged-slot", email: "atk@x.com", appKey: APP_KEY, wallets: [] });
-    expect(res.status).toBe(201);
-    const collided = await storage.get("pubKey:session:forged-slot");
-    expect(collided).not.toBeNull();
-    expect(collided!.startsWith("{")).toBe(true); // a user JSON blob now occupies the session namespace
-  });
-
-  it("colliding with a LIVE session value crashes register via unguarded JSON.parse (DoS)", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
-    const { body } = await registerUser(h, "user@example.com"); // issues a session token
+    // The victim's live session now lives under "session:<token>" (NOT "pubKey:session:<token>").
+    const { body } = await registerUser(h, "victim@example.com");
     const token = body.authToken;
-    // The live session value at pubKey:session:<token> is a BARE publicKey string (not JSON).
-    expect(await storage.get(`pubKey:session:${token}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:${token}`)).toBe(body.publicKey);
 
-    // Registering publicKey="session:<token>" makes getUserByPublicKey JSON.parse that bare string ⇒ throws.
-    await expect(
-      registerEmail(h, { publicKey: `session:${token}`, email: "atk@x.com", appKey: APP_KEY, wallets: [] }),
-    ).rejects.toThrow();
+    // An attacker registers publicKey="session:<token>" → it lands under "pubKey:session:<token>",
+    // a different namespace. No crash, and the victim's session is untouched.
+    const atk = await registerEmail(h, { publicKey: `session:${token}`, email: "atk@x.com", appKey: APP_KEY, wallets: [] });
+    expect(atk.status).toBe(201);
+    expect(await storage.get(`session:${token}`)).toBe(body.publicKey); // intact
+  });
+
+  it("getUserByPublicKey guards JSON.parse — a non-JSON stored value yields null, not a crash", async () => {
+    const storage = new MemoryAdapter();
+    await storage.set("pubKey:weird", "not-json{"); // malformed record
+    const user = await getUserByPublicKey(storage, "weird", DEFAULT_CONFIG);
+    expect(user).toBeNull();
   });
 });
 
-describe("SERVERSIDE-4 — import-wallet appends with NO total cap (record-bloat DoS)", () => {
-  it("a session can grow its wallet array without bound", async () => {
+describe("SERVERSIDE-4 RESOLVED — import-wallet enforces a per-user total cap", () => {
+  it("import beyond maxWalletsPerUser (default 64) is rejected (400); the total stops growing", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const { body } = await registerUser(h, "user@example.com"); // starts with 1 wallet
     const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
     const batch = Array.from({ length: 16 }, (_, i) => wallet(i)); // max per-batch is enforced (16)
 
-    for (let i = 0; i < 5; i++) {
-      const r = await h.importWallet(req({ wallets: batch }, auth));
-      expect(r.status).toBe(200);
-    }
+    // 1 → 17 → 33 → 49 all fit under the 64 cap; the next (would be 65) is rejected.
+    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
+    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
+    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
+    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(400); // 49 + 16 > 64
+
     const ud = await (await h.userData(req({}, auth))).json();
-    expect(ud.user.wallets.length).toBe(81); // 1 + 5*16 — no total ceiling exists
+    expect(ud.user.wallets.length).toBe(49); // capped — the rejected batch did not persist
   });
 });
 

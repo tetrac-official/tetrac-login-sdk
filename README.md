@@ -183,8 +183,11 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 ## Security model
 
 - Private keys: encrypted at rest (AES via `crypto-es`), never stored or transmitted in plaintext.
-- App/encryption key: memory + `sessionStorage` only — never `localStorage`, never sent to the server.
-  Auto-locks after `autoLockMs` idle; locked signers throw `VaultLockedError` until re-auth.
+- App/encryption key: **in-memory by default** (`appKeyStorage: "memory"`) — never `localStorage`, never
+  sent to the server. On tab reload the vault locks and the user must re-authenticate to decrypt wallets.
+  Set `appKeyStorage: "session"` to also persist it in `sessionStorage` across reloads within the tab
+  (convenience, but any same-origin XSS can then read it). Auto-locks after `autoLockMs` idle; locked
+  signers throw `VaultLockedError` until re-auth.
 - Revealing a plaintext key always re-runs the auth ceremony (passkey / wallet signature /
   Face ID) — never the ambient session key.
 - Web3 login: 32-byte challenge, 5-min TTL, **single-use** (atomic consume); signature verified with `tweetnacl`.

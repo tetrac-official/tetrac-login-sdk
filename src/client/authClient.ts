@@ -79,10 +79,10 @@ export class AuthClient {
   constructor(private readonly opts: AuthClientOptions) {
     this.config = resolveConfig(opts.config);
     this.walletGen = opts.walletGen ?? DEFAULT_WALLET_GEN;
-    // Apply the auto-lock / storage policy to the vault (idempotent).
+    // Apply the auto-lock policy to the vault (idempotent). The app key is
+    // memory-only; there is no storage mode to configure.
     configureVault({
       autoLockMs: this.config.autoLockMs,
-      storageMode: this.config.appKeyStorage,
       lockOnHide: this.config.lockOnHide,
     });
   }

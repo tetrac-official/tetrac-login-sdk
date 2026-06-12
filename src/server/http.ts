@@ -16,11 +16,23 @@ export function error(message: string, status = 400): Response {
  * the deployment explicitly trusts them (trustProxyHeaders); otherwise they are
  * ignored so a client can't spoof x-forwarded-for to dodge per-IP limits. When
  * untrusted we fall back to a stable "unknown" bucket.
+ *
+ * When trusted, the client IP is the rightmost x-forwarded-for entry AFTER
+ * skipping `trustedProxyHops` hops. Proxies append to XFF on the right, so the
+ * rightmost entries are set by infrastructure we control and are not
+ * client-spoofable; the leftmost entry is attacker-controlled and never trusted.
  */
-export function clientIp(req: Request, trustProxyHeaders = false): string {
+export function clientIp(req: Request, trustProxyHeaders = false, trustedProxyHops = 0): string {
   if (!trustProxyHeaders) return "unknown";
   const fwd = req.headers.get("x-forwarded-for");
-  if (fwd) return fwd.split(",")[0]!.trim();
+  if (fwd) {
+    const parts = fwd
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean);
+    const idx = parts.length - 1 - trustedProxyHops;
+    if (idx >= 0 && parts[idx]) return parts[idx]!;
+  }
   return req.headers.get("x-real-ip") ?? "unknown";
 }
 

@@ -194,7 +194,7 @@ async function freshEnable(appKey: string, mode: "prf" | "gate"): Promise<Passke
   credMode = mode;
   declineAssertion = false;
   pendingRawId = randomRawId();
-  configureVault({ autoLockMs: 60_000, storageMode: "memory" });
+  configureVault({ autoLockMs: 60_000 });
   armAppKey(appKey);
   expect(getAppKey()).toBe(appKey);
   const reg = await enableBiometricUnlock(cfg, "user");
@@ -237,7 +237,7 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
   });
 
   it("enable throws VaultLockedError when the vault is locked", async () => {
-    configureVault({ autoLockMs: 60_000, storageMode: "memory" });
+    configureVault({ autoLockMs: 60_000 });
     lockVault();
     expect(getAppKey()).toBeNull();
     await expect(enableBiometricUnlock(cfg, "user")).rejects.toBeInstanceOf(VaultLockedError);
