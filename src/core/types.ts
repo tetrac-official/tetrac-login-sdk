@@ -22,7 +22,7 @@ export interface EncryptedWallet {
   role: WalletRole;
   /** base58 (Solana) or 0x-hex (EVM) public identifier — safe to send to the server. */
   publicKey: string;
-  /** Ciphertext of the secret key (crypto-es AES). Never plaintext. */
+  /** Ciphertext of the secret key (AES-256-GCM, "iv:ct+tag" b64url). Never plaintext. */
   encryptedSecret: string;
 }
 
@@ -39,12 +39,19 @@ export interface GeneratedWalletBundle {
 export interface UserData {
   publicKey: string;
   email?: string;
-  /** SHA-256 hash of the passkey (email users only). Server never sees plaintext. */
-  passkeyHash?: string;
+  /**
+   * ed25519 auth public key (hex) for email/biometric accounts — the ONLY auth
+   * credential the server stores. Login proves control by signing a challenge with
+   * the matching key, derived client-side from the appKey. Wallet accounts instead
+   * authenticate with their own on-chain key, so they have no authPublicKey.
+   */
+  authPublicKey?: string;
   authMethod: AuthMethod;
   /** Encrypted wallet blobs, flattened for storage. */
   wallets: EncryptedWallet[];
   createdAt: number;
+  /** PBKDF2 iteration count used to derive the app key (email users). Pinned at registration. */
+  pbkdf2Iterations?: number;
   [extra: string]: unknown;
 }
 

@@ -33,14 +33,14 @@ describe("vault-aware signer (B2)", () => {
   });
 
   it("arming the vault makes getAppKey() non-null", () => {
-    configureVault({ autoLockMs: 10_000, storageMode: "memory" });
+    configureVault({ autoLockMs: 10_000 });
     armAppKey("deadbeef");
     expect(getAppKey()).toBe("deadbeef");
     expect(isLocked()).toBe(false);
   });
 
   it("signs while unlocked, then throws VaultLockedError after lockVault() with no re-render", () => {
-    configureVault({ autoLockMs: 10_000, storageMode: "memory" });
+    configureVault({ autoLockMs: 10_000 });
     armAppKey("deadbeef");
 
     // The signer is constructed ONCE while unlocked (simulating a memoized hook).
@@ -54,7 +54,7 @@ describe("vault-aware signer (B2)", () => {
   });
 
   it("throws VaultLockedError after auto-lock expiry, again with no re-render", async () => {
-    configureVault({ autoLockMs: 40, storageMode: "memory" });
+    configureVault({ autoLockMs: 40 });
     armAppKey("deadbeef");
     const signer = makeCallTimeSigner();
     expect(signer.sign()).toBe("signed-with:deadbeef");
@@ -65,7 +65,7 @@ describe("vault-aware signer (B2)", () => {
   });
 
   it("lockSnapshot() is pure and stable: reflects state without mutating it", () => {
-    configureVault({ autoLockMs: 10_000, storageMode: "memory" });
+    configureVault({ autoLockMs: 10_000 });
 
     expect(lockSnapshot()).toBe(false); // locked initially
     armAppKey("deadbeef");
@@ -80,7 +80,7 @@ describe("vault-aware signer (B2)", () => {
   });
 
   it("lockSnapshot() reports false once the deadline passes (no rehydrate side effect)", async () => {
-    configureVault({ autoLockMs: 40, storageMode: "memory" });
+    configureVault({ autoLockMs: 40 });
     armAppKey("deadbeef");
     expect(lockSnapshot()).toBe(true);
     await sleep(80);

@@ -23,7 +23,12 @@ export async function getUserByPublicKey(
   config: AuthConfig,
 ): Promise<UserData | null> {
   const raw = await storage.get(`${config.keyPrefixes.pubKey}${publicKey}`);
-  return raw ? (JSON.parse(raw) as UserData) : null;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as UserData;
+  } catch {
+    return null; // malformed/non-JSON value — fail safe instead of throwing
+  }
 }
 
 export async function resolvePublicKeyByEmail(
@@ -78,5 +83,5 @@ export async function revokeSession(
 }
 
 function sessionKey(token: string, config: AuthConfig): string {
-  return `${config.keyPrefixes.pubKey}session:${token}`;
+  return `${config.keyPrefixes.session}${token}`;
 }

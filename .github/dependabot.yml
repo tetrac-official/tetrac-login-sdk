@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # npm dependencies — weekly.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    # Group the dev/build toolchain so we don't get a PR per tool each week.
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+
+  # Keep the GitHub Actions used in ci.yml current too.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "github-actions"
