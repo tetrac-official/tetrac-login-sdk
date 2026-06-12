@@ -25,7 +25,7 @@ export default {
   // By default node_modules is not transformed; allow the ESM-only deps pulled in
   // by @solana/web3.js so they can be transpiled to something Jest can run.
   transformIgnorePatterns: [
-    "/node_modules/(?!(@solana|rpc-websockets|uuid|jayson|superstruct|borsh|@noble|@solana-program|crypto-es)/)",
+    "/node_modules/(?!(@solana|rpc-websockets|uuid|jayson|superstruct|borsh|@noble|@solana-program)/)",
   ],
   testMatch: ["**/tests/**/*.test.ts"],
 };

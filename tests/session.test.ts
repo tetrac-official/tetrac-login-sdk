@@ -19,14 +19,14 @@ describe("vault lock model", () => {
   });
 
   it("arms an app key and reports unlocked", () => {
-    configureVault({ autoLockMs: 10_000, storageMode: "memory" });
+    configureVault({ autoLockMs: 10_000 });
     armAppKey("deadbeef");
     expect(isLocked()).toBe(false);
     expect(getAppKey()).toBe("deadbeef");
   });
 
   it("lockVault() drops the key immediately", () => {
-    configureVault({ autoLockMs: 10_000, storageMode: "memory" });
+    configureVault({ autoLockMs: 10_000 });
     armAppKey("deadbeef");
     lockVault();
     expect(isLocked()).toBe(true);
@@ -34,7 +34,7 @@ describe("vault lock model", () => {
   });
 
   it("auto-locks after the idle window elapses", async () => {
-    configureVault({ autoLockMs: 40, storageMode: "memory" });
+    configureVault({ autoLockMs: 40 });
     armAppKey("deadbeef");
     expect(getAppKey()).toBe("deadbeef");
     await sleep(80);
@@ -43,7 +43,7 @@ describe("vault lock model", () => {
   });
 
   it("touchVault() extends the unlocked window", async () => {
-    configureVault({ autoLockMs: 120, storageMode: "memory" });
+    configureVault({ autoLockMs: 120 });
     armAppKey("deadbeef");
     await sleep(80);
     touchVault(); // reset the deadline before it would have expired
@@ -62,7 +62,7 @@ describe("vault lock model", () => {
   // configureVault accepts the flag (both ways) and never throws, and that arm/lock
   // behavior is unaffected by the flag value.
   it("configureVault accepts lockOnHide both ways without affecting arm/lock", () => {
-    expect(() => configureVault({ lockOnHide: false, autoLockMs: 10_000, storageMode: "memory" })).not.toThrow();
+    expect(() => configureVault({ lockOnHide: false, autoLockMs: 10_000 })).not.toThrow();
     armAppKey("deadbeef");
     expect(getAppKey()).toBe("deadbeef"); // arm still works with hide-locking disabled
 

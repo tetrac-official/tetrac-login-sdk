@@ -5,6 +5,9 @@ export interface KeyPrefixes {
   challenge: string;
   /** UserData blob: `${pubKey}{publicKey}`. */
   pubKey: string;
+  /** Session token -> publicKey: `${session}{token}` — disjoint from pubKey so an
+   *  attacker-chosen publicKey can never collide with the session-token keyspace. */
+  session: string;
   /** email -> publicKey lookup: `${email}{address}`. */
   email: string;
   /** Rate-limit counters: `${rateLimit}{identifier}`. */
@@ -24,16 +27,58 @@ export interface WebAuthnConfig {
   preferPrf: boolean;
 }
 
+/** Developer-chosen key-derivation strength. Higher = stronger but slower. */
+export type SecurityLevel = 1 | 2 | 3;
+
+/**
+ * PBKDF2-HMAC-SHA256 iteration counts per security level, for the email/passkey
+ * app-key derivation. Higher = stronger brute-force resistance but slower
+ * derivation (more login/unlock latency). The developer picks the level; the
+ * resolved iteration COUNT is what gets pinned per-user, so the choice stays
+ * stable even if this mapping is retuned later.
+ *   1 = 100k   — fastest (~1.2s on M-series); below OWASP 2023, legacy/compat only
+ *   2 = 600k   — OWASP 2023 minimum (~7s); recommended default
+ *   3 = 1.0M   — future-proof (~12s); highest latency
+ * Affects email/passkey accounts only — wallet uses SHA-256(sig), biometric uses PRF.
+ */
+export const PBKDF2_ITERATIONS: Record<SecurityLevel, number> = {
+  1: 100_000,
+  2: 600_000,
+  3: 1_000_000,
+};
+
 export interface AuthConfig {
-  /** PBKDF2 iterations for deriving the app key from passkey + email. */
-  pbkdf2Iterations: number;
+  /**
+   * Stable, per-deployment application identifier that DOMAIN-SEPARATES app-key
+   * derivation. It is mixed into the PBKDF2 salt for email/passkey accounts
+   * (`salt = SHA-256(appId : email)`) and into the message a Web3 wallet signs to
+   * derive its key — so the SAME (email+passkey) or the SAME wallet derives a
+   * DIFFERENT app key per app. This prevents cross-app key reuse (a key cracked or
+   * coerced on one app can't unlock the same user on another) and stops a single
+   * precomputed table from working across every deployment.
+   *
+   * MUST be unique and STABLE per deployment: set it once to something like your
+   * product/domain (e.g. "myapp.example"). Changing it re-derives every app key, so
+   * existing encrypted wallets would no longer decrypt. The default "ttc" works out
+   * of the box but provides NO cross-app isolation — override it in production.
+   */
+  appId: string;
+  /**
+   * Key-derivation strength for email/passkey accounts: 1=100k, 2=600k (default),
+   * 3=1M PBKDF2-HMAC-SHA256 iterations (see PBKDF2_ITERATIONS). Trades login/unlock
+   * latency for brute-force resistance. The resolved iteration COUNT is pinned
+   * per-user at registration (UserData.pbkdf2Iterations), so it stays stable for
+   * existing accounts even if the default level changes later.
+   */
+  securityLevel: SecurityLevel;
   /** TTL for wallet-login challenges, in seconds. */
   challengeTtlSeconds: number;
   /** Header carrying the opaque session token. */
   sessionHeader: string;
   /** Header carrying the user's public key. */
   publicKeyHeader: string;
-  /** TTL applied to issued session tokens, in seconds. Default 86400 (24h). */
+  /** TTL applied to issued session tokens, in seconds. Default 14400 (4h) — a leaked
+   *  bearer token dies sooner. Each new login also revokes the prior token. */
   sessionTtlSeconds: number;
   /**
    * When false (default), the server ignores x-forwarded-for / x-real-ip for
@@ -41,6 +86,16 @@ export interface AuthConfig {
    * Set true only when behind a trusted proxy that sets those headers.
    */
   trustProxyHeaders: boolean;
+  /**
+   * Number of trusted reverse-proxy hops in front of the app. Only consulted when
+   * trustProxyHeaders is true: the client IP is taken as the rightmost
+   * x-forwarded-for entry AFTER skipping this many hops. Proxies APPEND to XFF on
+   * the right, so the rightmost entries are set by infrastructure you control and
+   * are not client-spoofable, whereas the leftmost entry is client-supplied.
+   *   0 = take the rightmost entry (single trusted edge — e.g. Vercel). DEFAULT.
+   *   1 = skip one of your own proxies, etc.
+   */
+  trustedProxyHops: number;
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
   webauthn: WebAuthnConfig;
@@ -49,12 +104,6 @@ export interface AuthConfig {
    * signing throws VaultLockedError and the user must re-authenticate. Default 15s.
    */
   autoLockMs: number;
-  /**
-   * Where the app key is held while unlocked:
-   *  - "session": memory + sessionStorage (survives reload within the tab; default)
-   *  - "memory":  memory only (reload ⇒ re-auth; storage-scraping XSS finds nothing)
-   */
-  appKeyStorage: "session" | "memory";
   /** Lock the vault when the tab becomes hidden. Default true. */
   lockOnHide: boolean;
   /**
@@ -62,18 +111,23 @@ export interface AuthConfig {
    * never the ambient session key. Default true. (Reserved — v1 always re-auths.)
    */
   revealRequiresReauth: boolean;
+  /** Max total wallets a single user record may hold — import-wallet cap (record-bloat DoS guard). */
+  maxWalletsPerUser: number;
 }
 
 export const DEFAULT_CONFIG: AuthConfig = {
-  pbkdf2Iterations: 100_000,
+  appId: "ttc", // override per-deployment for cross-app key isolation (see AuthConfig.appId)
+  securityLevel: 2,
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
-  sessionTtlSeconds: 86_400,
+  sessionTtlSeconds: 14_400,
   trustProxyHeaders: false,
+  trustedProxyHops: 0,
   keyPrefixes: {
     challenge: "challenge:",
     pubKey: "pubKey:",
+    session: "session:",
     email: "email:",
     rateLimit: "ratelimit:",
   },
@@ -86,9 +140,9 @@ export const DEFAULT_CONFIG: AuthConfig = {
     preferPrf: true,
   },
   autoLockMs: 15_000,
-  appKeyStorage: "session",
   lockOnHide: true,
   revealRequiresReauth: true,
+  maxWalletsPerUser: 64,
 };
 
 /** Merge a partial override onto the defaults (shallow per top-level group). */

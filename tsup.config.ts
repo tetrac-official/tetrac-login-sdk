@@ -23,7 +23,9 @@ const shared = {
   format: ["esm", "cjs"] as ("esm" | "cjs")[],
   dts: true,
   splitting: false,
-  sourcemap: true,
+  // Deliberately off: files:["dist"] would otherwise publish .map files (and the
+  // original TS) in the npm tarball. Flip to true only if you intend to ship maps.
+  sourcemap: false,
   treeshake: true,
   external,
 };

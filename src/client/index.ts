@@ -23,7 +23,6 @@ export {
   subscribeLock,
   configureVault,
   VaultLockedError,
-  type AppKeyStorageMode,
 } from "./session.js";
 export {
   isBiometricAvailable,
@@ -31,6 +30,12 @@ export {
   derivePasskeySecret,
   type PasskeyRegistration,
 } from "./webauthn.js";
+export {
+  hasBiometricUnlock,
+  enableBiometricUnlock,
+  unlockViaBiometric,
+  disableBiometricUnlock,
+} from "./biometricUnlock.js";
 export {
   AuthClient,
   createAuthClient,

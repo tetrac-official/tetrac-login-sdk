@@ -1,7 +1,6 @@
 import {
   deriveAppKeyFromPasskey,
   deriveAppKeyFromSignature,
-  hashPasskey,
   encryptSecret,
   decryptSecret,
   randomHex,
@@ -28,24 +27,23 @@ describe("key derivation", () => {
     expect(deriveAppKeyFromSignature(sig)).toHaveLength(64);
   });
 
-  it("hashes passkeys deterministically", () => {
-    expect(hashPasskey("pw")).toBe(hashPasskey("pw"));
-    expect(hashPasskey("pw")).not.toBe(hashPasskey("pw2"));
-  });
 });
 
 describe("secret encryption", () => {
-  it("round-trips a secret under the app key", () => {
+  it("round-trips a secret under the app key", async () => {
     const key = deriveAppKeyFromPasskey("pw", "a@b.com");
     const secret = "0x" + "11".repeat(32);
-    const ct = encryptSecret(secret, key);
+    const ct = await encryptSecret(secret, key);
     expect(ct).not.toContain(secret);
-    expect(decryptSecret(ct, key)).toBe(secret);
+    expect(await decryptSecret(ct, key)).toBe(secret);
   });
 
-  it("fails to decrypt with the wrong key", () => {
-    const ct = encryptSecret("topsecret", "key-a");
-    expect(() => decryptSecret(ct, "key-b")).toThrow();
+  it("fails to decrypt with the wrong key", async () => {
+    // AES-GCM keys are 32 raw bytes (64 hex), so use real derived keys here.
+    const keyA = deriveAppKeyFromPasskey("a", "x@y.com");
+    const keyB = deriveAppKeyFromPasskey("b", "x@y.com");
+    const ct = await encryptSecret("topsecret", keyA);
+    await expect(decryptSecret(ct, keyB)).rejects.toThrow();
   });
 });
 
