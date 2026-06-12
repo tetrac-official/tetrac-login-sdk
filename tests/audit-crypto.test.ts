@@ -1,11 +1,11 @@
-// CHARACTERIZATION TESTS — prove the cryptography findings from
-// audits/opus-4.8-comprehensive-audit.md against the CURRENT code, WITHOUT
-// changing src/. These assert today's (vulnerable) behavior, so they PASS now
-// and document the finding. After the hardening lands, invert the marked asserts.
+// CHARACTERIZATION TESTS for the cryptography findings from
+// audits/opus-4.8-comprehensive-audit.md. The hardening has landed, so these now
+// assert the RESOLVED behavior (the original vulnerable asserts were inverted).
 //
-// Findings covered: C1 (unsalted SHA-256 passkeyHash), H1 (AES-CBC no integrity),
-// H2 (email salt + 100k iters), H4 (domain-unbound key message), CRYPTO-5
-// (timingSafeEqual is actually correct — confirms the "disproven" reconciliation).
+// Findings covered: C1 (unsalted SHA-256 passkeyHash → signature auth), H1 (AES-CBC
+// → authenticated AES-256-GCM), H2 (email salt + 100k → 600k + domain-separated
+// SHA-256(appId:email) salt), H4 (domain-unbound key message → appId-bound message),
+// CRYPTO-5 (timingSafeEqual is correct — confirms the "disproven" reconciliation).
 import { createHash } from "crypto";
 import CryptoES from "crypto-es";
 import {
@@ -34,21 +34,32 @@ describe("C1 RESOLVED — no passkey hash on the server (signature auth)", () =>
   });
 });
 
-describe("H2 — iteration count RESOLVED (default 600k); salt is still the email (open)", () => {
-  it("default security level is 2 = 600k, meeting OWASP 2023 (H2 iteration count RESOLVED)", () => {
+describe("H2 RESOLVED — 600k iterations + domain-separated salt (no longer the bare email)", () => {
+  it("default security level is 2 = 600k, meeting OWASP 2023", () => {
     expect(DEFAULT_CONFIG.securityLevel).toBe(2);
     expect(PBKDF2_ITERATIONS[DEFAULT_CONFIG.securityLevel]).toBeGreaterThanOrEqual(600_000);
   });
 
-  it("salt is exactly the normalized email (public, predictable, low-entropy)", () => {
-    const manual = CryptoES.PBKDF2("pw", "a@b.com", { keySize: 256 / 32, iterations: 100_000 })
+  it("the salt is SHA-256(appId : email), NOT the bare email", () => {
+    // Old (vulnerable) behavior used the bare normalized email as the salt:
+    const bareEmailSalt = CryptoES.PBKDF2("pw", "a@b.com", { keySize: 256 / 32, iterations: 100_000 })
       .toString(CryptoES.enc.Hex);
-    // Proves: salt === lowercased/trimmed email, iterations === 100k, hasher === SHA-256 (default).
-    expect(deriveAppKeyFromPasskey("pw", "A@B.com  ")).toBe(manual);
+    expect(deriveAppKeyFromPasskey("pw", "A@B.com  ", 100_000, "ttc")).not.toBe(bareEmailSalt);
+
+    // …it now matches a derivation whose salt is SHA-256("ttc:a@b.com"):
+    const domainSalt = CryptoES.SHA256("ttc:a@b.com");
+    const expected = CryptoES.PBKDF2("pw", domainSalt, { keySize: 256 / 32, iterations: 100_000 })
+      .toString(CryptoES.enc.Hex);
+    expect(deriveAppKeyFromPasskey("pw", "A@B.com  ", 100_000, "ttc")).toBe(expected);
   });
 
-  it("no app/origin domain separation: same passkey+email derives the same key on ANY deployment", () => {
-    expect(deriveAppKeyFromPasskey("pw", "u@x.com")).toBe(deriveAppKeyFromPasskey("pw", "u@x.com"));
+  it("domain separation: a different appId ⇒ a different key; same appId+inputs ⇒ same key", () => {
+    expect(deriveAppKeyFromPasskey("pw", "u@x.com", 100_000, "appA")).not.toBe(
+      deriveAppKeyFromPasskey("pw", "u@x.com", 100_000, "appB"),
+    );
+    expect(deriveAppKeyFromPasskey("pw", "u@x.com", 100_000, "appA")).toBe(
+      deriveAppKeyFromPasskey("pw", "u@x.com", 100_000, "appA"),
+    );
   });
 });
 
@@ -73,19 +84,24 @@ describe("H1 RESOLVED — wallet secrets use authenticated AES-256-GCM (tamperin
   });
 });
 
-describe("H4 — WALLET_APP_KEY_MESSAGE is a fixed, domain-unbound constant (cross-site key derivation)", () => {
-  it("the signed message carries no origin / host / chainId / nonce", () => {
-    expect(walletAppKeyMessage()).toBe(WALLET_APP_KEY_MESSAGE);
-    expect(WALLET_APP_KEY_MESSAGE).not.toMatch(
-      /https?:\/\/|origin|hostname|chainId|nonce|\b\d{1,3}(?:\.\d{1,3}){3}\b/i,
-    );
+describe("H4 RESOLVED — the wallet-app-key message is domain-bound by appId", () => {
+  it("the signed message embeds appId, so different apps sign DIFFERENT messages", () => {
+    expect(walletAppKeyMessage("appA")).not.toBe(walletAppKeyMessage("appB"));
+    expect(walletAppKeyMessage("myapp")).toContain("myapp");
+    expect(walletAppKeyMessage("appA").startsWith(WALLET_APP_KEY_MESSAGE)).toBe(true); // built on the base text
   });
 
-  it("any site that gets the same signature derives the SAME appKey (no per-origin key)", () => {
-    const sig = "deadbeef".repeat(16); // a wallet signs the identical constant on any site
-    const legitSite = deriveAppKeyFromSignature(sig);
-    const evilSite = deriveAppKeyFromSignature(sig); // pure function — no origin input exists
-    expect(evilSite).toBe(legitSite);
+  it("same appId ⇒ same message (deterministic — recovery/login stays stable)", () => {
+    expect(walletAppKeyMessage("appA")).toBe(walletAppKeyMessage("appA"));
+  });
+
+  it("isolation comes from the MESSAGE, not the hash: deriveAppKeyFromSignature stays pure", () => {
+    // Two apps no longer share a key because the wallet signs DIFFERENT messages
+    // (different appId) → different signatures → different keys. The hash step itself
+    // is intentionally origin-free, so identical signatures still map to one key.
+    const sig = "deadbeef".repeat(16);
+    expect(deriveAppKeyFromSignature(sig)).toBe(deriveAppKeyFromSignature(sig));
+    expect(walletAppKeyMessage("appA")).not.toBe(walletAppKeyMessage("appB"));
   });
 });
 

@@ -49,6 +49,21 @@ export const PBKDF2_ITERATIONS: Record<SecurityLevel, number> = {
 
 export interface AuthConfig {
   /**
+   * Stable, per-deployment application identifier that DOMAIN-SEPARATES app-key
+   * derivation. It is mixed into the PBKDF2 salt for email/passkey accounts
+   * (`salt = SHA-256(appId : email)`) and into the message a Web3 wallet signs to
+   * derive its key — so the SAME (email+passkey) or the SAME wallet derives a
+   * DIFFERENT app key per app. This prevents cross-app key reuse (a key cracked or
+   * coerced on one app can't unlock the same user on another) and stops a single
+   * precomputed table from working across every deployment.
+   *
+   * MUST be unique and STABLE per deployment: set it once to something like your
+   * product/domain (e.g. "myapp.example"). Changing it re-derives every app key, so
+   * existing encrypted wallets would no longer decrypt. The default "ttc" works out
+   * of the box but provides NO cross-app isolation — override it in production.
+   */
+  appId: string;
+  /**
    * Key-derivation strength for email/passkey accounts: 1=100k, 2=600k (default),
    * 3=1M PBKDF2-HMAC-SHA256 iterations (see PBKDF2_ITERATIONS). Trades login/unlock
    * latency for brute-force resistance. The resolved iteration COUNT is pinned
@@ -62,7 +77,8 @@ export interface AuthConfig {
   sessionHeader: string;
   /** Header carrying the user's public key. */
   publicKeyHeader: string;
-  /** TTL applied to issued session tokens, in seconds. Default 86400 (24h). */
+  /** TTL applied to issued session tokens, in seconds. Default 14400 (4h) — a leaked
+   *  bearer token dies sooner. Each new login also revokes the prior token. */
   sessionTtlSeconds: number;
   /**
    * When false (default), the server ignores x-forwarded-for / x-real-ip for
@@ -100,11 +116,12 @@ export interface AuthConfig {
 }
 
 export const DEFAULT_CONFIG: AuthConfig = {
+  appId: "ttc", // override per-deployment for cross-app key isolation (see AuthConfig.appId)
   securityLevel: 2,
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
-  sessionTtlSeconds: 86_400,
+  sessionTtlSeconds: 14_400,
   trustProxyHeaders: false,
   trustedProxyHops: 0,
   keyPrefixes: {

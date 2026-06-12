@@ -16,6 +16,8 @@ const TOKEN_KEY = "ttc-auth-token";
 const PUBKEY_KEY = "ttc-public-key";
 const EMAIL_KEY = "user_email";
 const EK_ITER_KEY = "ttc_pbkdf2_iter"; // per-user PBKDF2 iteration count, pinned at register/login
+const LOCK_SIGNAL_KEY = "ttc_lock_signal"; // cross-tab lock sentinel (CLIENTVAULT-7) — a bumped
+// timestamp, never a secret; writing it fires a `storage` event in sibling tabs.
 
 /** Thrown by signer/decrypt helpers when the vault is locked. */
 export class VaultLockedError extends Error {
@@ -83,11 +85,11 @@ function bindHideHandler(): void {
   if (!hasWindow() || hideHandlerBound) return;
   hideHandlerBound = true;
   const lockOnHideEvt = (): void => {
-    if (lockOnHide) lockVault();
+    if (lockOnHide) lockVault(false); // per-tab hide — don't propagate to siblings
   };
   if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
     document.addEventListener("visibilitychange", () => {
-      if (lockOnHide && document.visibilityState === "hidden") lockVault();
+      if (lockOnHide && document.visibilityState === "hidden") lockVault(false);
     });
     // Page Lifecycle: a frozen page (bfcache / mobile background) pauses timers, so
     // the idle auto-lock can't fire — lock proactively when the page freezes.
@@ -98,11 +100,20 @@ function bindHideHandler(): void {
     // before bfcache entry across browsers.
     window.addEventListener("pagehide", lockOnHideEvt);
     // bfcache freezes and RESTORES the JS heap, so an unlocked in-memory key can ride
-    // a back/forward navigation. On restore (event.persisted), force a re-lock
-    // regardless of lockOnHide — a bfcache restore is a session-continuity break,
-    // a stronger signal than an ordinary tab-hide.
+    // a back/forward navigation. On restore (event.persisted), force a re-lock — a
+    // bfcache restore is a session-continuity break, stronger than an ordinary hide.
     window.addEventListener("pageshow", (e) => {
-      if ((e as PageTransitionEvent).persisted) lockVault();
+      if ((e as PageTransitionEvent).persisted) lockVault(false);
+    });
+    // Cross-tab coordination (CLIENTVAULT-7): a logout removes the auth token from the
+    // shared localStorage, and an explicit lock bumps LOCK_SIGNAL_KEY — either fires a
+    // `storage` event in OTHER same-origin tabs, where we drop the hot key locally
+    // (propagate=false — the originating tab already did its part).
+    window.addEventListener("storage", (e) => {
+      const ev = e as StorageEvent;
+      if ((ev.key === TOKEN_KEY && ev.newValue === null) || ev.key === LOCK_SIGNAL_KEY) {
+        lockVault(false);
+      }
     });
   }
 }
@@ -118,7 +129,7 @@ function scheduleLock(): void {
   clearTimer();
   if (!memoryAppKey || lockDeadline == null || !hasWindow()) return;
   const ms = Math.max(0, lockDeadline - nowMs());
-  lockTimer = setTimeout(() => lockVault(), ms);
+  lockTimer = setTimeout(() => lockVault(false), ms); // idle lock is per-tab — don't propagate
 }
 
 /** Internal: drop the key from memory without firing listeners. */
@@ -161,10 +172,24 @@ export function touchVault(): void {
   scheduleLock();
 }
 
-/** Lock the vault now: drop the key and notify subscribers. */
-export function lockVault(): void {
+/**
+ * Lock the vault now: drop the key and notify subscribers. When `propagate` is true
+ * (the default for an explicit, app-initiated lock), also bump the cross-tab lock
+ * sentinel so sibling tabs of the same origin lock too — a shared device shouldn't
+ * leave other tabs hot (CLIENTVAULT-7). Automatic locks (idle timer, tab hide, page
+ * freeze, bfcache restore) pass false: they are per-tab events and must NOT lock a
+ * sibling tab that is still in active use.
+ */
+export function lockVault(propagate = true): void {
   const wasUnlocked = !!memoryAppKey;
   clearKeyState();
+  if (propagate && hasWindow()) {
+    try {
+      localStorage.setItem(LOCK_SIGNAL_KEY, String(nowMs()));
+    } catch {
+      /* best-effort cross-tab signal */
+    }
+  }
   if (wasUnlocked) notify();
 }
 

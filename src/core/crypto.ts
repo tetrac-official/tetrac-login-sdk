@@ -11,15 +11,21 @@ import CryptoES from "crypto-es";
 
 /**
  * Deterministically derive the 256-bit app (encryption) key for email/passkey
- * users: PBKDF2(passkey, salt = normalized email). Same inputs always yield the
- * same key, so wallets can be decrypted on any device without server storage.
+ * users: PBKDF2(passkey, salt = SHA-256(appId : normalized email)). Same inputs
+ * always yield the same key, so wallets decrypt on any device without server
+ * storage. The `appId` DOMAIN-SEPARATES the salt (CRYPTO-2): the same (passkey,
+ * email) derives a DIFFERENT key per deployment, so a key cracked/coerced on one
+ * app can't unlock the same user on another, and a precomputed table is per-appId.
+ * Default "ttc" must match DEFAULT_CONFIG.appId; override per deployment.
  */
 export function deriveAppKeyFromPasskey(
   passkey: string,
   email: string,
   iterations = 100_000,
+  appId = "ttc",
 ): string {
-  const salt = email.toLowerCase().trim();
+  // SHA-256(appId : email) → a fixed-length, domain-separated, per-user salt.
+  const salt = CryptoES.SHA256(`${appId}:${email.toLowerCase().trim()}`);
   return CryptoES.PBKDF2(passkey, salt, {
     keySize: 256 / 32, // word count (32-bit words) -> 256-bit key
     iterations,

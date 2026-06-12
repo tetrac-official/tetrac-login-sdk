@@ -147,14 +147,13 @@ Defaults match `next-ttc`. Override via the `config` option on the route factory
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
-  sessionTtlSeconds: 86_400,        // session tokens expire server-side after 24h
+  sessionTtlSeconds: 14_400,        // session tokens expire server-side after 4h
   trustProxyHeaders: false,         // see "Production deployment notes" below
   keyPrefixes: { challenge: "challenge:", pubKey: "pubKey:", email: "email:", rateLimit: "ratelimit:" },
   rateLimit: { windowSeconds: 60, maxAttempts: 10 },
   webauthn: { rpName: "TTC", preferPrf: true },
   autoLockMs: 15_000,               // in-browser app key auto-locks after 15s idle
-  appKeyStorage: "memory",          // default; "session" persists across reload (XSS-readable)
-  lockOnHide: true,                 // lock the vault when the tab is hidden
+  lockOnHide: true,                 // lock the vault when the tab is hidden / frozen
   revealRequiresReauth: true,       // plaintext reveal always re-runs the ceremony
 }
 ```
@@ -166,9 +165,11 @@ Defaults match `next-ttc`. Override via the `config` option on the route factory
   With the default `false`, proxy headers are ignored (they're client-spoofable
   when there's no proxy) and all traffic shares one IP bucket — safe, but it
   effectively turns the per-IP limit into a global one.
-- **Sessions expire.** Tokens die server-side after `sessionTtlSeconds` (24h
+- **Sessions expire.** Tokens die server-side after `sessionTtlSeconds` (4h
   default) and each new login revokes the previous token. `logout()` revokes
-  the current token best-effort via `POST /logout` before clearing local state.
+  the current token best-effort via `POST /logout` (with `keepalive` so it lands
+  during unload) before clearing local state; clearing the shared token also locks
+  sibling tabs of the same origin.
 
 ### Environment
 
@@ -183,11 +184,11 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 ## Security model
 
 - Private keys: encrypted at rest (AES via `crypto-es`), never stored or transmitted in plaintext.
-- App/encryption key: **in-memory by default** (`appKeyStorage: "memory"`) — never `localStorage`, never
-  sent to the server. On tab reload the vault locks and the user must re-authenticate to decrypt wallets.
-  Set `appKeyStorage: "session"` to also persist it in `sessionStorage` across reloads within the tab
-  (convenience, but any same-origin XSS can then read it). Auto-locks after `autoLockMs` idle; locked
-  signers throw `VaultLockedError` until re-auth.
+- App/encryption key: **memory-only** — never `sessionStorage`, never `localStorage`, never sent to the
+  server. A tab reload (or crash) drops it, so the user must re-authenticate to decrypt wallets and
+  storage-scraping XSS finds no key at rest. Auto-locks after `autoLockMs` idle and on tab hide / page
+  freeze / bfcache restore; locked signers throw `VaultLockedError` until re-auth. To survive a reload
+  without re-running a passkey ceremony, use **biometric unlock** (a Touch/Face-ID-gated wrapped blob).
 - Revealing a plaintext key always re-runs the auth ceremony (passkey / wallet signature /
   Face ID) — never the ambient session key.
 - Web3 login: 32-byte challenge, 5-min TTL, **single-use** (atomic consume); signature verified with `tweetnacl`.

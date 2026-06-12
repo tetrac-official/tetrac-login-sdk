@@ -85,6 +85,15 @@ export class AuthClient {
       autoLockMs: this.config.autoLockMs,
       lockOnHide: this.config.lockOnHide,
     });
+    // appId domain-separates every app key. Left at the default it provides NO
+    // cross-app isolation — nudge integrators to set a unique, stable value.
+    if (this.config.appId === "ttc") {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[tetrac] config.appId is the default 'ttc' — set a unique, stable appId per deployment " +
+          "for cross-app key isolation (changing it later re-derives all app keys).",
+      );
+    }
   }
 
   // --- Re-authentication (unlock + reveal) ---
@@ -100,10 +109,10 @@ export class AuthClient {
       if (!email) throw new Error("No email in session for passkey re-auth");
       // Use the iteration count pinned for this account at registration (legacy: 100k fallback).
       const iterations = getPbkdf2Iterations() ?? 100_000;
-      return deriveAppKeyFromPasskey(creds.passkey, email, iterations);
+      return deriveAppKeyFromPasskey(creds.passkey, email, iterations, this.config.appId);
     }
     if ("signMessage" in creds) {
-      const sig = await creds.signMessage(new TextEncoder().encode(walletAppKeyMessage()));
+      const sig = await creds.signMessage(new TextEncoder().encode(walletAppKeyMessage(this.config.appId)));
       return deriveAppKeyFromSignature(bytesToHex(sig));
     }
     if ("registration" in creds) {
@@ -177,7 +186,7 @@ export class AuthClient {
   /** Register an email/passkey account; generates and encrypts wallets client-side. */
   async registerWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
     const iterations = PBKDF2_ITERATIONS[this.config.securityLevel];
-    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations);
+    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const identity = bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
@@ -204,7 +213,7 @@ export class AuthClient {
     // 2) Re-derive the appKey (legacy accounts: 100k fallback) and sign the challenge
     //    with the derived auth keypair — the server stores only the matching public key.
     const iterations = pbkdf2Iterations ?? 100_000;
-    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations);
+    const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const signature = signAuthChallenge(appKey, challenge);
     const result = await this.post<AuthResult>("login", { email: params.email, signature, challenge });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email, pbkdf2Iterations: iterations });
@@ -227,7 +236,7 @@ export class AuthClient {
     const { challenge } = await this.post<{ challenge: string }>("challenge", { publicKey });
     const enc = new TextEncoder();
     const authSig = await signMessage(enc.encode(walletLoginMessage(challenge)));
-    const keySig = await signMessage(enc.encode(walletAppKeyMessage()));
+    const keySig = await signMessage(enc.encode(walletAppKeyMessage(this.config.appId)));
     return {
       appKey: deriveAppKeyFromSignature(bytesToHex(keySig)),
       signatureHex: bytesToHex(authSig),
@@ -361,14 +370,17 @@ export class AuthClient {
 
   /**
    * Log out: best-effort server-side token revocation, then clear local state.
-   * The revocation request is fired without awaiting (capturing the headers
-   * before they're cleared) so logout is instant and never blocked by the
-   * network; if it fails, the token still dies at its server-side TTL.
+   * The revocation request is fired without awaiting (capturing the headers before
+   * they're cleared) so logout is instant and never blocked by the network. It uses
+   * `keepalive: true` so the request still lands when logout coincides with the page
+   * unloading (sendBeacon can't carry our auth headers); if it fails, the token still
+   * dies at its server-side TTL. clearSession() then removes the shared-localStorage
+   * token, which fires a `storage` event that locks sibling tabs (CLIENTVAULT-7).
    */
   logout(): void {
     const headers = authHeaders();
     if (getAuthToken()) {
-      void fetch(`${this.opts.apiBaseUrl}/logout`, { method: "POST", headers }).catch(() => {
+      void fetch(`${this.opts.apiBaseUrl}/logout`, { method: "POST", headers, keepalive: true }).catch(() => {
         /* best-effort — TTL is the backstop */
       });
     }

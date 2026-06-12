@@ -16,7 +16,8 @@ import type { EncryptedWallet } from "../core/types.js";
 export interface UseExportKeyOptions {
   /**
    * Auto-clear the revealed plaintext from state after this many milliseconds.
-   * Defaults to no auto-clear — callers (or <ExportKeyPanel>) opt in.
+   * Defaults to 30_000 (30s) — a revealed private key shouldn't linger in React
+   * state indefinitely. Pass 0 to disable auto-clear (then the caller MUST clear()).
    */
   autoClearMs?: number;
 }
@@ -42,7 +43,7 @@ export function useExportKey(
   options: UseExportKeyOptions = {},
 ): UseExportKeyResult {
   const { client } = useAuthContext();
-  const { autoClearMs } = options;
+  const { autoClearMs = 30_000 } = options; // auto-clear ON by default; pass 0 to disable
   const [plaintext, setPlaintext] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);

@@ -52,6 +52,9 @@ describe("AuthClient.logout() — best-effort server revocation", () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/api/auth/logout");
     expect(init.method).toBe("POST");
+    // keepalive lets the revocation land even when logout coincides with page unload
+    // (AUTHSESSION-10) — and unlike sendBeacon it still carries our auth headers.
+    expect(init.keepalive).toBe(true);
     // Headers were captured BEFORE the local clear.
     expect((init.headers as Record<string, string>)["ttc-auth-token"]).toBe("tok-abc");
     expect((init.headers as Record<string, string>)["ttc-public-key"]).toBe("PubKey111");
