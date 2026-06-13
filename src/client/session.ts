@@ -27,22 +27,76 @@ export class VaultLockedError extends Error {
   }
 }
 
-// --- vault state (module-scope, single source of truth) ---
-let memoryAppKey: string | null = null;
-let lockDeadline: number | null = null; // epoch ms at which the key auto-locks
-let lockTimer: ReturnType<typeof setTimeout> | null = null;
+// --- vault state: ONE instance shared across every subpath bundle -------------
+// The SDK ships as several independently-bundled subpaths (/client, /react, /ui,
+// …). tsup builds with `splitting:false` and does NOT externalize this module, so
+// its code is INLINED into more than one bundle. If the vault state lived in plain
+// module-scope `let`s, each inlined copy would own a SEPARATE memoryAppKey:
+// login() (run through the /react hooks) would arm the react copy while a consumer
+// calling getAppKey() from "@tetrac/login-sdk/client" read a different, never-armed
+// copy and got null forever ("Vault is locked"). To make every copy operate on ONE
+// runtime state we hang it off a process-global keyed by a cross-realm Symbol.for():
+// both copies resolve the same registered symbol and therefore the same object.
+// It is non-enumerable (never shows up in for-in / JSON.stringify of globalThis)
+// and memory-only as before — a real page reload starts a NEW realm with a fresh
+// empty slot, so nothing is rehydrated from storage.
+interface VaultState {
+  /** The app/encryption key — memory-only, never persisted to web storage. */
+  memoryAppKey: string | null;
+  /** Epoch ms at which the key auto-locks (null when no key is armed). */
+  lockDeadline: number | null;
+  lockTimer: ReturnType<typeof setTimeout> | null;
+  // Config (set by configureVault; defaults match DEFAULT_CONFIG).
+  autoLockMs: number;
+  lockOnHide: boolean;
+  hideHandlerBound: boolean;
+  /** Lock/unlock subscribers. Shared so a notify() from ANY bundle copy reaches
+   *  subscribers registered through any other copy (cross-copy reactivity). */
+  listeners: Set<() => void>;
+  /** clearSession() (logout) hooks — e.g. biometricUnlock's blob purge. Shared so
+   *  a logout through ANY copy fires every registered hook. Kept here (not imported
+   *  by session.ts) so feature modules register without creating an import cycle. */
+  clearHooks: Set<() => void>;
+}
 
-// --- vault config (set by configureVault, defaults match DEFAULT_CONFIG) ---
-let autoLockMs = 15_000;
-let lockOnHide = true;
-let hideHandlerBound = false;
+const VAULT_STATE_KEY = Symbol.for("tetrac.vault");
 
-const listeners = new Set<() => void>();
+/**
+ * Resolve the one shared vault state, creating it on first access. Every bundle
+ * copy calls this at import and — via the global Symbol registry — gets the SAME
+ * object, so arming/locking/notifying done through one subpath is visible from
+ * every other (/client, /react, /ui, …).
+ */
+function resolveVaultState(): VaultState {
+  const g = globalThis as unknown as Record<symbol, VaultState | undefined>;
+  let state = g[VAULT_STATE_KEY];
+  if (!state) {
+    state = {
+      memoryAppKey: null,
+      lockDeadline: null,
+      lockTimer: null,
+      autoLockMs: 15_000,
+      lockOnHide: true,
+      hideHandlerBound: false,
+      listeners: new Set<() => void>(),
+      clearHooks: new Set<() => void>(),
+    };
+    // Non-enumerable so it stays out of for-in / JSON of globalThis. Left
+    // configurable so a test harness can delete the slot to simulate a page
+    // reload (a real reload gets a fresh realm anyway); not writable so a stray
+    // `globalThis[sym] = …` can't silently swap out the live vault.
+    Object.defineProperty(g, VAULT_STATE_KEY, {
+      value: state,
+      enumerable: false,
+      writable: false,
+      configurable: true,
+    });
+  }
+  return state;
+}
 
-// Hooks fired on clearSession() (i.e. logout). Lets feature modules purge their
-// own device-local state on logout WITHOUT session.ts importing them (which
-// would create a cycle). biometricUnlock.ts registers its blob purge here.
-const clearHooks = new Set<() => void>();
+// Resolved once per bundle copy at import time — every copy shares this object.
+const vault = resolveVaultState();
 
 /**
  * Register a callback fired on every clearSession() (logout). Returns an
@@ -51,9 +105,9 @@ const clearHooks = new Set<() => void>();
  * biometricUnlock to purge wrapped blobs + gate secrets on logout.
  */
 export function registerSessionClearHook(fn: () => void): () => void {
-  clearHooks.add(fn);
+  vault.clearHooks.add(fn);
   return () => {
-    clearHooks.delete(fn);
+    vault.clearHooks.delete(fn);
   };
 }
 
@@ -61,35 +115,35 @@ const hasWindow = (): boolean => typeof window !== "undefined";
 const nowMs = (): number => Date.now();
 
 function notify(): void {
-  for (const cb of listeners) cb();
+  for (const cb of vault.listeners) cb();
 }
 
 /** Subscribe to lock/unlock transitions. Returns an unsubscribe fn. */
 export function subscribeLock(cb: () => void): () => void {
-  listeners.add(cb);
+  vault.listeners.add(cb);
   return () => {
-    listeners.delete(cb);
+    vault.listeners.delete(cb);
   };
 }
 
 /** Configure auto-lock behavior. Called once by AuthClient from resolved config. */
 export function configureVault(opts: { autoLockMs?: number; lockOnHide?: boolean }): void {
-  if (typeof opts.autoLockMs === "number") autoLockMs = opts.autoLockMs;
-  if (typeof opts.lockOnHide === "boolean") lockOnHide = opts.lockOnHide;
+  if (typeof opts.autoLockMs === "number") vault.autoLockMs = opts.autoLockMs;
+  if (typeof opts.lockOnHide === "boolean") vault.lockOnHide = opts.lockOnHide;
   bindHideHandler();
 }
 
 function bindHideHandler(): void {
   // Bind once, but RE-CHECK lockOnHide at fire time — so configureVault({
   // lockOnHide:false }) disables hide-locking even after the listeners are bound.
-  if (!hasWindow() || hideHandlerBound) return;
-  hideHandlerBound = true;
+  if (!hasWindow() || vault.hideHandlerBound) return;
+  vault.hideHandlerBound = true;
   const lockOnHideEvt = (): void => {
-    if (lockOnHide) lockVault(false); // per-tab hide — don't propagate to siblings
+    if (vault.lockOnHide) lockVault(false); // per-tab hide — don't propagate to siblings
   };
   if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
     document.addEventListener("visibilitychange", () => {
-      if (lockOnHide && document.visibilityState === "hidden") lockVault(false);
+      if (vault.lockOnHide && document.visibilityState === "hidden") lockVault(false);
     });
     // Page Lifecycle: a frozen page (bfcache / mobile background) pauses timers, so
     // the idle auto-lock can't fire — lock proactively when the page freezes.
@@ -119,24 +173,24 @@ function bindHideHandler(): void {
 }
 
 function clearTimer(): void {
-  if (lockTimer) {
-    clearTimeout(lockTimer);
-    lockTimer = null;
+  if (vault.lockTimer) {
+    clearTimeout(vault.lockTimer);
+    vault.lockTimer = null;
   }
 }
 
 function scheduleLock(): void {
   clearTimer();
-  if (!memoryAppKey || lockDeadline == null || !hasWindow()) return;
-  const ms = Math.max(0, lockDeadline - nowMs());
-  lockTimer = setTimeout(() => lockVault(false), ms); // idle lock is per-tab — don't propagate
+  if (!vault.memoryAppKey || vault.lockDeadline == null || !hasWindow()) return;
+  const ms = Math.max(0, vault.lockDeadline - nowMs());
+  vault.lockTimer = setTimeout(() => lockVault(false), ms); // idle lock is per-tab — don't propagate
 }
 
 /** Internal: drop the key from memory without firing listeners. */
 function clearKeyState(): void {
   clearTimer();
-  memoryAppKey = null;
-  lockDeadline = null;
+  vault.memoryAppKey = null;
+  vault.lockDeadline = null;
 }
 
 export function setSession(params: {
@@ -159,16 +213,16 @@ export function setSession(params: {
 
 /** Install/refresh the app key and (re)start the auto-lock window. Fires listeners. */
 export function armAppKey(appKey: string): void {
-  memoryAppKey = appKey;
-  lockDeadline = nowMs() + autoLockMs;
+  vault.memoryAppKey = appKey;
+  vault.lockDeadline = nowMs() + vault.autoLockMs;
   scheduleLock();
   notify();
 }
 
 /** Extend the unlocked window after a successful sensitive op (signing). */
 export function touchVault(): void {
-  if (!memoryAppKey) return;
-  lockDeadline = nowMs() + autoLockMs;
+  if (!vault.memoryAppKey) return;
+  vault.lockDeadline = nowMs() + vault.autoLockMs;
   scheduleLock();
 }
 
@@ -181,7 +235,7 @@ export function touchVault(): void {
  * sibling tab that is still in active use.
  */
 export function lockVault(propagate = true): void {
-  const wasUnlocked = !!memoryAppKey;
+  const wasUnlocked = !!vault.memoryAppKey;
   clearKeyState();
   if (propagate && hasWindow()) {
     try {
@@ -200,8 +254,8 @@ export function lockVault(propagate = true): void {
  * safety net for when timers were paused, e.g. a backgrounded/frozen tab).
  */
 export function isLocked(): boolean {
-  if (!memoryAppKey) return true;
-  if (lockDeadline != null && nowMs() > lockDeadline) {
+  if (!vault.memoryAppKey) return true;
+  if (vault.lockDeadline != null && nowMs() > vault.lockDeadline) {
     clearKeyState(); // silent — the scheduled timer fires the notify
     return true;
   }
@@ -216,8 +270,8 @@ export function isLocked(): boolean {
  * Re-hydration still happens via isLocked()/getAppKey() on the actual use path.
  */
 export function lockSnapshot(): boolean {
-  if (!memoryAppKey) return false;
-  if (lockDeadline != null && nowMs() > lockDeadline) return false;
+  if (!vault.memoryAppKey) return false;
+  if (vault.lockDeadline != null && nowMs() > vault.lockDeadline) return false;
   return true;
 }
 
@@ -245,7 +299,7 @@ export function getPbkdf2Iterations(): number | null {
 /** The app/encryption key, or null when the vault is locked. */
 export function getAppKey(): string | null {
   if (isLocked()) return null;
-  return memoryAppKey;
+  return vault.memoryAppKey;
 }
 
 export function clearSession(): void {
@@ -258,7 +312,7 @@ export function clearSession(): void {
   }
   // Fire feature cleanup hooks (e.g. purge biometric-unlock blobs). Best-effort:
   // a throwing hook must never block logout.
-  for (const hook of clearHooks) {
+  for (const hook of vault.clearHooks) {
     try {
       hook();
     } catch {

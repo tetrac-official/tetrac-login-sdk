@@ -30,9 +30,15 @@ function installWindow(): { handlers: Handlers; sessionStorage: ReturnType<typeo
 
 async function freshSession() {
   jest.resetModules();
+  // The vault state is now a process-global (Symbol.for("tetrac.vault")) shared
+  // across bundle copies; jest.resetModules() does NOT clear it. Delete the slot so
+  // the re-imported module starts fresh — in particular hideHandlerBound resets to
+  // false, so bindHideHandler() re-registers the `storage` listener against THIS
+  // test's new handler registry (a real reload gets a brand-new realm anyway).
+  delete (globalThis as any)[Symbol.for("tetrac.vault")];
   const ctx = installWindow();
   const mod = await import("../src/client/session");
-  mod.lockVault(false); // reset module-scope state without writing the sentinel
+  mod.lockVault(false); // belt-and-suspenders: start locked without writing the sentinel
   return { mod, ...ctx };
 }
 
