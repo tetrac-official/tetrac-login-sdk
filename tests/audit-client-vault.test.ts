@@ -32,9 +32,14 @@ function installBrowserGlobals(): { sessionStorage: Store; localStorage: Store }
 
 async function freshSession() {
   jest.resetModules();
+  // The vault state is now a process-global (Symbol.for("tetrac.vault")) shared
+  // across bundle copies; jest.resetModules() does NOT clear it. Delete the slot
+  // so the re-imported module builds a fresh, empty vault — faithfully simulating
+  // a page reload, which in a real browser starts a brand-new realm.
+  delete (globalThis as any)[Symbol.for("tetrac.vault")];
   const stores = installBrowserGlobals();
   const mod = await import("../src/client/session");
-  mod.lockVault(); // reset any module-scope state that survived (memory key/timer)
+  mod.lockVault(); // belt-and-suspenders: guarantee we start locked
   return { mod, ...stores };
 }
 
