@@ -254,8 +254,71 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 ```bash
 npm run build      # tsup -> ESM + CJS + d.ts
 npm test           # jest
-npm run typecheck
+npm run typecheck  # tsc --noEmit
 ```
+
+## Contributing
+
+Every change — feature or bug fix — lands the same way: **write it down, prove it with a
+test, then make it pass.** The vault-singleton fix is the reference example end-to-end:
+PRD [`features/sdk-vault-singleton.md`](./features/sdk-vault-singleton.md) → test
+[`tests/dual-bundle-vault.test.ts`](./tests/dual-bundle-vault.test.ts) → fix in
+`src/client/session.ts`.
+
+### 1. Write a PRD in `features/`
+
+Add `features/<short-name>.md` **before** you write code:
+
+- **Bug** — what breaks, the root cause, and how to reproduce. If there's more than one way
+  to fix it, list the options and mark the one you picked (and why), as the vault-singleton
+  PRD does.
+- **Feature** — the behaviour, the public API / subpath exports it touches, and the
+  security implications. This is an auth SDK: explicitly call out anything that touches
+  **keys, sessions, signatures, or storage**.
+
+Keep it short, and link it from the README where a reader would look for it (see how
+[`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md) is referenced above).
+
+### 2. Add a test that proves it — `tests/<short-name>.test.ts`
+
+The filename **must end in `.test.ts`** — jest only collects `tests/**/*.test.ts`, so a
+plain `tests/my-feature.ts` is silently ignored.
+
+- **Bug** → write a *characterization* test that demonstrates the defect, not just the
+  current behaviour. It either fails on `main`, or (like `dual-bundle-vault.test.ts`) passes
+  while documenting the bug and then flips to assert the fixed invariant — that test's header
+  spells out the lifecycle.
+- **Feature** → specify the expected behaviour up front; it should be red until you implement.
+- Reuse the shared fixtures in [`tests/_auth-helpers.ts`](./tests/_auth-helpers.ts) and match
+  a nearby test's style.
+- **Testing a build / bundling artifact?** Inspect the built `dist/` (as
+  `dual-bundle-vault.test.ts` does) and run `npm run build` first — a source-level import
+  resolves to a single module instance and hides bundling bugs.
+
+### 3. Implement until the full gate is green
+
+Run the gate from **Develop** above — **all three must pass, not just your test:**
+
+```bash
+npm run build && npm run typecheck && npm test
+```
+
+Don't weaken or delete an existing test to go green. If a test's intent legitimately changed
+(e.g. a documented bug is now fixed), rewrite it to assert the new invariant and explain why
+in the diff — see how `dual-bundle-vault.test.ts` flipped from proving the bug to guarding the
+singleton.
+
+### 4. Open a Pull Request
+
+- Branch from `main` (`fix/<name>` or `feat/<name>`).
+- In the description: link the `features/` PRD, summarise the change, and confirm
+  `build` + `typecheck` + `test` are green.
+- Keep the dependency boundaries intact — `dependencies` / `peerDependencies` /
+  `devDependencies` and the `external` list in [`tsup.config.ts`](./tsup.config.ts) are
+  classified deliberately so consumers supply a single copy of each peer; don't bundle a peer
+  or add a runtime dep without saying why in the PRD.
+- Leave `version` in `package.json` alone unless the change is a release (bump it in its own
+  step, not in every PR).
 
 ## License
 
