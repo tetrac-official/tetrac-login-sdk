@@ -217,6 +217,11 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 
 ## Security model
 
+> **Full docs:** [`SECURITY.md`](./SECURITY.md) (policy + supported runtimes/browsers) ·
+> [`docs/CRYPTO_SPEC.md`](./docs/CRYPTO_SPEC.md) (primitives, parameters, wire formats) ·
+> [`docs/THREAT_MODEL.md`](./docs/THREAT_MODEL.md) (threats, residual risks, integrator obligations).
+> Report vulnerabilities privately — see [`SECURITY.md`](./SECURITY.md).
+
 - Private keys: encrypted at rest with **authenticated AES-256-GCM** (Web Crypto) — a wrong key or any
   tampering throws on decrypt; never stored or transmitted in plaintext.
 - Key derivation + hashing use **`@noble/hashes`** (no `crypto-es`): email/passkey app keys are
@@ -244,7 +249,8 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
   See [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
 - Sessions: opaque 256-bit bearer tokens, **single active session** (each login revokes the prior token),
   server-side TTL (**4h default**). `logout()` revokes via `POST /logout` with `keepalive` so it lands
-  during page unload.
+  during page unload. Optional `bindSessionToUserAgent` (default off) pins a session to `SHA-256(User-Agent)`
+  as defense-in-depth against stolen-token reuse — note a UA change (browser update) then forces re-login.
 - Rate limiting is **per-target** (e.g. `login:<email>`, `challenge:<id>`) plus a per-IP bucket when
   behind a trusted proxy (`trustProxyHeaders` / `trustedProxyHops`), so a flood on one target can't lock
   out everyone. Responses never echo credential secrets.
@@ -252,10 +258,16 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 ## Develop
 
 ```bash
-npm run build      # tsup -> ESM + CJS + d.ts
-npm test           # jest
-npm run typecheck  # tsc --noEmit
+npm run build         # tsup -> ESM + CJS + d.ts
+npm test              # jest
+npm run typecheck     # tsc --noEmit
+npm run format        # prettier --write . (code only; Markdown is .prettierignore'd)
+npm run format:check  # prettier --check . (CI gate)
 ```
+
+Formatting is enforced in CI via `format:check`. Run `npm run format` before committing — an editor
+"format on save" with the Prettier extension (it picks up [`.prettierrc.json`](./.prettierrc.json)) keeps
+you green automatically.
 
 ## Contributing
 
@@ -297,10 +309,10 @@ plain `tests/my-feature.ts` is silently ignored.
 
 ### 3. Implement until the full gate is green
 
-Run the gate from **Develop** above — **all three must pass, not just your test:**
+Run the gate from **Develop** above — **all of it must pass, not just your test:**
 
 ```bash
-npm run build && npm run typecheck && npm test
+npm run format:check && npm run typecheck && npm test && npm run build
 ```
 
 Don't weaken or delete an existing test to go green. If a test's intent legitimately changed
