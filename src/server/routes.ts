@@ -4,6 +4,7 @@ import type { StorageAdapter } from "../storage/adapter.js";
 import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
 import type { AuthResult, EncryptedWallet, UserData } from "../core/types.js";
 import { json, error, clientIp, readJson } from "./http.js";
+import { hashUserAgent } from "../core/crypto.js";
 import { checkRateLimit } from "./rateLimit.js";
 import { issueChallenge, consumeChallenge } from "./challenge.js";
 import { verifySolanaSignature, verifyAuthSignature } from "./signature.js";
@@ -84,6 +85,17 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!id.allowed) return error("Rate limit exceeded", 429);
     }
     return null;
+  }
+
+  // Optional coarse session→User-Agent binding (config.bindSessionToUserAgent,
+  // default off). At ISSUE time we fingerprint only when the flag is on; at VERIFY
+  // time we always compute the request fingerprint and let verifySession enforce it
+  // iff the session was bound — so flipping the flag off never un-binds live sessions.
+  function issueFingerprint(req: Request): string | undefined {
+    return config.bindSessionToUserAgent ? hashUserAgent(req.headers.get("user-agent")) : undefined;
+  }
+  function reqFingerprint(req: Request): string | undefined {
+    return hashUserAgent(req.headers.get("user-agent"));
   }
 
   // Client-safe copy of a user record: never echo the session token back to the
@@ -230,7 +242,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         createdAt: Date.now(),
       };
       await persistUser(storage, user, config);
-      await issueSession(storage, user, config);
+      await issueSession(storage, user, config, issueFingerprint(req));
       return json(asResult(user), 201);
     },
 
@@ -253,11 +265,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const sigValid =
         !!user?.authPublicKey && verifyAuthSignature(user.authPublicKey, body.signature, body.challenge);
       const consumed =
-        sigValid && publicKey
-          ? await consumeChallenge(storage, publicKey, body.challenge, config)
-          : false;
+        sigValid && publicKey ? await consumeChallenge(storage, publicKey, body.challenge, config) : false;
       if (user && sigValid && consumed) {
-        await issueSession(storage, user, config);
+        await issueSession(storage, user, config, issueFingerprint(req));
         return json(asResult(user));
       }
       const limited = await rateLimited(req, `login:${body.email}`);
@@ -285,7 +295,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         // A valid signature proves key ownership; a missing account is not an attack,
         // so don't feed the failure counter — just report it.
         if (!user) return error("Wallet not registered", 404);
-        await issueSession(storage, user, config);
+        await issueSession(storage, user, config, issueFingerprint(req));
         return json(asResult(user));
       }
       const limited = await rateLimited(req, `login:${body.publicKey}`);
@@ -344,7 +354,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         user.wallets = body.wallets;
         await persistUser(storage, user, config);
       }
-      await issueSession(storage, user, config);
+      await issueSession(storage, user, config, issueFingerprint(req));
       return json(asResult(user), isNew ? 201 : 200);
     },
 
@@ -353,7 +363,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async logout(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config);
+      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
       if (user && token) await revokeSession(storage, token, config);
       return json({ ok: true });
     },
@@ -361,7 +371,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async userData(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config);
+      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
       if (!user) return error("Unauthorized", 401);
       return json({ user: publicUser(user) });
     },
@@ -382,7 +392,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async importWallet(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config);
+      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
       if (!user) return error("Unauthorized", 401);
 
       const body = await readJson<{ wallets?: EncryptedWallet[] }>(req);

@@ -81,6 +81,18 @@ export interface AuthConfig {
    *  bearer token dies sooner. Each new login also revokes the prior token. */
   sessionTtlSeconds: number;
   /**
+   * Optionally bind each session to a coarse fingerprint of the request `User-Agent`
+   * (`SHA-256(ua)`), checked on every authenticated request. Default **false**.
+   *
+   * Defense-in-depth only: it raises the bar for using a stolen bearer token from a
+   * different client, but the UA is attacker-spoofable and not a real device identity,
+   * so treat it as a speed bump, not a control. TRADE-OFF: a legitimate UA change
+   * (browser auto-update, app upgrade) invalidates the session and forces re-login.
+   * Enforcement is per-session — turning this on binds only sessions issued afterward;
+   * a bound session stays enforced until it expires even if the flag is later disabled.
+   */
+  bindSessionToUserAgent: boolean;
+  /**
    * When false (default), the server ignores x-forwarded-for / x-real-ip for
    * client-IP derivation — safer default that prevents rate-limit spoofing.
    * Set true only when behind a trusted proxy that sets those headers.
@@ -122,6 +134,7 @@ export const DEFAULT_CONFIG: AuthConfig = {
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
   sessionTtlSeconds: 14_400,
+  bindSessionToUserAgent: false,
   trustProxyHeaders: false,
   trustedProxyHops: 0,
   keyPrefixes: {

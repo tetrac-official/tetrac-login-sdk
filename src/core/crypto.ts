@@ -110,6 +110,16 @@ export function generateSessionToken(): string {
   return randomHex(32);
 }
 
+/**
+ * SHA-256 (hex) of a request User-Agent, for the optional coarse session→UA binding
+ * (config.bindSessionToUserAgent). Returns undefined for a missing/empty UA so the
+ * caller skips binding rather than pinning the session to the empty string.
+ */
+export function hashUserAgent(userAgent: string | null | undefined): string | undefined {
+  if (!userAgent) return undefined;
+  return bytesToHex(sha256(utf8ToBytes(userAgent)));
+}
+
 /** Generate a 256-bit wallet-login challenge (64 hex chars). */
 export function generateChallenge(): string {
   return randomHex(32);
