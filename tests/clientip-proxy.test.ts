@@ -51,7 +51,9 @@ describe("clientIp() — trusted, rightmost-after-hops", () => {
   it("misconfigured hops past the start of the chain falls back (no crash, not a client value)", () => {
     // idx goes negative → fall through to x-real-ip, else "unknown". Never throws.
     expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4" }), true, 5)).toBe("unknown");
-    expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "7.7.7.7" }), true, 5)).toBe("7.7.7.7");
+    expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "7.7.7.7" }), true, 5)).toBe(
+      "7.7.7.7",
+    );
   });
 
   it("all-empty XFF falls back without crashing", () => {
@@ -65,7 +67,8 @@ describe("rate limiting becomes per-SOURCE when trustProxyHeaders is true", () =
       storage: new MemoryAdapter(),
       config: { trustProxyHeaders: true, rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
-    const fromIp = (pk: string) => h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": "1.2.3.4" }));
+    const fromIp = (pk: string) =>
+      h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": "1.2.3.4" }));
     // Same source IP, DIFFERENT targets — the per-source IP bucket still trips.
     expect((await fromIp("AAA")).status).toBe(200);
     expect((await fromIp("BBB")).status).toBe(200);
@@ -77,7 +80,8 @@ describe("rate limiting becomes per-SOURCE when trustProxyHeaders is true", () =
       storage: new MemoryAdapter(),
       config: { trustProxyHeaders: true, rateLimit: { maxAttempts: 1, windowSeconds: 60 } },
     });
-    const ch = (pk: string, ip: string) => h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": ip }));
+    const ch = (pk: string, ip: string) =>
+      h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": ip }));
     expect((await ch("AAA", "1.1.1.1")).status).toBe(200);
     expect((await ch("AAA", "1.1.1.1")).status).toBe(429); // same IP + same target → trips
     expect((await ch("BBB", "2.2.2.2")).status).toBe(200); // different IP → fresh

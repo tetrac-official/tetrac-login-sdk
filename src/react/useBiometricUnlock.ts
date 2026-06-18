@@ -12,11 +12,7 @@
 // wrapped blob in IndexedDB, which is useless without a fresh assertion.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthContext } from "./AuthProvider.js";
-import {
-  isBiometricAvailable,
-  hasBiometricUnlock,
-  type PasskeyRegistration,
-} from "../client/index.js";
+import { isBiometricAvailable, hasBiometricUnlock, type PasskeyRegistration } from "../client/index.js";
 
 // Non-secret registration descriptor, persisted so unlock()/disable() need no args.
 const REG_KEY = "ttc_biometric_reg";

@@ -166,13 +166,15 @@ describe("rate limit integration in route handlers", () => {
     // Register with email — this triggers TWO rate limit checks:
     // one for IP, one for email identifier.
     const reg = () =>
-      h.register(req({
-        publicKey: "pk-1",
-        email: "test@example.com",
-        authPublicKey: "a".repeat(64),
-        authMethod: "email",
-        wallets: [],
-      }));
+      h.register(
+        req({
+          publicKey: "pk-1",
+          email: "test@example.com",
+          authPublicKey: "a".repeat(64),
+          authMethod: "email",
+          wallets: [],
+        }),
+      );
 
     expect((await reg()).status).toBe(201); // first: allowed (2 attempts)
     // Second register with same email hits email-level rate limit

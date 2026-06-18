@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         # engines.node is ">=18" (package.json): test the floor and current LTS.
-        node-version: ['18.x', '20.x']
+        node-version: ["18.x", "20.x"]
 
     steps:
       - name: Checkout
@@ -32,10 +32,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Format check
+        run: npm run format:check
 
       - name: Typecheck
         run: npm run typecheck

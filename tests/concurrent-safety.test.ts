@@ -105,9 +105,7 @@ describe("session issuance revocation", () => {
     const body1 = await login1.json();
 
     // Verify first token works
-    const ud1 = await h.userData(
-      req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }),
-    );
+    const ud1 = await h.userData(req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }));
     expect(ud1.status).toBe(200);
 
     // Second login (sequential)
@@ -116,15 +114,11 @@ describe("session issuance revocation", () => {
     const body2 = await login2.json();
 
     // First token now revoked
-    const ud1After = await h.userData(
-      req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }),
-    );
+    const ud1After = await h.userData(req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }));
     expect(ud1After.status).toBe(401);
 
     // Second token works
-    const ud2After = await h.userData(
-      req({}, { "ttc-auth-token": body2.authToken, "ttc-public-key": pk }),
-    );
+    const ud2After = await h.userData(req({}, { "ttc-auth-token": body2.authToken, "ttc-public-key": pk }));
     expect(ud2After.status).toBe(200);
   });
 });
@@ -185,10 +179,7 @@ describe("concurrent connect-wallet upsert", () => {
       wallets: [{ chain: "solana", role: "funds", publicKey: pubKey, encryptedSecret: "CT" }],
     };
 
-    const [c1, c2] = await Promise.all([
-      h.connectWallet(req(cwBody)),
-      h.connectWallet(req(cwBody)),
-    ]);
+    const [c1, c2] = await Promise.all([h.connectWallet(req(cwBody)), h.connectWallet(req(cwBody))]);
 
     // Only one should succeed (201); the other fails because the
     // challenge was consumed by the first.

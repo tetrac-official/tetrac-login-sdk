@@ -231,7 +231,9 @@ console.log("\nEnable requires an unlocked vault:");
 lockVault();
 credMode = "prf";
 pendingRawId = randomRawId();
-await expectThrows("enable while locked throws (VaultLockedError)", () => enableBiometricUnlock(cfg, "smoke@locked"));
+await expectThrows("enable while locked throws (VaultLockedError)", () =>
+  enableBiometricUnlock(cfg, "smoke@locked"),
+);
 
 console.log("");
 if (failures) {

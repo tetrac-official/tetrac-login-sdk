@@ -92,7 +92,9 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
     const evm = "0x" + "ef".repeat(20);
     expect(signature.verifySolanaSignature(evm, "00".repeat(64), "challenge")).toBe(false);
     await h.challenge(req({ publicKey: evm }));
-    const res = await h.loginWallet(req({ publicKey: evm, signature: "00".repeat(64), challenge: "x".repeat(64) }));
+    const res = await h.loginWallet(
+      req({ publicKey: evm, signature: "00".repeat(64), challenge: "x".repeat(64) }),
+    );
     expect(res.status).toBe(401);
   });
 });
@@ -103,7 +105,12 @@ describe("SERVERSIDE-5/11 — email register has no ownership proof and publicKe
   it("registers an arbitrary unvalidated publicKey via the email path with no proof of control (201)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const arbitrary = "0x" + "cd".repeat(20); // any string is accepted as the identity key
-    const res = await registerEmail(h, { publicKey: arbitrary, email: "evm@x.com", appKey: APP_KEY, wallets: [] });
+    const res = await registerEmail(h, {
+      publicKey: arbitrary,
+      email: "evm@x.com",
+      appKey: APP_KEY,
+      wallets: [],
+    });
     expect(res.status).toBe(201); // no signature, no email verification, no key-format check
   });
 });
@@ -145,7 +152,12 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
 
     // An attacker registers publicKey="session:<token>" → it lands under "pubKey:session:<token>",
     // a different namespace. No crash, and the victim's session is untouched.
-    const atk = await registerEmail(h, { publicKey: `session:${token}`, email: "atk@x.com", appKey: APP_KEY, wallets: [] });
+    const atk = await registerEmail(h, {
+      publicKey: `session:${token}`,
+      email: "atk@x.com",
+      appKey: APP_KEY,
+      wallets: [],
+    });
     expect(atk.status).toBe(201);
     expect(await storage.get(`session:${token}`)).toBe(body.publicKey); // intact
   });
@@ -180,7 +192,13 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   it("rejects a whitespace-padded publicKey", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: "   ", email: "a@b.com", authPublicKey: "a".repeat(64), authMethod: "email", wallets: [] }),
+      req({
+        publicKey: "   ",
+        email: "a@b.com",
+        authPublicKey: "a".repeat(64),
+        authMethod: "email",
+        wallets: [],
+      }),
     );
     expect(res.status).toBe(400);
   });
@@ -188,7 +206,13 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   it("rejects a 100k-character publicKey (length bound)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: "x".repeat(100_000), email: "a@b.com", authPublicKey: "a".repeat(64), authMethod: "email", wallets: [] }),
+      req({
+        publicKey: "x".repeat(100_000),
+        email: "a@b.com",
+        authPublicKey: "a".repeat(64),
+        authMethod: "email",
+        wallets: [],
+      }),
     );
     expect(res.status).toBe(400);
   });
@@ -196,7 +220,13 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   it("rejects a malformed email", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
-      req({ publicKey: SOL_PUB, email: "not-an-email", authPublicKey: "a".repeat(64), authMethod: "email", wallets: [] }),
+      req({
+        publicKey: SOL_PUB,
+        email: "not-an-email",
+        authPublicKey: "a".repeat(64),
+        authMethod: "email",
+        wallets: [],
+      }),
     );
     expect(res.status).toBe(400);
   });

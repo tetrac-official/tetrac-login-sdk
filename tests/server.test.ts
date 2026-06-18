@@ -130,7 +130,9 @@ describe("connect-wallet (upsert)", () => {
     expect(first.status).toBe(201);
 
     // Returning connect ignores the provided bundle and keeps the stored keys.
-    const second = await connect(h, kp, [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "ATTACKER" }]);
+    const second = await connect(h, kp, [
+      { chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "ATTACKER" },
+    ]);
     expect(second.status).toBe(200);
     const body = await second.json();
     expect(body.user.wallets[0].encryptedSecret).toBe("ORIGINAL");
@@ -215,9 +217,7 @@ describe("session lifecycle (H1)", () => {
     const token = body.authToken;
     expect(await storage.get(`session:${token}`)).toBe(body.publicKey);
 
-    const res = await h.logout(
-      req({}, { "ttc-auth-token": token, "ttc-public-key": body.publicKey }),
-    );
+    const res = await h.logout(req({}, { "ttc-auth-token": token, "ttc-public-key": body.publicKey }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(await storage.get(`session:${token}`)).toBeNull(); // revoked
@@ -258,9 +258,7 @@ describe("atomic challenge consume (H3)", () => {
     );
     const first = await h.loginWallet(req({ publicKey: pubKey, signature: sig2, challenge: ch2.challenge }));
     expect(first.status).toBe(200);
-    const replay = await h.loginWallet(
-      req({ publicKey: pubKey, signature: sig2, challenge: ch2.challenge }),
-    );
+    const replay = await h.loginWallet(req({ publicKey: pubKey, signature: sig2, challenge: ch2.challenge }));
     expect(replay.status).toBe(401); // challenge already consumed
   });
 });
@@ -289,8 +287,7 @@ describe("search-wallet hardening (M2)", () => {
   it("returns 429 after maxAttempts (IP rate limited)", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } } });
-    const search = () =>
-      h.searchWallet(new Request("http://localhost/api/auth/search-wallet?publicKey=k"));
+    const search = () => h.searchWallet(new Request("http://localhost/api/auth/search-wallet?publicKey=k"));
     expect((await search()).status).toBe(404); // not found, but allowed
     expect((await search()).status).toBe(404);
     expect((await search()).status).toBe(429); // 3rd exceeds the limit

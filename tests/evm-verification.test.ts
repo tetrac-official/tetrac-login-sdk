@@ -41,13 +41,15 @@ describe("EVM wallet — design intent (C2)", () => {
     const chRes = await h.challenge(req({ publicKey: evmAddress }));
     const { challenge } = await chRes.json();
 
-    const reg = await h.register(req({
-      publicKey: evmAddress,
-      authMethod: "wallet",
-      wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "CT" }],
-      signature: "00".repeat(65),
-      challenge,
-    }));
+    const reg = await h.register(
+      req({
+        publicKey: evmAddress,
+        authMethod: "wallet",
+        wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "CT" }],
+        signature: "00".repeat(65),
+        challenge,
+      }),
+    );
 
     expect(reg.status).toBe(401);
   });
@@ -59,12 +61,14 @@ describe("EVM wallet — design intent (C2)", () => {
     const chRes = await h.challenge(req({ publicKey: evmAddress }));
     const { challenge } = await chRes.json();
 
-    const cw = await h.connectWallet(req({
-      publicKey: evmAddress,
-      signature: "00".repeat(65),
-      challenge,
-      wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "CT" }],
-    }));
+    const cw = await h.connectWallet(
+      req({
+        publicKey: evmAddress,
+        signature: "00".repeat(65),
+        challenge,
+        wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "CT" }],
+      }),
+    );
 
     expect(cw.status).toBe(401);
   });
@@ -105,6 +109,8 @@ describe("EVM wallet — design intent (C2)", () => {
     const { verifySolanaSignature } = await import("../src/server/signature");
     expect(typeof verifySolanaSignature).toBe("function");
     // eslint-disable-next-line no-console
-    console.log("  EVM verification: intentionally absent (EVM is not an auth method). Only Solana is Web3 auth.");
+    console.log(
+      "  EVM verification: intentionally absent (EVM is not an auth method). Only Solana is Web3 auth.",
+    );
   });
 });

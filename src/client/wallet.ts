@@ -2,7 +2,13 @@
 // and AES-encrypted under the app key BEFORE anything is sent to the server.
 import { Keypair } from "@solana/web3.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import type { Chain, WalletRole, EncryptedWallet, GeneratedWalletBundle, ChainWallets } from "../core/types.js";
+import type {
+  Chain,
+  WalletRole,
+  EncryptedWallet,
+  GeneratedWalletBundle,
+  ChainWallets,
+} from "../core/types.js";
 import { encryptSecret, decryptSecret } from "../core/crypto.js";
 
 export interface GenerateWalletBundleInput {
