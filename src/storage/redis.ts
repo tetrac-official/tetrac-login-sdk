@@ -9,6 +9,10 @@ export interface RedisLike {
   incr(key: string): Promise<number>;
   expire(key: string, seconds: number): Promise<unknown>;
   getdel(key: string): Promise<string | null>;
+  hget(key: string, field: string): Promise<string | null>;
+  hset(key: string, field: string, value: string): Promise<unknown>;
+  hdel(key: string, field: string): Promise<unknown>;
+  hgetall(key: string): Promise<Record<string, string>>;
 }
 
 export class RedisAdapter implements StorageAdapter {
@@ -40,5 +44,22 @@ export class RedisAdapter implements StorageAdapter {
 
   async getdel(key: string): Promise<string | null> {
     return this.client.getdel(key);
+  }
+
+  async hget(key: string, field: string): Promise<string | null> {
+    return this.client.hget(key, field);
+  }
+
+  async hset(key: string, field: string, value: string): Promise<void> {
+    await this.client.hset(key, field, value);
+  }
+
+  async hdel(key: string, field: string): Promise<void> {
+    await this.client.hdel(key, field);
+  }
+
+  async hgetall(key: string): Promise<Record<string, string>> {
+    // ioredis returns {} for a missing key, never null.
+    return (await this.client.hgetall(key)) ?? {};
   }
 }

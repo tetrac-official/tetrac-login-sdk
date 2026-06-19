@@ -2,15 +2,17 @@
 import type { StorageAdapter } from "../storage/adapter.js";
 import type { AuthConfig } from "../core/config.js";
 import { generateChallenge, timingSafeEqual } from "../core/crypto.js";
+import { appScoped } from "./keys.js";
 
-/** Create a challenge for a public key and store it with the configured TTL. */
+/** Create a challenge for an (app, public key) pair and store it with the configured TTL. */
 export async function issueChallenge(
   storage: StorageAdapter,
+  appId: string,
   publicKey: string,
   config: AuthConfig,
 ): Promise<string> {
   const challenge = generateChallenge();
-  await storage.set(`${config.keyPrefixes.challenge}${publicKey}`, challenge, {
+  await storage.set(appScoped(config.keyPrefixes.challenge, appId, publicKey), challenge, {
     exSeconds: config.challengeTtlSeconds,
   });
   return challenge;
@@ -24,11 +26,12 @@ export async function issueChallenge(
  */
 export async function consumeChallenge(
   storage: StorageAdapter,
+  appId: string,
   publicKey: string,
   presented: string,
   config: AuthConfig,
 ): Promise<boolean> {
-  const key = `${config.keyPrefixes.challenge}${publicKey}`;
+  const key = appScoped(config.keyPrefixes.challenge, appId, publicKey);
   const stored = await storage.getdel(key);
   if (!stored) return false;
   return timingSafeEqual(stored, presented);

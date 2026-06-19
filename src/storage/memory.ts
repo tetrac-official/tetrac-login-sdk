@@ -8,6 +8,9 @@ interface Entry {
 
 export class MemoryAdapter implements StorageAdapter {
   private readonly store = new Map<string, Entry>();
+  // Hashes live in their own map (the email→{appId:publicKey} index). No TTL — the
+  // email index is permanent, like the plain-string value it replaced.
+  private readonly hstore = new Map<string, Map<string, string>>();
   // Injectable clock so tests don't depend on Date.now() directly.
   constructor(private readonly now: () => number = () => Date.now()) {}
 
@@ -52,5 +55,31 @@ export class MemoryAdapter implements StorageAdapter {
     const value = this.alive(key)?.value ?? null;
     this.store.delete(key);
     return value;
+  }
+
+  async hget(key: string, field: string): Promise<string | null> {
+    return this.hstore.get(key)?.get(field) ?? null;
+  }
+
+  async hset(key: string, field: string, value: string): Promise<void> {
+    let h = this.hstore.get(key);
+    if (!h) {
+      h = new Map();
+      this.hstore.set(key, h);
+    }
+    h.set(field, value);
+  }
+
+  async hdel(key: string, field: string): Promise<void> {
+    const h = this.hstore.get(key);
+    if (h) {
+      h.delete(field);
+      if (h.size === 0) this.hstore.delete(key);
+    }
+  }
+
+  async hgetall(key: string): Promise<Record<string, string>> {
+    const h = this.hstore.get(key);
+    return h ? Object.fromEntries(h) : {};
   }
 }

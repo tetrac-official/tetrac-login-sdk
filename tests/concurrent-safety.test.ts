@@ -30,10 +30,18 @@ function bytesToHex(b: Uint8Array): string {
 const testConfig = {
   challengeTtlSeconds: 300,
   sessionTtlSeconds: 86400,
-  keyPrefixes: { challenge: "challenge:", pubKey: "pubKey:", email: "email:", rateLimit: "ratelimit:" },
+  keyPrefixes: {
+    challenge: "challenge:",
+    pubKey: "pubKey:",
+    session: "session:",
+    email: "email:",
+    rateLimit: "ratelimit:",
+  },
   rateLimit: { windowSeconds: 60, maxAttempts: 100 }, // high limit to not interfere
   trustProxyHeaders: false,
 } as unknown as AuthConfig;
+
+const APP = "ttc"; // appId scope for the direct challenge-layer calls (multi-app, v0.4.0)
 
 describe("atomic challenge consumption (C9)", () => {
   it("two concurrent consumes can't both succeed (getdel atomicity)", async () => {
@@ -43,12 +51,12 @@ describe("atomic challenge consumption (C9)", () => {
     const pk = "SolConcurrent11111111111111111111111111111";
 
     // Issue one challenge
-    const challenge = await issueChallenge(storage, pk, testConfig);
+    const challenge = await issueChallenge(storage, APP, pk, testConfig);
 
     // Attempt to consume it twice concurrently
     const [r1, r2] = await Promise.all([
-      consumeChallenge(storage, pk, challenge, testConfig),
-      consumeChallenge(storage, pk, challenge, testConfig),
+      consumeChallenge(storage, APP, pk, challenge, testConfig),
+      consumeChallenge(storage, APP, pk, challenge, testConfig),
     ]);
 
     // At most one should succeed
@@ -56,27 +64,27 @@ describe("atomic challenge consumption (C9)", () => {
     expect(r1 && r2).toBe(false); // both can't be true
 
     // Third attempt must definitely fail
-    const r3 = await consumeChallenge(storage, pk, challenge, testConfig);
+    const r3 = await consumeChallenge(storage, APP, pk, challenge, testConfig);
     expect(r3).toBe(false);
   });
 
   it("challenge for different public keys do not interfere", async () => {
     const storage = new MemoryAdapter();
 
-    const ch1 = await issueChallenge(storage, "pk-1", testConfig);
-    const ch2 = await issueChallenge(storage, "pk-2", testConfig);
+    const ch1 = await issueChallenge(storage, APP, "pk-1", testConfig);
+    const ch2 = await issueChallenge(storage, APP, "pk-2", testConfig);
 
     const [r1a, r2a] = await Promise.all([
-      consumeChallenge(storage, "pk-1", ch1, testConfig),
-      consumeChallenge(storage, "pk-2", ch2, testConfig),
+      consumeChallenge(storage, APP, "pk-1", ch1, testConfig),
+      consumeChallenge(storage, APP, "pk-2", ch2, testConfig),
     ]);
     expect(r1a).toBe(true);
     expect(r2a).toBe(true);
 
     // Can't reuse consumed challenges
     const [r1b, r2b] = await Promise.all([
-      consumeChallenge(storage, "pk-1", ch1, testConfig),
-      consumeChallenge(storage, "pk-2", ch2, testConfig),
+      consumeChallenge(storage, APP, "pk-1", ch1, testConfig),
+      consumeChallenge(storage, APP, "pk-2", ch2, testConfig),
     ]);
     expect(r1b).toBe(false);
     expect(r2b).toBe(false);
@@ -84,7 +92,7 @@ describe("atomic challenge consumption (C9)", () => {
 
   it("consuming a non-existent challenge returns false", async () => {
     const storage = new MemoryAdapter();
-    const result = await consumeChallenge(storage, "unknown-pk", "fake-challenge", testConfig);
+    const result = await consumeChallenge(storage, APP, "unknown-pk", "fake-challenge", testConfig);
     expect(result).toBe(false);
   });
 });
@@ -150,9 +158,9 @@ describe("concurrent registration race", () => {
     // eslint-disable-next-line no-console
     console.log(`  Concurrent same-email registrations: ${r1.status}, ${r2.status}`);
 
-    // After the race, verify the email index points to ONE public key
-    const emailKey = "email:duplicate@test.com";
-    const storedPk = await storage.get(emailKey);
+    // After the race, verify the email index (now a {appId -> publicKey} hash) holds
+    // a public key for this app under the duplicate email.
+    const storedPk = await storage.hget("email:duplicate@test.com", "ttc");
     expect(storedPk).not.toBeNull();
   });
 });

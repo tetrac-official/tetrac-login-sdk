@@ -1,16 +1,19 @@
 // Central configuration. Defaults match next-ttc exactly for drop-in compatibility.
 
 export interface KeyPrefixes {
-  /** Wallet-login challenge: `${challenge}{pubKey}`. */
+  /** Wallet-login challenge: `${challenge}{appId}:{pubKey}` (app-scoped, v0.4.0). */
   challenge: string;
-  /** UserData blob: `${pubKey}{publicKey}`. */
+  /** UserData blob: `${pubKey}{appId}:{publicKey}` (app-scoped, v0.4.0). */
   pubKey: string;
-  /** Session token -> publicKey: `${session}{token}` — disjoint from pubKey so an
-   *  attacker-chosen publicKey can never collide with the session-token keyspace. */
+  /** Session token -> publicKey: `${session}{appId}:{token}` (app-scoped, v0.4.0) —
+   *  disjoint from pubKey so an attacker-chosen publicKey can never collide with the
+   *  session-token keyspace, and a token minted by one app is never honored by another. */
   session: string;
-  /** email -> publicKey lookup: `${email}{address}`. */
+  /** email -> { [appId]: publicKey } hash: `${email}{address}`. The KEY is NOT
+   *  app-scoped — a single email maps to a per-app public key under each appId field,
+   *  so one shared DB can answer "which apps does this email use?" (v0.4.0). */
   email: string;
-  /** Rate-limit counters: `${rateLimit}{identifier}`. */
+  /** Rate-limit counters: `${rateLimit}{endpoint}:{appId}:{identifier}` (app-scoped, v0.4.0). */
   rateLimit: string;
 }
 
@@ -61,8 +64,22 @@ export interface AuthConfig {
    * product/domain (e.g. "myapp.example"). Changing it re-derives every app key, so
    * existing encrypted wallets would no longer decrypt. The default "ttc" works out
    * of the box but provides NO cross-app isolation — override it in production.
+   *
+   * Since v0.4.0 `appId` is ALSO the server-side storage namespace and the
+   * single-app fallback: a request may carry its own `appId` (body field or
+   * `appIdHeader`), and when it doesn't, this value is used. Every per-user key
+   * (`pubKey:`, `challenge:`, `session:`, rate-limit) is scoped by the resolved
+   * appId, so multiple apps can safely share one Redis/Upstash database.
    */
   appId: string;
+  /**
+   * Optional allowlist of accepted `appId` values (v0.4.0). When set, a request
+   * carrying any other appId is rejected (`Unknown appId`). Leave undefined to
+   * accept any well-formed appId (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`). STRONGLY
+   * recommended in production for a shared DB, so an attacker cannot mint arbitrary
+   * namespaces (storage-bloat) or probe tenants by guessing ids.
+   */
+  allowedAppIds?: string[];
   /**
    * Key-derivation strength for email/passkey accounts: 1=100k, 2=600k (default),
    * 3=1M PBKDF2-HMAC-SHA256 iterations (see PBKDF2_ITERATIONS). Trades login/unlock
@@ -77,6 +94,13 @@ export interface AuthConfig {
   sessionHeader: string;
   /** Header carrying the user's public key. */
   publicKeyHeader: string;
+  /**
+   * Header carrying the request's `appId` on authenticated routes (logout,
+   * user-data, import-wallet) so session lookups are scoped to the right app
+   * (v0.4.0). Default "ttc-app-id". When absent, the server falls back to
+   * config.appId (single-app deployments need not send it).
+   */
+  appIdHeader: string;
   /** TTL applied to issued session tokens, in seconds. Default 14400 (4h) — a leaked
    *  bearer token dies sooner. Each new login also revokes the prior token. */
   sessionTtlSeconds: number;
@@ -133,6 +157,7 @@ export const DEFAULT_CONFIG: AuthConfig = {
   challengeTtlSeconds: 300,
   sessionHeader: "ttc-auth-token",
   publicKeyHeader: "ttc-public-key",
+  appIdHeader: "ttc-app-id",
   sessionTtlSeconds: 14_400,
   bindSessionToUserAgent: false,
   trustProxyHeaders: false,
