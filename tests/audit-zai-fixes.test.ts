@@ -19,7 +19,7 @@ function req(body: unknown): Request {
 
 function registerBody(extra: Record<string, unknown> = {}) {
   return {
-    publicKey: "SoLfloor1111111111111111111111111111111111",
+    publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
     email: "floor@example.com",
     authPublicKey: deriveAuthPublicKey(APP_KEY),
     authMethod: "email",

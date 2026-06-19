@@ -157,7 +157,10 @@ describe("rate limiting", () => {
   it("blocks after maxAttempts within the window", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { rateLimit: { maxAttempts: 3, windowSeconds: 60 } } });
-    const make = () => h.challenge(req({ publicKey: "k" }, { "x-forwarded-for": "1.2.3.4" }));
+    const make = () =>
+      h.challenge(
+        req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }, { "x-forwarded-for": "1.2.3.4" }),
+      );
     expect((await make()).status).toBe(200);
     expect((await make()).status).toBe(200);
     expect((await make()).status).toBe(200);
@@ -287,7 +290,12 @@ describe("search-wallet hardening (M2)", () => {
   it("returns 429 after maxAttempts (IP rate limited)", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } } });
-    const search = () => h.searchWallet(new Request("http://localhost/api/auth/search-wallet?publicKey=k"));
+    const search = () =>
+      h.searchWallet(
+        new Request(
+          "http://localhost/api/auth/search-wallet?publicKey=GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse",
+        ),
+      );
     expect((await search()).status).toBe(404); // not found, but allowed
     expect((await search()).status).toBe(404);
     expect((await search()).status).toBe(429); // 3rd exceeds the limit
@@ -301,7 +309,13 @@ describe("wallet payload validation (M3)", () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const wallets = Array.from({ length: 17 }, () => valid);
     const res = await h.register(
-      req({ publicKey: "k", email: "a@b.com", passkeyHash: "h", authMethod: "email", wallets }),
+      req({
+        publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+        email: "a@b.com",
+        passkeyHash: "h",
+        authMethod: "email",
+        wallets,
+      }),
     );
     expect(res.status).toBe(400);
   });
@@ -310,7 +324,7 @@ describe("wallet payload validation (M3)", () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
       req({
-        publicKey: "k",
+        publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
         email: "a@b.com",
         passkeyHash: "h",
         authMethod: "email",
@@ -324,7 +338,7 @@ describe("wallet payload validation (M3)", () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const res = await h.register(
       req({
-        publicKey: "k",
+        publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
         email: "a@b.com",
         passkeyHash: "h",
         authMethod: "email",
@@ -342,7 +356,10 @@ describe("proxy-header trust (M4)", () => {
     // Different spoofed IPs each request, but untrusted x-forwarded-for is ignored
     // entirely, so spoofing it buys nothing: the same publicKey "k" keeps hitting its
     // own per-target bucket and the limit still trips.
-    const make = (ip: string) => h.challenge(req({ publicKey: "k" }, { "x-forwarded-for": ip }));
+    const make = (ip: string) =>
+      h.challenge(
+        req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }, { "x-forwarded-for": ip }),
+      );
     expect((await make("1.1.1.1")).status).toBe(200);
     expect((await make("2.2.2.2")).status).toBe(200);
     expect((await make("3.3.3.3")).status).toBe(429); // spoofing the IP didn't help
@@ -355,7 +372,7 @@ describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
   it("register stores pbkdf2Iterations; challenge + login return it (pinned per-user)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const reg = await registerEmail(h, {
-      publicKey: "SoLIter1111111111111111111111111111111111111",
+      publicKey: "EdmxWPmx2WH6WgFfTdu9xfkYf3k1g5wD1zccTVySEEh1",
       email: "iter@example.com",
       appKey: APP_KEY,
       pbkdf2Iterations: 600_000,
@@ -375,7 +392,7 @@ describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
   it("legacy account (no count) stores none — client falls back to 100k", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const reg = await registerEmail(h, {
-      publicKey: "SoLLegacy111111111111111111111111111111111",
+      publicKey: "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
       email: "legacy@example.com",
       appKey: APP_KEY,
     });

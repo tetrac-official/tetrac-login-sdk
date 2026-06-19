@@ -40,14 +40,26 @@ describe("H5 RESOLVED — challenge rate limiting is per-target, not a shared gl
     // trustProxyHeaders defaults false ⇒ the SDK no longer gates on the shared "unknown"
     // IP bucket; each /challenge is rate-limited on its OWN resolved-publicKey counter, so
     // hammering one target can't exhaust a global bucket and lock out the others.
-    expect((await h.challenge(req({ publicKey: "AAA" }))).status).toBe(200);
-    expect((await h.challenge(req({ publicKey: "BBB" }))).status).toBe(200);
-    expect((await h.challenge(req({ publicKey: "CCC" }))).status).toBe(200); // NO global lockout
+    expect(
+      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
+    ).toBe(200);
+    expect(
+      (await h.challenge(req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }))).status,
+    ).toBe(200);
+    expect(
+      (await h.challenge(req({ publicKey: "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse" }))).status,
+    ).toBe(200); // NO global lockout
     // The per-target limit still bites when a SINGLE target is flooded…
-    expect((await h.challenge(req({ publicKey: "AAA" }))).status).toBe(200); // AAA #2 (== limit)
-    expect((await h.challenge(req({ publicKey: "AAA" }))).status).toBe(429); // AAA #3 (> limit)
+    expect(
+      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
+    ).toBe(200); // AAA #2 (== limit)
+    expect(
+      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
+    ).toBe(429); // AAA #3 (> limit)
     // …and a different target is unaffected by that flood.
-    expect((await h.challenge(req({ publicKey: "BBB" }))).status).toBe(200);
+    expect(
+      (await h.challenge(req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }))).status,
+    ).toBe(200);
   });
 });
 
@@ -87,31 +99,43 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
     expect(typeof signature.verifySolanaSignature).toBe("function");
   });
 
-  it("a 0x EVM address fails closed (401) on the wallet-auth path — intended", async () => {
+  it("a 0x EVM address fails closed on the wallet-auth path — rejected at publicKey validation (400)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
     const evm = "0x" + "ef".repeat(20);
     expect(signature.verifySolanaSignature(evm, "00".repeat(64), "challenge")).toBe(false);
-    await h.challenge(req({ publicKey: evm }));
     const res = await h.loginWallet(
       req({ publicKey: evm, signature: "00".repeat(64), challenge: "x".repeat(64) }),
     );
-    expect(res.status).toBe(401);
+    // Strict Solana-only validation now rejects a 0x identity up front (was a 401 sig-fail).
+    expect(res.status).toBe(400);
   });
 });
 
-// Not an EVM finding — it exercises two generic gaps: email registration needs no
-// proof-of-control (SERVERSIDE-5) and publicKey is not format-validated (SERVERSIDE-11).
-describe("SERVERSIDE-5/11 — email register has no ownership proof and publicKey is unvalidated", () => {
-  it("registers an arbitrary unvalidated publicKey via the email path with no proof of control (201)", async () => {
+// SERVERSIDE-11 (publicKey format) is now ENFORCED — the identity must be a Solana
+// ed25519 key. SERVERSIDE-5 (no email-ownership proof) remains a documented residual:
+// a *well-formed* identity still registers without proving control of the email.
+describe("SERVERSIDE-11 RESOLVED (publicKey format) / SERVERSIDE-5 residual (email ownership)", () => {
+  it("rejects an arbitrary non-Solana publicKey (e.g. an EVM 0x address) with 400", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const arbitrary = "0x" + "cd".repeat(20); // any string is accepted as the identity key
+    const arbitrary = "0x" + "cd".repeat(20); // not a Solana ed25519 key
     const res = await registerEmail(h, {
       publicKey: arbitrary,
       email: "evm@x.com",
       appKey: APP_KEY,
       wallets: [],
     });
-    expect(res.status).toBe(201); // no signature, no email verification, no key-format check
+    expect(res.status).toBe(400); // publicKey format is now validated (SERVERSIDE-11)
+  });
+
+  it("still registers a well-formed Solana identity with NO email-ownership proof (SERVERSIDE-5 residual)", async () => {
+    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const res = await registerEmail(h, {
+      publicKey: "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
+      email: "noproof@x.com",
+      appKey: APP_KEY,
+      wallets: [],
+    });
+    expect(res.status).toBe(201); // email ownership is an integrator obligation, still not enforced
   });
 });
 
@@ -150,15 +174,16 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
     const token = body.authToken;
     expect(await storage.get(`session:${token}`)).toBe(body.publicKey);
 
-    // An attacker registers publicKey="session:<token>" → it lands under "pubKey:session:<token>",
-    // a different namespace. No crash, and the victim's session is untouched.
+    // An attacker can't even register publicKey="session:<token>" — strict Solana
+    // validation rejects it (400, ':' isn't base58), so the namespace collision the
+    // disjoint prefixes already prevented is now impossible at the door. Session intact.
     const atk = await registerEmail(h, {
       publicKey: `session:${token}`,
       email: "atk@x.com",
       appKey: APP_KEY,
       wallets: [],
     });
-    expect(atk.status).toBe(201);
+    expect(atk.status).toBe(400);
     expect(await storage.get(`session:${token}`)).toBe(body.publicKey); // intact
   });
 

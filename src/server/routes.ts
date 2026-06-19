@@ -3,6 +3,7 @@
 import type { StorageAdapter } from "../storage/adapter.js";
 import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
 import type { AuthResult, EncryptedWallet, UserData } from "../core/types.js";
+import { PublicKey } from "@solana/web3.js";
 import { json, error, clientIp, readJson } from "./http.js";
 import { hashUserAgent } from "../core/crypto.js";
 import { checkRateLimit } from "./rateLimit.js";
@@ -45,9 +46,18 @@ function validateEmail(email: string): string | null {
 }
 
 function validatePublicKey(key: string): string | null {
-  // Loose by design: publicKey may be a Solana base58 key, an EVM 0x address, or a
-  // biometric identity id — so we only enforce no surrounding whitespace + a length bound.
-  if (!key || key.trim() !== key || key.length > 128) return "Invalid publicKey format";
+  // The account identity is a Solana ed25519 public key (generated client-side for
+  // email/biometric, or the connected wallet for web3). Require base58 that decodes to
+  // exactly 32 bytes in CANONICAL form: PublicKey throws on invalid base58 / wrong
+  // length, the round-trip rejects short inputs PublicKey would left-pad, and EVM
+  // `0x…` addresses fail because `0` isn't in the base58 alphabet.
+  if (!key) return "Invalid publicKey format";
+  try {
+    const pk = new PublicKey(key);
+    if (pk.toBytes().length !== 32 || pk.toBase58() !== key) return "Invalid publicKey format";
+  } catch {
+    return "Invalid publicKey format";
+  }
   return null;
 }
 

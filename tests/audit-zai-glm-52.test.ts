@@ -84,19 +84,19 @@ describe("F3 — register REJECTS an out-of-band pbkdf2Iterations (RESOLVED)", (
 // F2 — No proof-of-key-control on email/biometric registration
 // ============================================================
 describe("F2 — email/biometric register needs NO signature/challenge (HIGH, currently insecure)", () => {
-  it("registers an arbitrary unvalidated publicKey with no proof of control (201)", async () => {
+  it("registers a well-formed identity with NO signature/challenge proof of control (201)", async () => {
     const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    // The client mints a random publicKey; the server accepts any string and the
-    // client-supplied authPublicKey with NO ceremony — unlike the wallet path,
-    // which requires verifySolanaSignature + consumeChallenge.
-    const arbitrary = "0x" + "cd".repeat(20); // any string is accepted as the identity
+    // A VALID Solana identity registers with NO ceremony — unlike the wallet path, which
+    // requires verifySolanaSignature + consumeChallenge. (The arbitrary-string variant is
+    // now rejected by strict publicKey validation — see audit-server.test.ts; the residual
+    // F2 gap is the missing proof-of-control ceremony, still open.)
     const res = await registerEmail(h, {
-      publicKey: arbitrary,
-      email: "evm@x.com",
+      publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+      email: "noproof@x.com",
       appKey: APP_KEY,
       wallets: [],
     });
-    expect(res.status).toBe(201); // (F2 — currently insecure; flip to 400 when fixed)
+    expect(res.status).toBe(201); // F2 — no proof-of-control ceremony on the email path; still open
   });
 
   it("register does not consume a challenge (no single-use ceremony on the email path)", async () => {
@@ -175,8 +175,8 @@ describe("F4 — importWallet appends arbitrary ciphertext under a valid session
 // F8 — timingSafeEqual reads out-of-bounds on length mismatch (LOW)
 // ============================================================
 describe("F8 — timingSafeEqual never false-accepts on length mismatch (correctness guard)", () => {
-  // The implementation indexes past the shorter string on a length mismatch
-  // (charCodeAt → NaN), but NaN-propagation keeps the result correct (false).
+  // F8 fixed: the implementation substitutes 0 past the end of the shorter string
+  // (no out-of-bounds read, no NaN reliance) and returns false on any length mismatch.
   // This test pins that correctness so a future refactor can't silently flip it.
   it("returns false for every length-mismatch shape (no false-accept via NaN)", () => {
     const probes: Array<[string, string]> = [
@@ -249,8 +249,10 @@ describe("P3 — rate limiting is per-target and skips the spoofable IP when unt
     });
     // Spoofed XFF must not create per-IP buckets that an attacker could rotate to evade limits.
     const spoofed = { "x-forwarded-for": "9.9.9.9" };
-    const a = await h.challenge(req({ publicKey: "AAA" }, spoofed));
-    const b = await h.challenge(req({ publicKey: "AAA" }, { "x-forwarded-for": "8.8.8.8" }));
+    const a = await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }, spoofed));
+    const b = await h.challenge(
+      req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }, { "x-forwarded-for": "8.8.8.8" }),
+    );
     // AAA is rate-limited on its OWN bucket regardless of spoofed IPs (a=200, b=429).
     expect([a.status, b.status].sort()).toEqual([200, 429]);
   });

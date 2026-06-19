@@ -10,12 +10,13 @@
 // EVM addresses are not authentication identities.
 //
 // WHAT THIS TESTS:
-//  - Attempting to register with authMethod="wallet" + EVM address → 401
-//    (correct: EVM is not a supported auth method)
-//  - EVM addresses can be used as publicKey via email auth (they are just
-//    opaque identifiers for the encrypted wallet bundle — no wallet proof needed)
+//  - The account IDENTITY publicKey must be a Solana ed25519 key. An EVM 0x address
+//    is rejected at validation (400) on every path — wallet, connect-wallet, AND email
+//    (audit zai-glm-52: validatePublicKey is now strictly Solana-only).
+//  - EVM keys live ONLY inside the encrypted wallet bundle (chain:"evm"), never as the
+//    identity — they're internal signing wallets (useEvmSigner / viem LocalAccount).
 //  - The server has no EVM verification function (expected — not a gap)
-//  - Verifies the auth boundary: Solana = Web3 auth, EVM = internal signing only
+//  - Verifies the auth boundary: Solana = Web3 auth + identity, EVM = internal signing only
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { registerEmail, loginEmail } from "./_auth-helpers";
@@ -31,15 +32,13 @@ function req(body: unknown, headers: Record<string, string> = {}): Request {
 describe("EVM wallet — design intent (C2)", () => {
   const evmAddress = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
 
-  it("authMethod='wallet' with EVM address is rejected (correct: only Solana is Web3 auth)", async () => {
-    // EVM addresses are NOT valid Web3 auth identities. Only Solana
-    // public keys can be used for wallet-based authentication. This
-    // 401 is correct behavior.
+  const solIdentity = "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9";
+
+  it("authMethod='wallet' with EVM address is rejected at validation (400)", async () => {
+    // EVM addresses are NOT valid identities. Strict Solana validation rejects the
+    // 0x identity up front (400) — earlier than the old 401 signature-failure.
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
-
-    const chRes = await h.challenge(req({ publicKey: evmAddress }));
-    const { challenge } = await chRes.json();
 
     const reg = await h.register(
       req({
@@ -47,59 +46,55 @@ describe("EVM wallet — design intent (C2)", () => {
         authMethod: "wallet",
         wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "CT" }],
         signature: "00".repeat(65),
-        challenge,
+        challenge: "x".repeat(64),
       }),
     );
 
-    expect(reg.status).toBe(401);
+    expect(reg.status).toBe(400);
   });
 
-  it("connect-wallet with EVM address is also rejected", async () => {
+  it("connect-wallet with EVM address is also rejected at validation (400)", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
-
-    const chRes = await h.challenge(req({ publicKey: evmAddress }));
-    const { challenge } = await chRes.json();
 
     const cw = await h.connectWallet(
       req({
         publicKey: evmAddress,
         signature: "00".repeat(65),
-        challenge,
+        challenge: "x".repeat(64),
         wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "CT" }],
       }),
     );
 
-    expect(cw.status).toBe(401);
+    expect(cw.status).toBe(400);
   });
 
-  it("EVM address CAN be used with email auth (it's just an opaque identifier)", async () => {
-    // The publicKey field is an opaque identifier. When authMethod="email",
-    // there's no wallet signature requirement — the account is authenticated
-    // via email+passkey. The publicKey can be any string; it doesn't need
-    // to be wallet-verified because the auth is via email.
-    //
-    // For EVM wallets, this is the expected path: wallets are generated
-    // client-side, encrypted, and stored. A Solana "identity" wallet serves
-    // as the publicKey for email/biometric users; but the system also allows
-    // EVM addresses as publicKey identifiers since they are opaque strings.
+  it("an EVM address is rejected as the email identity too — only a Solana identity is valid", async () => {
+    // The identity publicKey must be a Solana ed25519 key on EVERY path, including
+    // email. The correct pattern is a Solana identity with EVM wallets in the bundle.
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage });
 
-    const reg = await registerEmail(h, {
-      publicKey: evmAddress,
-      email: "evm-user@test.com",
+    const rejected = await registerEmail(h, {
+      publicKey: evmAddress, // EVM as the identity → rejected
+      email: "evm-id@test.com",
       appKey: "ab".repeat(32),
       wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "encrypted-key" }],
     });
+    expect(rejected.status).toBe(400);
 
-    expect(reg.status).toBe(201);
+    // The supported shape: a Solana identity, with the EVM key carried in the bundle.
+    const ok = await registerEmail(h, {
+      publicKey: solIdentity,
+      email: "sol-id@test.com",
+      appKey: "ab".repeat(32),
+      wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "encrypted-key" }],
+    });
+    expect(ok.status).toBe(201);
 
-    // Login via the signature flow works (no wallet proof needed — correct)
-    const login = await loginEmail(h, { email: "evm-user@test.com", appKey: "ab".repeat(32) });
+    const login = await loginEmail(h, { email: "sol-id@test.com", appKey: "ab".repeat(32) });
     expect(login.status).toBe(200);
-    const body = await login.json();
-    expect(body.publicKey).toBe(evmAddress);
+    expect((await login.json()).publicKey).toBe(solIdentity);
   });
 
   it("server has no EVM verification function (expected — EVM is not an auth method)", async () => {

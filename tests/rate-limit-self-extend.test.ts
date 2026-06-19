@@ -149,7 +149,7 @@ describe("rate limit integration in route handlers", () => {
       storage,
       config: { rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
     });
-    const make = () => h.challenge(req({ publicKey: "test-pk" }));
+    const make = () => h.challenge(req({ publicKey: "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse" }));
     expect((await make()).status).toBe(200);
     expect((await make()).status).toBe(200);
     expect((await make()).status).toBe(200);
@@ -168,7 +168,7 @@ describe("rate limit integration in route handlers", () => {
     const reg = () =>
       h.register(
         req({
-          publicKey: "pk-1",
+          publicKey: "EdmxWPmx2WH6WgFfTdu9xfkYf3k1g5wD1zccTVySEEh1",
           email: "test@example.com",
           authPublicKey: "a".repeat(64),
           authMethod: "email",

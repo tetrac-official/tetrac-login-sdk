@@ -25,14 +25,20 @@ function jreq(url: string, body?: unknown): Request {
 describe("createNextAuthRoutes — action dispatch", () => {
   it("routes a known POST action (challenge) with plain params", async () => {
     const { POST } = routes();
-    const res = await POST(jreq("challenge", { publicKey: "k" }), ctx(["challenge"]));
+    const res = await POST(
+      jreq("challenge", { publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }),
+      ctx(["challenge"]),
+    );
     expect(res.status).toBe(200);
     expect((await res.json()).challenge).toHaveLength(64);
   });
 
   it("accepts params delivered as a Promise (Next 15+)", async () => {
     const { POST } = routes();
-    const res = await POST(jreq("challenge", { publicKey: "k" }), ctx(["challenge"], true));
+    const res = await POST(
+      jreq("challenge", { publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }),
+      ctx(["challenge"], true),
+    );
     expect(res.status).toBe(200);
   });
 
@@ -59,9 +65,11 @@ describe("createNextAuthRoutes — action dispatch", () => {
 
   it("routes a known GET action (search-wallet) to its handler", async () => {
     const { GET } = routes();
-    const req = new Request("http://localhost/api/auth/search-wallet?publicKey=missing");
+    const req = new Request(
+      "http://localhost/api/auth/search-wallet?publicKey=9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+    );
     const res = await GET(req, ctx(["search-wallet"]));
-    expect(res.status).toBe(404); // handler's "Wallet not found" — dispatch worked
+    expect(res.status).toBe(404); // handler's "Wallet not found" (valid key, unregistered) — dispatch worked
     expect((await res.json()).error).toMatch(/wallet not found/i);
   });
 

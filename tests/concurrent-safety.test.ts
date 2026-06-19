@@ -95,7 +95,7 @@ describe("session issuance revocation", () => {
     const h = createAuthHandlers({ storage });
 
     const appKey = "ab".repeat(32);
-    const pk = "SolSessionRevoke1111111111111111111111111";
+    const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
 
     await registerEmail(h, { publicKey: pk, email: "seq@test.com", appKey });
 
@@ -133,8 +133,8 @@ describe("concurrent registration race", () => {
 
     // Two registrations with the SAME email but DIFFERENT public keys
     const [r1, r2] = await Promise.all([
-      makeReg("SolDup1_111111111111111111111111111111111"),
-      makeReg("SolDup2_222222222222222222222222222222222"),
+      makeReg("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"),
+      makeReg("2KW2XRd9kwqet15Aha2oK3tYvd3nWbTFH1MBiRAv1BE1"),
     ]);
 
     // The email collision check (routes.ts:129-132) runs before persistUser,
