@@ -30,7 +30,8 @@ const DEFAULT_LABELS = {
 
 type RNWebViewWindow = { ReactNativeWebView?: { postMessage: (msg: string) => void } };
 function postToRN(message: object): void {
-  const rn = typeof window !== "undefined" ? (window as unknown as RNWebViewWindow).ReactNativeWebView : undefined;
+  const rn =
+    typeof window !== "undefined" ? (window as unknown as RNWebViewWindow).ReactNativeWebView : undefined;
   if (rn) rn.postMessage(JSON.stringify(message));
 }
 
@@ -218,10 +219,7 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
   }
 
   return (
-    <div
-      className={[className, classNames?.root].filter(Boolean).join(" ") || undefined}
-      style={styles.root}
-    >
+    <div className={[className, classNames?.root].filter(Boolean).join(" ") || undefined} style={styles.root}>
       {title !== null ? (
         <h2 className={classNames?.title} style={styles.title}>
           {title}

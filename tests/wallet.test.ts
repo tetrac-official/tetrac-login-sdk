@@ -12,7 +12,11 @@ const appKey = deriveAppKeyFromPasskey("pw", "a@b.com");
 
 describe("generateWalletBundle", () => {
   it("generates requested roles per chain, encrypted", async () => {
-    const bundle = await generateWalletBundle({ appKey, solana: ["funds", "signing"], evm: ["funds", "signing"] });
+    const bundle = await generateWalletBundle({
+      appKey,
+      solana: ["funds", "signing"],
+      evm: ["funds", "signing"],
+    });
     expect(Object.keys(bundle.solana!)).toEqual(["funds", "signing"]);
     expect(Object.keys(bundle.evm!)).toEqual(["funds", "signing"]);
 

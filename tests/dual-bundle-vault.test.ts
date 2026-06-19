@@ -88,7 +88,7 @@ describe("@tetrac/login-sdk vault singleton across subpath bundles (BUILT dist)"
 
   // Both inlined copies must coordinate through the SAME global Symbol-keyed slot, so
   // arming one is visible from the other (login via /react ⇒ getAppKey() from /client).
-  it("binds BOTH /client and /react to the same globalThis Symbol.for(\"tetrac.vault\") slot", () => {
+  it('binds BOTH /client and /react to the same globalThis Symbol.for("tetrac.vault") slot', () => {
     const clientSrc = readFileSync(clientPath, "utf8");
     const reactSrc = readFileSync(reactPath, "utf8");
 
@@ -97,7 +97,7 @@ describe("@tetrac/login-sdk vault singleton across subpath bundles (BUILT dist)"
 
     // eslint-disable-next-line no-console
     console.log(
-      "[INVARIANT] Both bundles resolve Symbol.for(\"tetrac.vault\") — one shared vault state, " +
+      '[INVARIANT] Both bundles resolve Symbol.for("tetrac.vault") — one shared vault state, ' +
         "so arming via /react's login is visible to getAppKey() imported from /client.",
     );
   });

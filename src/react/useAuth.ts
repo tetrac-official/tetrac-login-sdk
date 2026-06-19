@@ -45,19 +45,19 @@ export function useAuth() {
       },
       [client, refresh, user],
     ),
-    registerWithEmail: wrap((p: { email: string; passkey: string }) => client.registerWithEmail(p)) as (
-      p: { email: string; passkey: string },
-    ) => Promise<AuthResult>,
-    loginWithEmail: wrap((p: { email: string; passkey: string }) => client.loginWithEmail(p)) as (
-      p: { email: string; passkey: string },
-    ) => Promise<AuthResult>,
-    loginWithWallet: wrap(
-      (p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
-        client.loginWithWallet(p),
+    registerWithEmail: wrap((p: { email: string; passkey: string }) => client.registerWithEmail(p)) as (p: {
+      email: string;
+      passkey: string;
+    }) => Promise<AuthResult>,
+    loginWithEmail: wrap((p: { email: string; passkey: string }) => client.loginWithEmail(p)) as (p: {
+      email: string;
+      passkey: string;
+    }) => Promise<AuthResult>,
+    loginWithWallet: wrap((p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
+      client.loginWithWallet(p),
     ),
-    connectWallet: wrap(
-      (p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
-        client.connectWallet(p),
+    connectWallet: wrap((p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
+      client.connectWallet(p),
     ),
     registerWithWallet: wrap(
       (p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>

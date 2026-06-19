@@ -12,11 +12,8 @@
 // wrapped blob in IndexedDB, which is useless without a fresh assertion.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthContext } from "./AuthProvider.js";
-import {
-  isBiometricAvailable,
-  hasBiometricUnlock,
-  type PasskeyRegistration,
-} from "../client/index.js";
+import { isBiometricAvailable, hasBiometricUnlock, type PasskeyRegistration } from "../client/index.js";
+import { registerSessionClearHook } from "../client/session.js";
 
 // Non-secret registration descriptor, persisted so unlock()/disable() need no args.
 const REG_KEY = "ttc_biometric_reg";
@@ -41,6 +38,12 @@ function saveReg(reg: PasskeyRegistration): void {
 function clearReg(): void {
   if (hasWindow()) localStorage.removeItem(REG_KEY);
 }
+
+// F9: purge the (non-secret) registration descriptor on logout so it never outlives
+// the session it described. The client layer already purges the unlock marker + blob
+// on clearSession; this hook covers the React layer's own localStorage key. Registered
+// at module load — i.e. only when this hook is in use (the same module that writes it).
+registerSessionClearHook(clearReg);
 
 export interface UseBiometricUnlockResult {
   /** Platform exposes WebAuthn + a platform (biometric) authenticator. Async-resolved. */

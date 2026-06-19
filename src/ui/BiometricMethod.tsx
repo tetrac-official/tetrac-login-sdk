@@ -97,11 +97,7 @@ export function BiometricMethod({
             {icon}
           </span>
         ) : null}
-        {busy
-          ? "…"
-          : registration
-            ? "Unlock with biometric"
-            : "Continue with biometric"}
+        {busy ? "…" : registration ? "Unlock with biometric" : "Continue with biometric"}
       </button>
       {error ? (
         <span className={classNames?.error} style={styles.error}>

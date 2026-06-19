@@ -51,7 +51,9 @@ describe("clientIp() — trusted, rightmost-after-hops", () => {
   it("misconfigured hops past the start of the chain falls back (no crash, not a client value)", () => {
     // idx goes negative → fall through to x-real-ip, else "unknown". Never throws.
     expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4" }), true, 5)).toBe("unknown");
-    expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "7.7.7.7" }), true, 5)).toBe("7.7.7.7");
+    expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "7.7.7.7" }), true, 5)).toBe(
+      "7.7.7.7",
+    );
   });
 
   it("all-empty XFF falls back without crashing", () => {
@@ -65,11 +67,12 @@ describe("rate limiting becomes per-SOURCE when trustProxyHeaders is true", () =
       storage: new MemoryAdapter(),
       config: { trustProxyHeaders: true, rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
-    const fromIp = (pk: string) => h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": "1.2.3.4" }));
+    const fromIp = (pk: string) =>
+      h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": "1.2.3.4" }));
     // Same source IP, DIFFERENT targets — the per-source IP bucket still trips.
-    expect((await fromIp("AAA")).status).toBe(200);
-    expect((await fromIp("BBB")).status).toBe(200);
-    expect((await fromIp("CCC")).status).toBe(429); // IP bucket exhausted
+    expect((await fromIp("AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9")).status).toBe(200);
+    expect((await fromIp("9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu")).status).toBe(200);
+    expect((await fromIp("GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse")).status).toBe(429); // IP bucket exhausted
   });
 
   it("different source IPs get independent buckets", async () => {
@@ -77,9 +80,10 @@ describe("rate limiting becomes per-SOURCE when trustProxyHeaders is true", () =
       storage: new MemoryAdapter(),
       config: { trustProxyHeaders: true, rateLimit: { maxAttempts: 1, windowSeconds: 60 } },
     });
-    const ch = (pk: string, ip: string) => h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": ip }));
-    expect((await ch("AAA", "1.1.1.1")).status).toBe(200);
-    expect((await ch("AAA", "1.1.1.1")).status).toBe(429); // same IP + same target → trips
-    expect((await ch("BBB", "2.2.2.2")).status).toBe(200); // different IP → fresh
+    const ch = (pk: string, ip: string) =>
+      h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": ip }));
+    expect((await ch("AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", "1.1.1.1")).status).toBe(200);
+    expect((await ch("AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9", "1.1.1.1")).status).toBe(429); // same IP + same target → trips
+    expect((await ch("9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu", "2.2.2.2")).status).toBe(200); // different IP → fresh
   });
 });

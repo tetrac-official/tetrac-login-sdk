@@ -44,7 +44,9 @@ describe("H2 RESOLVED — 600k iterations + domain-separated salt (no longer the
 
   it("the salt is SHA-256(appId : email), NOT the bare email", () => {
     // Old (vulnerable) behavior used the bare normalized email as the PBKDF2 salt:
-    const bareEmailSalt = bytesToHex(pbkdf2(sha256, utf8ToBytes("pw"), utf8ToBytes("a@b.com"), { c: 100_000, dkLen: 32 }));
+    const bareEmailSalt = bytesToHex(
+      pbkdf2(sha256, utf8ToBytes("pw"), utf8ToBytes("a@b.com"), { c: 100_000, dkLen: 32 }),
+    );
     expect(deriveAppKeyFromPasskey("pw", "A@B.com  ", 100_000, "ttc")).not.toBe(bareEmailSalt);
 
     // …it now matches a derivation whose salt is SHA-256("ttc:a@b.com"):

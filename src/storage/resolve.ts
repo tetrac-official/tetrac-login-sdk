@@ -9,10 +9,7 @@ const env = (k: string): string | undefined =>
 
 const DEFAULT_REDIS_URL = "redis://localhost:6379";
 
-export type StorageBackend =
-  | { kind: "upstash" }
-  | { kind: "vercelkv" }
-  | { kind: "ioredis"; url: string };
+export type StorageBackend = { kind: "upstash" } | { kind: "vercelkv" } | { kind: "ioredis"; url: string };
 
 /**
  * Decide which backend the environment selects — PURE (no I/O, no client

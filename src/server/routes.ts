@@ -3,7 +3,9 @@
 import type { StorageAdapter } from "../storage/adapter.js";
 import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
 import type { AuthResult, EncryptedWallet, UserData } from "../core/types.js";
+import { PublicKey } from "@solana/web3.js";
 import { json, error, clientIp, readJson } from "./http.js";
+import { hashUserAgent } from "../core/crypto.js";
 import { checkRateLimit } from "./rateLimit.js";
 import { issueChallenge, consumeChallenge } from "./challenge.js";
 import { verifySolanaSignature, verifyAuthSignature } from "./signature.js";
@@ -44,15 +46,34 @@ function validateEmail(email: string): string | null {
 }
 
 function validatePublicKey(key: string): string | null {
-  // Loose by design: publicKey may be a Solana base58 key, an EVM 0x address, or a
-  // biometric identity id — so we only enforce no surrounding whitespace + a length bound.
-  if (!key || key.trim() !== key || key.length > 128) return "Invalid publicKey format";
+  // The account identity is a Solana ed25519 public key (generated client-side for
+  // email/biometric, or the connected wallet for web3). Require base58 that decodes to
+  // exactly 32 bytes in CANONICAL form: PublicKey throws on invalid base58 / wrong
+  // length, the round-trip rejects short inputs PublicKey would left-pad, and EVM
+  // `0x…` addresses fail because `0` isn't in the base58 alphabet.
+  if (!key) return "Invalid publicKey format";
+  try {
+    const pk = new PublicKey(key);
+    if (pk.toBytes().length !== 32 || pk.toBase58() !== key) return "Invalid publicKey format";
+  } catch {
+    return "Invalid publicKey format";
+  }
   return null;
 }
 
 function validateAuthPublicKey(key: string): string | null {
   if (!HEX64_RE.test(key)) return "Invalid authPublicKey format"; // ed25519 public key, 32 bytes hex
   return null;
+}
+
+// PBKDF2 iteration bounds the server pins per-user. The client picks securityLevel
+// (1/2/3 -> 100k/600k/1M), but the server must not trust the count blindly (audit F3):
+// a malicious/buggy client could pin `1` and kneecap that account's brute-force
+// resistance. Floor = the documented level-1 (legacy) minimum; ceiling = level-3.
+const PBKDF2_MIN = 100_000;
+const PBKDF2_MAX = 1_000_000;
+function validIterations(n: unknown): boolean {
+  return typeof n === "number" && Number.isInteger(n) && n >= PBKDF2_MIN && n <= PBKDF2_MAX;
 }
 
 export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
@@ -84,6 +105,17 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!id.allowed) return error("Rate limit exceeded", 429);
     }
     return null;
+  }
+
+  // Optional coarse session→User-Agent binding (config.bindSessionToUserAgent,
+  // default off). At ISSUE time we fingerprint only when the flag is on; at VERIFY
+  // time we always compute the request fingerprint and let verifySession enforce it
+  // iff the session was bound — so flipping the flag off never un-binds live sessions.
+  function issueFingerprint(req: Request): string | undefined {
+    return config.bindSessionToUserAgent ? hashUserAgent(req.headers.get("user-agent")) : undefined;
+  }
+  function reqFingerprint(req: Request): string | undefined {
+    return hashUserAgent(req.headers.get("user-agent"));
   }
 
   // Client-safe copy of a user record: never echo the session token back to the
@@ -182,6 +214,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         const invalid = validateWallets(body.wallets);
         if (invalid) return invalid;
       }
+      // Reject a client-supplied PBKDF2 count outside the allowed band (audit F3).
+      // Absent is fine — legacy/wallet accounts don't pin one.
+      if (body.pbkdf2Iterations != null && !validIterations(body.pbkdf2Iterations)) {
+        return error("Invalid pbkdf2Iterations", 400);
+      }
 
       const limited = await rateLimited(req, `register:${body.email ?? body.publicKey}`);
       if (limited) return limited;
@@ -230,7 +267,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         createdAt: Date.now(),
       };
       await persistUser(storage, user, config);
-      await issueSession(storage, user, config);
+      await issueSession(storage, user, config, issueFingerprint(req));
       return json(asResult(user), 201);
     },
 
@@ -253,11 +290,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const sigValid =
         !!user?.authPublicKey && verifyAuthSignature(user.authPublicKey, body.signature, body.challenge);
       const consumed =
-        sigValid && publicKey
-          ? await consumeChallenge(storage, publicKey, body.challenge, config)
-          : false;
+        sigValid && publicKey ? await consumeChallenge(storage, publicKey, body.challenge, config) : false;
       if (user && sigValid && consumed) {
-        await issueSession(storage, user, config);
+        await issueSession(storage, user, config, issueFingerprint(req));
         return json(asResult(user));
       }
       const limited = await rateLimited(req, `login:${body.email}`);
@@ -285,7 +320,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         // A valid signature proves key ownership; a missing account is not an attack,
         // so don't feed the failure counter — just report it.
         if (!user) return error("Wallet not registered", 404);
-        await issueSession(storage, user, config);
+        await issueSession(storage, user, config, issueFingerprint(req));
         return json(asResult(user));
       }
       const limited = await rateLimited(req, `login:${body.publicKey}`);
@@ -344,7 +379,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         user.wallets = body.wallets;
         await persistUser(storage, user, config);
       }
-      await issueSession(storage, user, config);
+      await issueSession(storage, user, config, issueFingerprint(req));
       return json(asResult(user), isNew ? 201 : 200);
     },
 
@@ -353,7 +388,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async logout(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config);
+      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
       if (user && token) await revokeSession(storage, token, config);
       return json({ ok: true });
     },
@@ -361,7 +396,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async userData(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config);
+      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
       if (!user) return error("Unauthorized", 401);
       return json({ user: publicUser(user) });
     },
@@ -382,7 +417,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     async importWallet(req) {
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config);
+      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
       if (!user) return error("Unauthorized", 401);
 
       const body = await readJson<{ wallets?: EncryptedWallet[] }>(req);

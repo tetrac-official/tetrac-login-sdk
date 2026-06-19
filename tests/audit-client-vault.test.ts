@@ -56,7 +56,12 @@ describe("H3 RESOLVED — the appKey is MEMORY-ONLY (never written to web storag
   it("setSession persists token/pubkey/email to localStorage but NEVER the appKey", async () => {
     const { mod, sessionStorage, localStorage } = await freshSession();
     mod.configureVault({ autoLockMs: 10_000 });
-    mod.setSession({ publicKey: "PUB", authToken: "TOK".padEnd(64, "0"), appKey: "SECRETKEY", email: "u@x.com" });
+    mod.setSession({
+      publicKey: "PUB",
+      authToken: "TOK".padEnd(64, "0"),
+      appKey: "SECRETKEY",
+      email: "u@x.com",
+    });
     expect(sessionStorage.getItem("ttc_ek")).toBeNull();
     // The appKey must not leak into ANY web-storage value, session or local.
     const allValues = [...sessionStorage.keys(), ...localStorage.keys()].map(

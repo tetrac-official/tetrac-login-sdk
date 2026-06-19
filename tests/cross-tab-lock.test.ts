@@ -14,7 +14,11 @@ function makeStore() {
 
 type Handlers = Record<string, Array<(e: any) => void>>;
 
-function installWindow(): { handlers: Handlers; sessionStorage: ReturnType<typeof makeStore>; localStorage: ReturnType<typeof makeStore> } {
+function installWindow(): {
+  handlers: Handlers;
+  sessionStorage: ReturnType<typeof makeStore>;
+  localStorage: ReturnType<typeof makeStore>;
+} {
   const handlers: Handlers = {};
   const sessionStorage = makeStore();
   const localStorage = makeStore();

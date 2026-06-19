@@ -29,10 +29,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
   it("round-trips a hex secret through a non-extractable AES-GCM key", async () => {
     const secretHex = toHex(globalThis.crypto.getRandomValues(new Uint8Array(32)));
 
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
 
     const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv }, key, fromHex(secretHex));
@@ -46,19 +43,13 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
   });
 
   it("the wrapping key is non-extractable (exportKey rejects)", async () => {
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     expect(key.extractable).toBe(false);
     await expect(subtle.exportKey("raw", key)).rejects.toThrow();
   });
 
   it("decrypt fails when the ciphertext is tampered (GCM tag check)", async () => {
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
     const ciphertext = new Uint8Array(
       await subtle.encrypt({ name: "AES-GCM", iv }, key, fromHex("00".repeat(32))),
@@ -68,10 +59,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
   });
 
   it("decrypt fails with wrong IV (different IV, same key)", async () => {
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv1 = globalThis.crypto.getRandomValues(new Uint8Array(12));
     const iv2 = globalThis.crypto.getRandomValues(new Uint8Array(12));
     const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv: iv1 }, key, fromHex("ab".repeat(32)));
@@ -82,10 +70,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
 
   it("two separate encryptions of the same secret produce different ciphertexts", async () => {
     const secret = "deadbeef".repeat(8); // 32 bytes
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 
     const iv1 = globalThis.crypto.getRandomValues(new Uint8Array(12));
     const ct1 = await subtle.encrypt({ name: "AES-GCM", iv: iv1 }, key, fromHex(secret));
@@ -104,10 +89,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
     // IndexedDB (like v0.1.0 did) must be wrapped on first access.
     const legacySecret = "ab".repeat(32);
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 
     // Simulate gateStore wrapping a legacy record
     const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv }, key, fromHex(legacySecret));
@@ -128,10 +110,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
     // Solana secret keys are 64 bytes — verify the wrap handles this size
     const solanaSecret = toHex(globalThis.crypto.getRandomValues(new Uint8Array(64)));
 
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
 
     const ct = await subtle.encrypt({ name: "AES-GCM", iv }, key, fromHex(solanaSecret));
@@ -151,10 +130,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (C6)", () => {
 
 describeCrypto("gate-mode key lifecycle", () => {
   it("key cannot be used after being marked as non-extractable", async () => {
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
 
     // Verify it can encrypt
     const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
