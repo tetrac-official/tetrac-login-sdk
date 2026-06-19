@@ -2,7 +2,11 @@
 export default {
   preset: "ts-jest/presets/default-esm",
   testEnvironment: "node",
-  extensionsToTreatAsEsm: [".ts"],
+  // Polyfills TextEncoder/TextDecoder + WebCrypto.subtle for the jsdom env (guarded,
+  // no-op under node). Required by the React-hook suite (jsdom) which transitively
+  // imports @solana/web3.js → @noble at module load.
+  setupFiles: ["<rootDir>/tests/jest.setup.ts"],
+  extensionsToTreatAsEsm: [".ts", ".tsx"],
   moduleNameMapper: {
     "^(\\.{1,2}/.*)\\.js$": "$1",
   },
@@ -18,6 +22,7 @@ export default {
           moduleResolution: "Bundler",
           allowJs: true,
           verbatimModuleSyntax: false,
+          jsx: "react-jsx", // enable JSX in .tsx test files (React hook tests)
         },
       },
     ],
@@ -27,5 +32,5 @@ export default {
   transformIgnorePatterns: [
     "/node_modules/(?!(@solana|rpc-websockets|uuid|jayson|superstruct|borsh|@noble|@solana-program)/)",
   ],
-  testMatch: ["**/tests/**/*.test.ts"],
+  testMatch: ["**/tests/**/*.test.ts?(x)"],
 };
