@@ -33,15 +33,12 @@ export function useSigner() {
     return toSolanaKeypair(wallet, appKey);
   }, []);
 
-  const sign = useCallback(
-    <T>(wallet: EncryptedWallet, fn: (secret: string) => Promise<T> | T) => {
-      const appKey = getAppKey();
-      if (!appKey) throw new VaultLockedError();
-      touchVault(); // active use extends the unlocked window
-      return withDecryptedKey(wallet, appKey, fn);
-    },
-    [],
-  );
+  const sign = useCallback(<T>(wallet: EncryptedWallet, fn: (secret: string) => Promise<T> | T) => {
+    const appKey = getAppKey();
+    if (!appKey) throw new VaultLockedError();
+    touchVault(); // active use extends the unlocked window
+    return withDecryptedKey(wallet, appKey, fn);
+  }, []);
 
   return { unlocked: !locked, decrypt, solanaKeypair, sign };
 }

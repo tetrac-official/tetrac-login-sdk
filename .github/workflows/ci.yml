@@ -22,29 +22,35 @@ jobs:
       fail-fast: false
       matrix:
         # engines.node is ">=18" (package.json): test the floor and current LTS.
-        node-version: ['18.x', '20.x']
+        node-version: ["18.x", "20.x"]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
-          cache: 'npm'
+          cache: "npm"
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Format check
+        run: npm run format:check
+
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Test
-        run: npm test
-
+      # Build BEFORE Test: tests/dual-bundle-vault.test.ts inspects the BUILT dist/
+      # (a bundling-artifact invariant), which doesn't exist in a fresh CI checkout
+      # until the build runs. Running Test first fails with "Built dist not found".
       - name: Build
         run: npm run build
+
+      - name: Test
+        run: npm test
 
       # Non-blocking: audit results depend on the upstream advisory DB and can
       # change without any code change. Promote to a hard gate by removing

@@ -110,6 +110,16 @@ export function generateSessionToken(): string {
   return randomHex(32);
 }
 
+/**
+ * SHA-256 (hex) of a request User-Agent, for the optional coarse session→UA binding
+ * (config.bindSessionToUserAgent). Returns undefined for a missing/empty UA so the
+ * caller skips binding rather than pinning the session to the empty string.
+ */
+export function hashUserAgent(userAgent: string | null | undefined): string | undefined {
+  if (!userAgent) return undefined;
+  return bytesToHex(sha256(utf8ToBytes(userAgent)));
+}
+
 /** Generate a 256-bit wallet-login challenge (64 hex chars). */
 export function generateChallenge(): string {
   return randomHex(32);
@@ -118,14 +128,20 @@ export function generateChallenge(): string {
 /**
  * Constant-time comparison of two hex strings. Used server-side to compare
  * credential hashes without leaking timing about how many characters matched.
- * Does the full XOR-accumulate scan regardless of input; a length mismatch still
- * runs over the longer string and returns false. Pure, no Node 'crypto' needed.
+ * Folds the length difference into `diff` up front and scans the full max-length
+ * window, substituting 0 past the end of the shorter string so it never indexes
+ * out of bounds (avoids relying on charCodeAt→NaN propagation, audit F8). A length
+ * mismatch returns false. Pure, no Node 'crypto' needed.
  */
 export function timingSafeEqual(a: string, b: string): boolean {
-  let diff = a.length ^ b.length;
-  const len = Math.max(a.length, b.length);
+  const la = a.length;
+  const lb = b.length;
+  const len = Math.max(la, lb);
+  let diff = la ^ lb; // non-zero iff the lengths differ
   for (let i = 0; i < len; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    const ca = i < la ? a.charCodeAt(i) : 0;
+    const cb = i < lb ? b.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
   }
   return diff === 0;
 }

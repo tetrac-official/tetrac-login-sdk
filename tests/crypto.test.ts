@@ -16,9 +16,7 @@ describe("key derivation", () => {
   });
 
   it("changes the app key when the passkey changes", () => {
-    expect(deriveAppKeyFromPasskey("a", "x@y.com")).not.toBe(
-      deriveAppKeyFromPasskey("b", "x@y.com"),
-    );
+    expect(deriveAppKeyFromPasskey("a", "x@y.com")).not.toBe(deriveAppKeyFromPasskey("b", "x@y.com"));
   });
 
   it("derives a deterministic app key from a signature", () => {
@@ -26,7 +24,6 @@ describe("key derivation", () => {
     expect(deriveAppKeyFromSignature(sig)).toBe(deriveAppKeyFromSignature(sig));
     expect(deriveAppKeyFromSignature(sig)).toHaveLength(64);
   });
-
 });
 
 describe("secret encryption", () => {
