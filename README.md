@@ -1,14 +1,31 @@
-# @tetrac/login-sdk
+<div align="center">
 
-Reusable, **non-custodial** authentication SDK: **email/passkey**, **Web3 wallet**, and
-**biometric (WebAuthn PRF)** login, with **client-side wallet generation** built in.
-Storage runs on local **Redis** in dev and **Upstash / Vercel KV** in production.
+# 🔐 @tetrac/login-sdk
 
-Extracted from the `next-ttc` trading platform so any project can drop in the same auth.
+**Non-custodial authentication & embedded-wallet SDK** for Next.js / React —
+**email + passkey**, **Web3 wallet**, and **biometric (WebAuthn PRF)** login, with
+**client-side Solana / EVM wallet generation** and authenticated, client-side encryption.
 
-> Status: `v0.3.0` — see [`docs/PRD.md`](./docs/PRD.md) for the full product spec.
+[![npm version](https://img.shields.io/npm/v/@tetrac/login-sdk?logo=npm&color=cb3837)](https://www.npmjs.com/package/@tetrac/login-sdk)
+[![types](https://img.shields.io/npm/types/@tetrac/login-sdk?logo=typescript&logoColor=white)](https://www.npmjs.com/package/@tetrac/login-sdk)
+[![license](https://img.shields.io/npm/l/@tetrac/login-sdk?color=3da638)](#-license)
+[![node](https://img.shields.io/node/v/@tetrac/login-sdk?logo=node.js&logoColor=white)](https://nodejs.org)
+[![CI](https://github.com/tetrac-official/tetrac-login-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/tetrac-official/tetrac-login-sdk/actions/workflows/ci.yml)
 
-## Why
+[**npm**](https://www.npmjs.com/package/@tetrac/login-sdk) ·
+[Security policy](./SECURITY.md) ·
+[Crypto spec](./docs/CRYPTO_SPEC.md) ·
+[Threat model](./docs/THREAT_MODEL.md)
+
+</div>
+
+> **Keys never leave the browser in the clear.** Wallets are generated client-side and encrypted
+> with authenticated **AES-256-GCM** *before* anything is sent — the server only ever stores public
+> keys, ciphertext, and an ed25519 auth public key (never a private key, the encryption key, or a
+> passkey-derived secret). Storage runs on local **Redis** in dev and **Upstash / Vercel KV** in
+> production. Extracted from the `next-ttc` trading platform so any project can drop in the same auth.
+
+## ✨ Why
 
 - **Three login methods** behind one client.
 - **Wallets are generated in the browser** and encrypted (authenticated AES-256-GCM) under a key
@@ -18,7 +35,7 @@ Extracted from the `next-ttc` trading platform so any project can drop in the sa
 - **Deterministic recovery:** the same passkey+email (or the same wallet signature) re-derives
   the encryption key on any device, so wallets decrypt anywhere with zero server-side key storage.
 
-## Install
+## 📦 Install
 
 ```bash
 npm i @tetrac/login-sdk
@@ -32,7 +49,7 @@ npm i @upstash/redis     # Upstash (edge-friendly)
 npm i react next
 ```
 
-## Subpath exports
+## 🧩 Subpath exports
 
 | Import | Use in | Contents |
 |---|---|---|
@@ -44,7 +61,7 @@ npm i react next
 | `@tetrac/login-sdk/ui` | browser (optional) | `LoginPanel`, `ExportKeyPanel` |
 | `@tetrac/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
 
-## Server (Next.js App Router)
+## 🖥️ Server (Next.js App Router)
 
 ```ts
 // app/api/auth/[...action]/route.ts
@@ -62,7 +79,7 @@ headers (`ttc-auth-token` + `ttc-public-key`); the rest are public, though sever
 single-use challenge + signature **in the request body**. Unknown actions return `404`; only `GET`/`POST`
 are served.
 
-## Client (React)
+## ⚛️ Client (React)
 
 ```tsx
 import { AuthProvider, useAuth } from "@tetrac/login-sdk/react";
@@ -142,7 +159,7 @@ available standalone from `@tetrac/login-sdk/client`
 (`enableBiometricUnlock` / `unlockViaBiometric` / `disableBiometricUnlock` / `hasBiometricUnlock`)
 and as `AuthClient` methods. Full design: [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
 
-## Chain scope: Solana vs EVM
+## ⛓️ Chain scope: Solana vs EVM
 
 Both chains can have wallets generated and stored, but only one is an **authentication identity** — by design:
 
@@ -160,7 +177,7 @@ keypairs are *internally* generated (viem) and encrypted exactly like Solana wal
 only**, never as a login credential. The security boundary: **Solana = Web3 login identity; EVM (and any
 other generated keypair) = internal signing wallet only.**
 
-## Configuration
+## ⚙️ Configuration
 
 Override any subset via the `config` option on the route factory / `AuthClient`; unspecified fields
 fall back to `DEFAULT_CONFIG` (nested groups merge shallowly). Defaults shown:
@@ -215,7 +232,7 @@ KV_REST_API_URL= / KV_REST_API_TOKEN=    # Vercel KV REST
 UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 ```
 
-## Security model
+## 🛡️ Security model
 
 > **Full docs:** [`SECURITY.md`](./SECURITY.md) (policy + supported runtimes/browsers) ·
 > [`docs/CRYPTO_SPEC.md`](./docs/CRYPTO_SPEC.md) (primitives, parameters, wire formats) ·
@@ -255,7 +272,7 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
   behind a trusted proxy (`trustProxyHeaders` / `trustedProxyHops`), so a flood on one target can't lock
   out everyone. Responses never echo credential secrets.
 
-## Develop
+## 🧪 Develop
 
 ```bash
 npm run build         # tsup -> ESM + CJS + d.ts
@@ -269,7 +286,7 @@ Formatting is enforced in CI via `format:check`. Run `npm run format` before com
 "format on save" with the Prettier extension (it picks up [`.prettierrc.json`](./.prettierrc.json)) keeps
 you green automatically.
 
-## Contributing
+## 🤝 Contributing
 
 Every change — feature or bug fix — lands the same way: **write it down, prove it with a
 test, then make it pass.** The vault-singleton fix is the reference example end-to-end:
@@ -332,6 +349,6 @@ singleton.
 - Leave `version` in `package.json` alone unless the change is a release (bump it in its own
   step, not in every PR).
 
-## License
+## 📄 License
 
-MIT
+[MIT](./LICENSE) © Tetrac
