@@ -165,38 +165,32 @@ describe("useExportKey — re-auth to reveal", () => {
   });
 });
 
-// F9 (audit zai-glm-52): the React hook persists a non-secret registration descriptor
-// under localStorage["ttc_biometric_reg"], but only disable() clears it — logout
-// (clearSession) purges the client marker + IndexedDB blob, NOT this key. We
-// characterize the CURRENT (buggy) behavior; flip the survival assertion when F9 is fixed.
-describe("useBiometricUnlock — F9: descriptor persistence across logout", () => {
+// F9 (audit zai-glm-52) — FIXED: importing useBiometricUnlock registers a clearSession
+// hook that purges localStorage["ttc_biometric_reg"] on logout, alongside the client
+// layer's marker + IndexedDB-blob purge. So logout leaves no stale descriptor behind.
+describe("useBiometricUnlock — F9: descriptor purged on logout", () => {
   const REG_KEY = "ttc_biometric_reg";
   const MARKER_KEY = "ttc_biometric_unlock";
+  const REG = JSON.stringify({ credentialId: "cred123", salt: "s", rpId: "localhost", mode: "prf" });
 
-  it("logout purges the client marker but the React descriptor SURVIVES (F9)", () => {
+  it("logout purges BOTH the client marker and the React descriptor", () => {
     localStorage.setItem(MARKER_KEY, "cred123"); // client-layer marker (hasBiometricUnlock)
-    localStorage.setItem(
-      REG_KEY,
-      JSON.stringify({ credentialId: "cred123", salt: "s", rpId: "localhost", mode: "prf" }),
-    );
+    localStorage.setItem(REG_KEY, REG); // React-layer descriptor
 
-    clearSession(); // logout — fires the biometricUnlock clearSession hook
+    clearSession(); // logout — fires both clearSession hooks
 
     expect(localStorage.getItem(MARKER_KEY)).toBeNull(); // client hook purged it
-    expect(localStorage.getItem(REG_KEY)).not.toBeNull(); // F9: stale React descriptor remains
+    expect(localStorage.getItem(REG_KEY)).toBeNull(); // F9 fixed: descriptor purged too
   });
 
-  it("isEnabled is false after logout even though the descriptor lingers (inconsistent state)", async () => {
+  it("after logout the hook reports disabled with no lingering descriptor", async () => {
     localStorage.setItem(MARKER_KEY, "cred123");
-    localStorage.setItem(
-      REG_KEY,
-      JSON.stringify({ credentialId: "cred123", salt: "s", rpId: "localhost", mode: "prf" }),
-    );
+    localStorage.setItem(REG_KEY, REG);
     clearSession();
 
     const { result } = renderHook(() => useBiometricUnlock(), { wrapper });
     await act(async () => {});
-    expect(result.current.isEnabled).toBe(false); // marker gone → reports disabled…
-    expect(localStorage.getItem(REG_KEY)).not.toBeNull(); // …yet the descriptor is still on disk
+    expect(result.current.isEnabled).toBe(false); // marker gone → disabled…
+    expect(localStorage.getItem(REG_KEY)).toBeNull(); // …and no stale descriptor (consistent)
   });
 });

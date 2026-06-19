@@ -56,6 +56,16 @@ function validateAuthPublicKey(key: string): string | null {
   return null;
 }
 
+// PBKDF2 iteration bounds the server pins per-user. The client picks securityLevel
+// (1/2/3 -> 100k/600k/1M), but the server must not trust the count blindly (audit F3):
+// a malicious/buggy client could pin `1` and kneecap that account's brute-force
+// resistance. Floor = the documented level-1 (legacy) minimum; ceiling = level-3.
+const PBKDF2_MIN = 100_000;
+const PBKDF2_MAX = 1_000_000;
+function validIterations(n: unknown): boolean {
+  return typeof n === "number" && Number.isInteger(n) && n >= PBKDF2_MIN && n <= PBKDF2_MAX;
+}
+
 export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
   const { storage } = opts;
   const config = resolveConfig(opts.config);
@@ -193,6 +203,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (body.wallets !== undefined) {
         const invalid = validateWallets(body.wallets);
         if (invalid) return invalid;
+      }
+      // Reject a client-supplied PBKDF2 count outside the allowed band (audit F3).
+      // Absent is fine — legacy/wallet accounts don't pin one.
+      if (body.pbkdf2Iterations != null && !validIterations(body.pbkdf2Iterations)) {
+        return error("Invalid pbkdf2Iterations", 400);
       }
 
       const limited = await rateLimited(req, `register:${body.email ?? body.publicKey}`);
