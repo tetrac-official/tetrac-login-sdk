@@ -1,15 +1,21 @@
 // High-level browser auth client. Orchestrates key derivation, client-side wallet
 // generation, the API round-trips, and session storage for all three methods.
 import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } from "../core/config.js";
-import {
-  deriveAppKeyFromPasskey,
-  deriveAppKeyFromSignature,
-} from "../core/crypto.js";
+import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
 import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
-import { setSession, clearSession, authHeaders, armAppKey, getAuthToken, getEmail, getPbkdf2Iterations, configureVault } from "./session.js";
+import {
+  setSession,
+  clearSession,
+  authHeaders,
+  armAppKey,
+  getAuthToken,
+  getEmail,
+  getPbkdf2Iterations,
+  configureVault,
+} from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
 import {
   enableBiometricUnlock,
@@ -188,7 +194,8 @@ export class AuthClient {
     const iterations = PBKDF2_ITERATIONS[this.config.securityLevel];
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
-    const identity = bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
+    const identity =
+      bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
 
     const result = await this.post<AuthResult>("register", {
@@ -199,7 +206,13 @@ export class AuthClient {
       wallets: flattenBundle(bundle),
       pbkdf2Iterations: iterations, // pin the count per-user so future level changes don't orphan this account
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email, pbkdf2Iterations: iterations });
+    setSession({
+      publicKey: result.publicKey,
+      authToken: result.authToken,
+      appKey,
+      email: params.email,
+      pbkdf2Iterations: iterations,
+    });
     return result;
   }
 
@@ -216,7 +229,13 @@ export class AuthClient {
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const signature = signAuthChallenge(appKey, challenge);
     const result = await this.post<AuthResult>("login", { email: params.email, signature, challenge });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, email: params.email, pbkdf2Iterations: iterations });
+    setSession({
+      publicKey: result.publicKey,
+      authToken: result.authToken,
+      appKey,
+      email: params.email,
+      pbkdf2Iterations: iterations,
+    });
     return result;
   }
 
@@ -249,7 +268,10 @@ export class AuthClient {
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(params.publicKey, params.signMessage);
+    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+      params.publicKey,
+      params.signMessage,
+    );
     const result = await this.post<AuthResult>("login-wallet", {
       publicKey: params.publicKey,
       signature: signatureHex,
@@ -268,7 +290,10 @@ export class AuthClient {
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(params.publicKey, params.signMessage);
+    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+      params.publicKey,
+      params.signMessage,
+    );
     // Sent only if the wallet is new; the server ignores it for returning wallets.
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const result = await this.post<AuthResult>("connect-wallet", {
@@ -286,7 +311,10 @@ export class AuthClient {
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(params.publicKey, params.signMessage);
+    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+      params.publicKey,
+      params.signMessage,
+    );
     // The connected wallet is the funds identity; generate extra (e.g. signing) wallets.
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
     const result = await this.post<AuthResult>("register", {
@@ -303,11 +331,14 @@ export class AuthClient {
   // --- Biometric ---
 
   /** Register a biometric (passkey) account; PRF/gate secret becomes the app key. */
-  async registerWithBiometric(params: { userName: string }): Promise<{ result: AuthResult; registration: PasskeyRegistration }> {
+  async registerWithBiometric(params: {
+    userName: string;
+  }): Promise<{ result: AuthResult; registration: PasskeyRegistration }> {
     const registration = await registerPasskey(this.config.webauthn, params.userName);
     const appKey = await derivePasskeySecret(registration);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
-    const identity = bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
+    const identity =
+      bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
 
     // Internal, login-resolvable identifier derived from the credential (never shown to the user).

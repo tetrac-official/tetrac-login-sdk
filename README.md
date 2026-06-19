@@ -1,14 +1,31 @@
-# @tetrac/login-sdk
+<div align="center">
 
-Reusable, **non-custodial** authentication SDK: **email/passkey**, **Web3 wallet**, and
-**biometric (WebAuthn PRF)** login, with **client-side wallet generation** built in.
-Storage runs on local **Redis** in dev and **Upstash / Vercel KV** in production.
+# 🔐 @tetrac/login-sdk
 
-Extracted from the `next-ttc` trading platform so any project can drop in the same auth.
+**Non-custodial authentication & embedded-wallet SDK** for Next.js / React —
+**email + passkey**, **Web3 wallet**, and **biometric (WebAuthn PRF)** login, with
+**client-side Solana / EVM wallet generation** and authenticated, client-side encryption.
 
-> Status: `v0.3.0` — see [`docs/PRD.md`](./docs/PRD.md) for the full product spec.
+[![npm version](https://img.shields.io/npm/v/@tetrac/login-sdk?logo=npm&color=cb3837)](https://www.npmjs.com/package/@tetrac/login-sdk)
+[![types](https://img.shields.io/npm/types/@tetrac/login-sdk?logo=typescript&logoColor=white)](https://www.npmjs.com/package/@tetrac/login-sdk)
+[![license](https://img.shields.io/npm/l/@tetrac/login-sdk?color=3da638)](#-license)
+[![node](https://img.shields.io/node/v/@tetrac/login-sdk?logo=node.js&logoColor=white)](https://nodejs.org)
+[![CI](https://github.com/tetrac-official/tetrac-login-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/tetrac-official/tetrac-login-sdk/actions/workflows/ci.yml)
 
-## Why
+[**npm**](https://www.npmjs.com/package/@tetrac/login-sdk) ·
+[Security policy](./SECURITY.md) ·
+[Crypto spec](./docs/CRYPTO_SPEC.md) ·
+[Threat model](./docs/THREAT_MODEL.md)
+
+</div>
+
+> **Keys never leave the browser in the clear.** Wallets are generated client-side and encrypted
+> with authenticated **AES-256-GCM** *before* anything is sent — the server only ever stores public
+> keys, ciphertext, and an ed25519 auth public key (never a private key, the encryption key, or a
+> passkey-derived secret). Storage runs on local **Redis** in dev and **Upstash / Vercel KV** in
+> production. Extracted from the `next-ttc` trading platform so any project can drop in the same auth.
+
+## ✨ Why
 
 - **Three login methods** behind one client.
 - **Wallets are generated in the browser** and encrypted (authenticated AES-256-GCM) under a key
@@ -18,7 +35,7 @@ Extracted from the `next-ttc` trading platform so any project can drop in the sa
 - **Deterministic recovery:** the same passkey+email (or the same wallet signature) re-derives
   the encryption key on any device, so wallets decrypt anywhere with zero server-side key storage.
 
-## Install
+## 📦 Install
 
 ```bash
 npm i @tetrac/login-sdk
@@ -32,7 +49,7 @@ npm i @upstash/redis     # Upstash (edge-friendly)
 npm i react next
 ```
 
-## Subpath exports
+## 🧩 Subpath exports
 
 | Import | Use in | Contents |
 |---|---|---|
@@ -44,7 +61,7 @@ npm i react next
 | `@tetrac/login-sdk/ui` | browser (optional) | `LoginPanel`, `ExportKeyPanel` |
 | `@tetrac/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
 
-## Server (Next.js App Router)
+## 🖥️ Server (Next.js App Router)
 
 ```ts
 // app/api/auth/[...action]/route.ts
@@ -62,7 +79,7 @@ headers (`ttc-auth-token` + `ttc-public-key`); the rest are public, though sever
 single-use challenge + signature **in the request body**. Unknown actions return `404`; only `GET`/`POST`
 are served.
 
-## Client (React)
+## ⚛️ Client (React)
 
 ```tsx
 import { AuthProvider, useAuth } from "@tetrac/login-sdk/react";
@@ -142,7 +159,7 @@ available standalone from `@tetrac/login-sdk/client`
 (`enableBiometricUnlock` / `unlockViaBiometric` / `disableBiometricUnlock` / `hasBiometricUnlock`)
 and as `AuthClient` methods. Full design: [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
 
-## Chain scope: Solana vs EVM
+## ⛓️ Chain scope: Solana vs EVM
 
 Both chains can have wallets generated and stored, but only one is an **authentication identity** — by design:
 
@@ -160,7 +177,7 @@ keypairs are *internally* generated (viem) and encrypted exactly like Solana wal
 only**, never as a login credential. The security boundary: **Solana = Web3 login identity; EVM (and any
 other generated keypair) = internal signing wallet only.**
 
-## Configuration
+## ⚙️ Configuration
 
 Override any subset via the `config` option on the route factory / `AuthClient`; unspecified fields
 fall back to `DEFAULT_CONFIG` (nested groups merge shallowly). Defaults shown:
@@ -215,7 +232,12 @@ KV_REST_API_URL= / KV_REST_API_TOKEN=    # Vercel KV REST
 UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
 ```
 
-## Security model
+## 🛡️ Security model
+
+> **Full docs:** [`SECURITY.md`](./SECURITY.md) (policy + supported runtimes/browsers) ·
+> [`docs/CRYPTO_SPEC.md`](./docs/CRYPTO_SPEC.md) (primitives, parameters, wire formats) ·
+> [`docs/THREAT_MODEL.md`](./docs/THREAT_MODEL.md) (threats, residual risks, integrator obligations).
+> Report vulnerabilities privately — see [`SECURITY.md`](./SECURITY.md).
 
 - Private keys: encrypted at rest with **authenticated AES-256-GCM** (Web Crypto) — a wrong key or any
   tampering throws on decrypt; never stored or transmitted in plaintext.
@@ -244,20 +266,27 @@ UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
   See [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
 - Sessions: opaque 256-bit bearer tokens, **single active session** (each login revokes the prior token),
   server-side TTL (**4h default**). `logout()` revokes via `POST /logout` with `keepalive` so it lands
-  during page unload.
+  during page unload. Optional `bindSessionToUserAgent` (default off) pins a session to `SHA-256(User-Agent)`
+  as defense-in-depth against stolen-token reuse — note a UA change (browser update) then forces re-login.
 - Rate limiting is **per-target** (e.g. `login:<email>`, `challenge:<id>`) plus a per-IP bucket when
   behind a trusted proxy (`trustProxyHeaders` / `trustedProxyHops`), so a flood on one target can't lock
   out everyone. Responses never echo credential secrets.
 
-## Develop
+## 🧪 Develop
 
 ```bash
-npm run build      # tsup -> ESM + CJS + d.ts
-npm test           # jest
-npm run typecheck  # tsc --noEmit
+npm run build         # tsup -> ESM + CJS + d.ts
+npm test              # jest
+npm run typecheck     # tsc --noEmit
+npm run format        # prettier --write . (code only; Markdown is .prettierignore'd)
+npm run format:check  # prettier --check . (CI gate)
 ```
 
-## Contributing
+Formatting is enforced in CI via `format:check`. Run `npm run format` before committing — an editor
+"format on save" with the Prettier extension (it picks up [`.prettierrc.json`](./.prettierrc.json)) keeps
+you green automatically.
+
+## 🤝 Contributing
 
 Every change — feature or bug fix — lands the same way: **write it down, prove it with a
 test, then make it pass.** The vault-singleton fix is the reference example end-to-end:
@@ -297,10 +326,10 @@ plain `tests/my-feature.ts` is silently ignored.
 
 ### 3. Implement until the full gate is green
 
-Run the gate from **Develop** above — **all three must pass, not just your test:**
+Run the gate from **Develop** above — **all of it must pass, not just your test:**
 
 ```bash
-npm run build && npm run typecheck && npm test
+npm run format:check && npm run typecheck && npm test && npm run build
 ```
 
 Don't weaken or delete an existing test to go green. If a test's intent legitimately changed
@@ -320,6 +349,6 @@ singleton.
 - Leave `version` in `package.json` alone unless the change is a release (bump it in its own
   step, not in every PR).
 
-## License
+## 📄 License
 
-MIT
+[MIT](./LICENSE) © Tetrac

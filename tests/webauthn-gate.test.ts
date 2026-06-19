@@ -21,10 +21,7 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (B3)", () => {
   it("round-trips a hex secret through a non-extractable AES-GCM key", async () => {
     const secretHex = toHex(crypto.getRandomValues(new Uint8Array(32)));
 
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv = crypto.getRandomValues(new Uint8Array(12));
 
     const ciphertext = await subtle.encrypt({ name: "AES-GCM", iv }, key, fromHex(secretHex));
@@ -36,19 +33,13 @@ describeCrypto("gate-mode AES-GCM wrap/unwrap (B3)", () => {
   });
 
   it("the wrapping key is non-extractable (exportKey rejects)", async () => {
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     expect(key.extractable).toBe(false);
     await expect(subtle.exportKey("raw", key)).rejects.toThrow();
   });
 
   it("decrypt fails when the ciphertext is tampered (GCM tag check)", async () => {
-    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, [
-      "encrypt",
-      "decrypt",
-    ]);
+    const key = await subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ciphertext = new Uint8Array(
       await subtle.encrypt({ name: "AES-GCM", iv }, key, fromHex("00".repeat(32))),

@@ -12,9 +12,7 @@ import type { EncryptedWallet } from "../core/types.js";
  * when no wallet is provided or the session is locked. Pass into
  * `createWalletClient({ account })` to get a full wallet client.
  */
-export function useEvmSigner(
-  wallet: EncryptedWallet | null | undefined,
-): LocalAccount | null {
+export function useEvmSigner(wallet: EncryptedWallet | null | undefined): LocalAccount | null {
   const { sign, unlocked } = useSigner();
 
   return useMemo(() => {
@@ -28,9 +26,7 @@ export function useEvmSigner(
       signMessage: ({ message }) =>
         sign(wallet, (pk) => privateKeyToAccount(pk as Hex).signMessage({ message })),
       signTransaction: (transaction, options) =>
-        sign(wallet, (pk) =>
-          privateKeyToAccount(pk as Hex).signTransaction(transaction, options),
-        ),
+        sign(wallet, (pk) => privateKeyToAccount(pk as Hex).signTransaction(transaction, options)),
       signTypedData: (typedData) =>
         sign(wallet, (pk) => privateKeyToAccount(pk as Hex).signTypedData(typedData)),
     });

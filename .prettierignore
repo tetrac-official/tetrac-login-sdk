@@ -1,0 +1,16 @@
+# Build output & deps
+dist
+coverage
+node_modules
+
+# Lockfiles & generated
+package-lock.json
+*.min.js
+
+# Editor/agent tooling — not project source
+.claude
+
+# Markdown is hand-formatted (audits, PRDs, and docs use intricate tables that
+# Prettier would reflow into noise). Format code, not prose. Remove this line if
+# you decide to bring docs under Prettier too.
+*.md

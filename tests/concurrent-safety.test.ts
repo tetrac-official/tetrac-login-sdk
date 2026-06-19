@@ -95,7 +95,7 @@ describe("session issuance revocation", () => {
     const h = createAuthHandlers({ storage });
 
     const appKey = "ab".repeat(32);
-    const pk = "SolSessionRevoke1111111111111111111111111";
+    const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
 
     await registerEmail(h, { publicKey: pk, email: "seq@test.com", appKey });
 
@@ -105,9 +105,7 @@ describe("session issuance revocation", () => {
     const body1 = await login1.json();
 
     // Verify first token works
-    const ud1 = await h.userData(
-      req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }),
-    );
+    const ud1 = await h.userData(req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }));
     expect(ud1.status).toBe(200);
 
     // Second login (sequential)
@@ -116,15 +114,11 @@ describe("session issuance revocation", () => {
     const body2 = await login2.json();
 
     // First token now revoked
-    const ud1After = await h.userData(
-      req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }),
-    );
+    const ud1After = await h.userData(req({}, { "ttc-auth-token": body1.authToken, "ttc-public-key": pk }));
     expect(ud1After.status).toBe(401);
 
     // Second token works
-    const ud2After = await h.userData(
-      req({}, { "ttc-auth-token": body2.authToken, "ttc-public-key": pk }),
-    );
+    const ud2After = await h.userData(req({}, { "ttc-auth-token": body2.authToken, "ttc-public-key": pk }));
     expect(ud2After.status).toBe(200);
   });
 });
@@ -139,8 +133,8 @@ describe("concurrent registration race", () => {
 
     // Two registrations with the SAME email but DIFFERENT public keys
     const [r1, r2] = await Promise.all([
-      makeReg("SolDup1_111111111111111111111111111111111"),
-      makeReg("SolDup2_222222222222222222222222222222222"),
+      makeReg("GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB"),
+      makeReg("2KW2XRd9kwqet15Aha2oK3tYvd3nWbTFH1MBiRAv1BE1"),
     ]);
 
     // The email collision check (routes.ts:129-132) runs before persistUser,
@@ -185,10 +179,7 @@ describe("concurrent connect-wallet upsert", () => {
       wallets: [{ chain: "solana", role: "funds", publicKey: pubKey, encryptedSecret: "CT" }],
     };
 
-    const [c1, c2] = await Promise.all([
-      h.connectWallet(req(cwBody)),
-      h.connectWallet(req(cwBody)),
-    ]);
+    const [c1, c2] = await Promise.all([h.connectWallet(req(cwBody)), h.connectWallet(req(cwBody))]);
 
     // Only one should succeed (201); the other fails because the
     // challenge was consumed by the first.

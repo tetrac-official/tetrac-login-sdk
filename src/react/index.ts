@@ -1,4 +1,9 @@
-export { AuthProvider, useAuthContext, type AuthContextValue, type AuthProviderProps } from "./AuthProvider.js";
+export {
+  AuthProvider,
+  useAuthContext,
+  type AuthContextValue,
+  type AuthProviderProps,
+} from "./AuthProvider.js";
 export { useAuth } from "./useAuth.js";
 export { useSigner } from "./useSigner.js";
 export { useSolanaSigner, type SolanaSigner } from "./useSolanaSigner.js";

@@ -41,13 +41,15 @@ Two practical consequences you MUST surface to the user before starting:
 | `<PrivyProvider appId config>` | `<AuthProvider apiBaseUrl config>` (from `@tetrac/login-sdk/react`) |
 | `usePrivy() → { ready, authenticated, user, login, logout }` | `useAuth() → { status, isAuthenticated, publicKey, email, logout, registerWithEmail, loginWithEmail, connectWallet, registerWithBiometric, ... }` |
 | `useWallets()` (Solana subpath) | `useAuth().publicKey` + `user.wallets` from `/api/auth/user-data` |
-| `useExportWallet({ address })` | `useSigner().decrypt(walletBlob)` or `withDecryptedKey(walletBlob, appKey, fn)` |
+| `useExportWallet({ address })` | `useExportKey(walletBlob).reveal(reauth)` — enforces a fresh re-auth ceremony (preferred); low-level: `useSigner().decrypt(walletBlob)` |
 | `embeddedWallets.solana.createOnLogin: "users-without-wallets"` | Automatic — `registerWithEmail` / `registerWithBiometric` / `connectWallet` generate the bundle |
 | `user.linkedAccounts.find(a => a.walletClientType === 'privy')` | `user.wallets.find(w => w.chain === "solana" && w.role === "funds")` |
 | `solanaWallet.signTransaction({ transaction: bytes })` | Build a `Keypair` via `useSigner().solanaKeypair(walletBlob)`, then `tx.partialSign(kp)` |
 | Privy's hosted UI / `appearance: {...}` | Build your own login UI; SDK is headless |
 
-Server-side: Privy talks to Privy's API. The SDK requires you to run its routes yourself — `createNextAuthRoutes({ storage })` at `app/api/auth/[...action]/route.ts`. See `docs/USE_IN_CODE.md` §3.
+Server-side: Privy talks to Privy's API. The SDK requires you to run its routes yourself — `createNextAuthRoutes({ storage })` at `app/api/auth/[...action]/route.ts`. See the README **Server (Next.js App Router)** section.
+
+> **Use the ready-made React hooks.** This skill predates several first-class hooks the SDK now ships from `@tetrac/login-sdk/react`: `useUser` / `useWallets` / `useActiveWallet` (load the user record + encrypted wallets — no hand-rolled fetch), `useSolanaSigner` / `useEvmSigner` (drop-in `@solana/wallet-adapter`-shaped signers), `useExportKey` (reveal a key behind a forced re-auth ceremony), and `useBiometricUnlock` (add Touch/Face-ID unlock to *any* account). The hand-written shims below still work and are useful when you need exact wallet-adapter API compatibility, but prefer the official hooks where you can — they track the SDK's security model (memory-only vault, auto-lock, re-auth-to-reveal) for you.
 
 ## Migration plan (file by file)
 
@@ -57,7 +59,7 @@ Run these in order. Each step is self-contained — verify before moving on.
 
 1. Confirm the user wants the OAuth methods dropped (or arrange a NextAuth bridge). Do this first; it shapes the rest of the work.
 2. Decide where the server routes live. Default is `app/api/auth/[...action]/route.ts`. The SDK serves every endpoint from that one catch-all.
-3. Pick a storage backend (Redis local / Upstash / Vercel KV) and add the env vars. See `docs/USE_IN_CODE.md` §2.
+3. Pick a storage backend (Redis local / Upstash / Vercel KV) and add the env vars. See the README **Install** + **Environment** sections.
 4. Install:
    ```bash
    npm i @tetrac/login-sdk @solana/web3.js viem tweetnacl
@@ -366,10 +368,59 @@ Mount it once near the root (inside `<AuthProvider>`). The Privy hosted modal's 
 
 The two Privy export sites in Shyft.lol are `src/app/export-key/page.tsx` (React Native WebView shell) and the Export Key button in `src/components/Profile.tsx`. Both call `useExportWallet().exportWallet({ address })`, which pops Privy's hosted reveal iframe.
 
-Replace with a **local reveal** — you decrypt the embedded wallet's encrypted secret and show it in your own UI. The plaintext lives on a `useState` for the duration of the reveal, then is cleared.
+Replace with a **local reveal** — your code decrypts the embedded wallet's secret and shows it in your own UI.
+
+**Preferred: `useExportKey`.** The SDK ships a reveal hook that mirrors Privy's "re-auth before reveal" behavior: `reveal(reauth)` runs a **fresh re-authentication ceremony every time**, derives a one-time key, never reads the ambient (possibly-unlocked) session key, and auto-clears the plaintext after 30s. Pass the creds for the account's auth method — `{ passkey }` (email), `{ signMessage }` (web3), or `{ registration }` / `{ biometricUnlock }` (biometric).
 
 ```tsx
-// src/app/export-key/page.tsx
+// src/app/export-key/page.tsx  (preferred — forced re-auth)
+"use client";
+import { useState } from "react";
+import { useAuth, useUser, useExportKey } from "@tetrac/login-sdk/react";
+
+export default function ExportKeyPage() {
+  const { isAuthenticated, status } = useAuth();
+  const { user } = useUser();                       // loaded record, no hand-rolled fetch
+  const solanaFunds = user?.wallets.find((w) => w.chain === "solana" && w.role === "funds");
+  const { reveal, plaintext, error, clear } = useExportKey(solanaFunds); // auto-clears after 30s
+  const [passkey, setPasskey] = useState("");
+
+  if (!isAuthenticated) return <p>Sign in first. (status: {status})</p>;
+
+  const onReveal = async () => {
+    try {
+      const secret = await reveal({ passkey });     // fresh ceremony; { signMessage } / { registration } for web3 / biometric
+      (window as any).ReactNativeWebView?.postMessage(JSON.stringify({ status: "success", privateKey: secret }));
+    } catch (err: any) {
+      (window as any).ReactNativeWebView?.postMessage(JSON.stringify({ status: "error", error: err?.message ?? "Export failed" }));
+    }
+  };
+
+  return (
+    <div>
+      <h1>Export Private Key</h1>
+      {error && <p>{error.message}</p>}
+      {!plaintext ? (
+        <>
+          <input type="password" value={passkey} onChange={(e) => setPasskey(e.target.value)} placeholder="re-enter passkey" />
+          <button onClick={onReveal}>Reveal private key</button>
+        </>
+      ) : (
+        <>
+          <code style={{ wordBreak: "break-all" }}>{plaintext}</code>
+          <button onClick={() => { navigator.clipboard.writeText(plaintext); setTimeout(() => navigator.clipboard.writeText(""), 30_000); }}>Copy</button>
+          <button onClick={clear}>Hide</button>
+        </>
+      )}
+    </div>
+  );
+}
+```
+
+**Lower-level alternative.** If you need to drive the decrypt yourself (custom state, the RN-WebView shell wiring below), `useSigner().sign(wallet, secret => secret)` works — but note it reads the **ambient unlocked vault key** and does NOT force a re-auth, so prefer `useExportKey`/`client.revealSecret(wallet, reauth)` whenever you want Privy-equivalent reveal friction:
+
+```tsx
+// src/app/export-key/page.tsx  (lower-level — uses the ambient session key, no forced re-auth)
 "use client";
 
 import { useEffect, useState } from "react";
@@ -454,11 +505,12 @@ export default function ExportKeyPage() {
 }
 ```
 
-For `Profile.tsx` — the same logic, just inline. Replace the existing `useExportWallet` import + `handleExportWallet` body with the `useSigner().sign(walletBlob, secret => secret)` pattern. The `isEmbeddedWallet` / `walletClientName` props already come through the new `useAuthWallet` hook, so the surrounding UI doesn't change.
+For `Profile.tsx` — the same logic, just inline. Replace the existing `useExportWallet` import + `handleExportWallet` body with `useExportKey(walletBlob).reveal(reauth)`. The `isEmbeddedWallet` / `walletClientName` props already come through the new `useAuthWallet` hook, so the surrounding UI doesn't change.
 
 Key UX differences from Privy worth surfacing in your UI:
-- Privy's reveal modal forces a re-auth ceremony. The SDK's `useSigner().sign(...)` will succeed silently if the app key is hot in `sessionStorage`. For the reveal flow specifically, consider calling `logout()` + force re-auth first if you want the same friction.
-- Privy's iframe sandbox protected the plaintext from XSS. With the SDK, an XSS in your page can read `revealed`. Treat the reveal route as security-sensitive (strong CSP, no untrusted third-party scripts on that route).
+- Privy's reveal modal forces a re-auth ceremony. **`useExportKey().reveal(reauth)` / `client.revealSecret(wallet, reauth)` give you the same friction by design** — they always re-run the ceremony and never use the ambient key. (The lower-level `useSigner().sign(...)` does NOT force re-auth; it operates on the in-memory vault key while it's unlocked.)
+- The app/encryption key is **memory-only** — it is NOT in `sessionStorage` or `localStorage`. It auto-locks after ~15s idle and on tab hide / page freeze / bfcache restore, after which signer/decrypt calls throw `VaultLockedError` until the user re-authenticates. (Only the bearer token + public key live in `localStorage`.)
+- Privy's iframe sandbox protected the plaintext from XSS. With the SDK, an XSS in your page can read the revealed plaintext while it's in state. Treat the reveal route as security-sensitive (strong CSP, no untrusted third-party scripts on that route).
 
 ### Step 6 — Sweep the remaining files
 
@@ -491,8 +543,9 @@ After the migration, walk through each one. Don't skip — Privy gave you a lot 
 - [ ] Biometric login (if enabled): registration completes, persisted `PasskeyRegistration` works on subsequent visits.
 - [ ] Anchor calls (`useProgram` etc.) still sign and submit successfully.
 - [ ] Export key page: reveal shows the plaintext, postMessage to RN WebView fires, the value disappears after the auto-clear timeout.
-- [ ] Logout clears the session and the `ttc_ek` `sessionStorage` entry.
-- [ ] Closing the tab and reopening sets `status` to `session_expired` (token survives in localStorage but appKey is gone) — re-login is required to spend.
+- [ ] Logout clears the bearer token + public key from `localStorage` and drops the in-memory app key (the key is never in `sessionStorage`/`localStorage` to begin with).
+- [ ] Closing the tab and reopening sets `status` to `session_expired` (token survives in localStorage but the memory-only appKey is gone) — re-login is required to spend.
+- [ ] Leaving the tab idle ~15s (or switching tabs) auto-locks the vault: `useSigner().unlocked` flips to false and signing throws `VaultLockedError` until re-auth.
 
 ## Gotchas specific to this migration
 

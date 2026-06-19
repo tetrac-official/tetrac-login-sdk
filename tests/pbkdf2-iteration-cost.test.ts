@@ -9,11 +9,7 @@
 //  - The config parameter is plumbed through correctly in authClient
 //  - A timing benchmark to demonstrate the linear cost difference between
 //    100k and 600k iterations (not a pass/fail, but a reported metric)
-import {
-  deriveAppKeyFromPasskey,
-  encryptSecret,
-  decryptSecret,
-} from "../src/core/crypto";
+import { deriveAppKeyFromPasskey, encryptSecret, decryptSecret } from "../src/core/crypto";
 import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig } from "../src/core/config";
 import { armAppKey, getAppKey, lockVault, configureVault } from "../src/client/session";
 
