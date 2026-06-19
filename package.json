@@ -1,6 +1,6 @@
 {
   "name": "@tetrac/login-sdk",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Reusable, non-custodial authentication SDK: email/passkey, Web3 wallet, and biometric (WebAuthn PRF) login with client-side wallet generation. Redis / Upstash / Vercel KV storage.",
   "license": "MIT",
   "homepage": "https://github.com/tetrac-official/tetrac-login-sdk#readme",
@@ -70,6 +70,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "smoke:biometric": "npm run build && node scripts/smoke-biometric.mjs",
+    "smoke:multiapp": "npm run build && node scripts/smoke-multi-app.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

@@ -22,10 +22,18 @@ export function jreq(body: unknown, headers: Record<string, string> = {}): Reque
 /** Register an email account the new way (stores authPublicKey, never a passkey hash). */
 export function registerEmail(
   h: Handlers,
-  opts: { email: string; appKey: string; publicKey: string; wallets?: unknown[]; pbkdf2Iterations?: number },
+  opts: {
+    email: string;
+    appKey: string;
+    publicKey: string;
+    wallets?: unknown[];
+    pbkdf2Iterations?: number;
+    appId?: string;
+  },
 ): Promise<Response> {
   return h.register(
     jreq({
+      appId: opts.appId,
       publicKey: opts.publicKey,
       email: opts.email,
       authPublicKey: deriveAuthPublicKey(opts.appKey),
@@ -37,8 +45,13 @@ export function registerEmail(
 }
 
 /** Log in an email account: challenge -> sign with the auth keypair -> login. */
-export async function loginEmail(h: Handlers, opts: { email: string; appKey: string }): Promise<Response> {
-  const ch = (await (await h.challenge(jreq({ email: opts.email }))).json()) as { challenge: string };
+export async function loginEmail(
+  h: Handlers,
+  opts: { email: string; appKey: string; appId?: string },
+): Promise<Response> {
+  const ch = (await (await h.challenge(jreq({ appId: opts.appId, email: opts.email }))).json()) as {
+    challenge: string;
+  };
   const signature = signAuthChallenge(opts.appKey, ch.challenge);
-  return h.login(jreq({ email: opts.email, signature, challenge: ch.challenge }));
+  return h.login(jreq({ appId: opts.appId, email: opts.email, signature, challenge: ch.challenge }));
 }

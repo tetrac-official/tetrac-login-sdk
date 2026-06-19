@@ -35,8 +35,15 @@ export interface GeneratedWalletBundle {
   evm?: ChainWallets;
 }
 
-/** Payload stored server-side under pubKey:{publicKey}. */
+/** Payload stored server-side under pubKey:{appId}:{publicKey}. */
 export interface UserData {
+  /**
+   * The app this record belongs to (multi-app isolation, v0.4.0). Pinned at
+   * registration and baked into every storage key for this user, so two apps
+   * sharing one Redis/Upstash DB never read or overwrite each other's records.
+   * Defaults to the server's config.appId when a request omits it (single-app).
+   */
+  appId: string;
   publicKey: string;
   email?: string;
   /**

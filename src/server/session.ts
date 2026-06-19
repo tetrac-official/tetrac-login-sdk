@@ -4,6 +4,7 @@ import type { StorageAdapter } from "../storage/adapter.js";
 import type { AuthConfig } from "../core/config.js";
 import type { UserData } from "../core/types.js";
 import { generateSessionToken, timingSafeEqual } from "../core/crypto.js";
+import { appScoped } from "./keys.js";
 
 // The session store value is normally just the owner's publicKey. When UA-binding is
 // enabled (config.bindSessionToUserAgent), it becomes "publicKey|fingerprint". Wallet
@@ -17,24 +18,31 @@ function decodeSessionValue(value: string): { publicKey: string; fingerprint?: s
   return i === -1 ? { publicKey: value } : { publicKey: value.slice(0, i), fingerprint: value.slice(i + 1) };
 }
 
-/** Persist UserData under pubKey:{publicKey} and (for email users) email->pubKey. */
+/**
+ * Persist UserData under pubKey:{appId}:{publicKey} and (for email users) merge
+ * {appId -> publicKey} into the email index hash. The pubKey key is scoped by
+ * `user.appId`, so the same wallet/email on a different app is an independent
+ * record. The email index key stays bare (`email:{address}`) so one email can
+ * answer every app it's registered on (HGETALL → { appId: publicKey }).
+ */
 export async function persistUser(
   storage: StorageAdapter,
   user: UserData,
   config: AuthConfig,
 ): Promise<void> {
-  await storage.set(`${config.keyPrefixes.pubKey}${user.publicKey}`, JSON.stringify(user));
+  await storage.set(appScoped(config.keyPrefixes.pubKey, user.appId, user.publicKey), JSON.stringify(user));
   if (user.email) {
-    await storage.set(`${config.keyPrefixes.email}${user.email.toLowerCase().trim()}`, user.publicKey);
+    await storage.hset(emailKey(user.email, config), user.appId, user.publicKey);
   }
 }
 
 export async function getUserByPublicKey(
   storage: StorageAdapter,
+  appId: string,
   publicKey: string,
   config: AuthConfig,
 ): Promise<UserData | null> {
-  const raw = await storage.get(`${config.keyPrefixes.pubKey}${publicKey}`);
+  const raw = await storage.get(appScoped(config.keyPrefixes.pubKey, appId, publicKey));
   if (!raw) return null;
   try {
     return JSON.parse(raw) as UserData;
@@ -45,10 +53,15 @@ export async function getUserByPublicKey(
 
 export async function resolvePublicKeyByEmail(
   storage: StorageAdapter,
+  appId: string,
   email: string,
   config: AuthConfig,
 ): Promise<string | null> {
-  return storage.get(`${config.keyPrefixes.email}${email.toLowerCase().trim()}`);
+  return storage.hget(emailKey(email, config), appId);
+}
+
+function emailKey(email: string, config: AuthConfig): string {
+  return `${config.keyPrefixes.email}${email.toLowerCase().trim()}`;
 }
 
 /**
@@ -66,11 +79,12 @@ export async function issueSession(
   // new one, so an old leaked token can't outlive the next login.
   const previous = user.authToken;
   if (typeof previous === "string" && previous) {
-    await revokeSession(storage, previous, config);
+    await revokeSession(storage, user.appId, previous, config);
   }
   const token = generateSessionToken();
   // token -> publicKey(|fingerprint) lookup so verifySession is O(1); expires with the configured TTL.
-  await storage.set(sessionKey(token, config), encodeSessionValue(user.publicKey, fingerprint), {
+  // The session key is app-scoped, so a token minted by one app is never honored by another.
+  await storage.set(sessionKey(user.appId, token, config), encodeSessionValue(user.publicKey, fingerprint), {
     exSeconds: config.sessionTtlSeconds,
   });
   user.authToken = token;
@@ -86,30 +100,32 @@ export async function issueSession(
  */
 export async function verifySession(
   storage: StorageAdapter,
+  appId: string,
   token: string | null | undefined,
   publicKey: string | null | undefined,
   config: AuthConfig,
   presentedFingerprint?: string,
 ): Promise<UserData | null> {
   if (!token || !publicKey) return null;
-  const value = await storage.get(sessionKey(token, config));
+  const value = await storage.get(sessionKey(appId, token, config));
   if (!value) return null;
   const { publicKey: owner, fingerprint: storedFp } = decodeSessionValue(value);
   if (owner !== publicKey) return null;
   if (storedFp && (!presentedFingerprint || !timingSafeEqual(storedFp, presentedFingerprint))) {
     return null;
   }
-  return getUserByPublicKey(storage, publicKey, config);
+  return getUserByPublicKey(storage, appId, publicKey, config);
 }
 
 export async function revokeSession(
   storage: StorageAdapter,
+  appId: string,
   token: string,
   config: AuthConfig,
 ): Promise<void> {
-  await storage.del(sessionKey(token, config));
+  await storage.del(sessionKey(appId, token, config));
 }
 
-function sessionKey(token: string, config: AuthConfig): string {
-  return `${config.keyPrefixes.session}${token}`;
+function sessionKey(appId: string, token: string, config: AuthConfig): string {
+  return appScoped(config.keyPrefixes.session, appId, token);
 }

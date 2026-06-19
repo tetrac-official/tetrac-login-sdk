@@ -172,7 +172,7 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
     // The victim's live session now lives under "session:<token>" (NOT "pubKey:session:<token>").
     const { body } = await registerUser(h, "victim@example.com");
     const token = body.authToken;
-    expect(await storage.get(`session:${token}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:ttc:${token}`)).toBe(body.publicKey);
 
     // An attacker can't even register publicKey="session:<token>" — strict Solana
     // validation rejects it (400, ':' isn't base58), so the namespace collision the
@@ -184,13 +184,13 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
       wallets: [],
     });
     expect(atk.status).toBe(400);
-    expect(await storage.get(`session:${token}`)).toBe(body.publicKey); // intact
+    expect(await storage.get(`session:ttc:${token}`)).toBe(body.publicKey); // intact
   });
 
   it("getUserByPublicKey guards JSON.parse — a non-JSON stored value yields null, not a crash", async () => {
     const storage = new MemoryAdapter();
-    await storage.set("pubKey:weird", "not-json{"); // malformed record
-    const user = await getUserByPublicKey(storage, "weird", DEFAULT_CONFIG);
+    await storage.set("pubKey:ttc:weird", "not-json{"); // malformed record
+    const user = await getUserByPublicKey(storage, "ttc", "weird", DEFAULT_CONFIG);
     expect(user).toBeNull();
   });
 });

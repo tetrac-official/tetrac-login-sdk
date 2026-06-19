@@ -170,17 +170,24 @@ export class AuthClient {
   private async post<T>(path: string, body: unknown, withAuth = false): Promise<T> {
     const res = await fetch(`${this.opts.apiBaseUrl}/${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(withAuth ? authHeaders() : {}) },
-      body: JSON.stringify(body),
+      headers: { "content-type": "application/json", ...(withAuth ? this.authHeaders() : {}) },
+      // appId rides in the body of every auth-flow call so the server scopes this
+      // app's records within a shared Redis/Upstash DB (multi-app, v0.4.0).
+      body: JSON.stringify({ appId: this.config.appId, ...(body as Record<string, unknown>) }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data as { error?: string }).error ?? `Request failed (${res.status})`);
     return data as T;
   }
 
+  /** Session + public-key + appId headers for authenticated requests. */
+  private authHeaders(): Record<string, string> {
+    return { ...authHeaders(), [this.config.appIdHeader]: this.config.appId };
+  }
+
   /** Fetch the authenticated user's full record (identity + encrypted wallets). */
   async fetchUserData(): Promise<UserData | null> {
-    const res = await fetch(`${this.opts.apiBaseUrl}/user-data`, { headers: authHeaders() });
+    const res = await fetch(`${this.opts.apiBaseUrl}/user-data`, { headers: this.authHeaders() });
     if (res.status === 401) return null;
     if (!res.ok) throw new Error(`user-data failed (${res.status})`);
     const data = (await res.json().catch(() => ({}))) as { user?: UserData };
@@ -409,7 +416,7 @@ export class AuthClient {
    * token, which fires a `storage` event that locks sibling tabs (CLIENTVAULT-7).
    */
   logout(): void {
-    const headers = authHeaders();
+    const headers = this.authHeaders();
     if (getAuthToken()) {
       void fetch(`${this.opts.apiBaseUrl}/logout`, { method: "POST", headers, keepalive: true }).catch(() => {
         /* best-effort — TTL is the backstop */

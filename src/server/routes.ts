@@ -39,9 +39,22 @@ export interface AuthHandlers {
 // --- request input validators (v0.2.1 Change 4) ---
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const HEX64_RE = /^[0-9a-f]{64}$/i;
+// appId is now attacker-influenced (request body / header), and it is concatenated
+// into Redis keys, so it must be validated BEFORE it ever reaches a key (v0.4.0).
+// The charset forbids ':' (the key-namespace separator) and whitespace, and bounds
+// the length, so a crafted appId can neither escape its namespace nor bloat keys.
+const APP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function validateEmail(email: string): string | null {
   if (email.length > 320 || !EMAIL_RE.test(email)) return "Invalid email format";
+  return null;
+}
+
+function validateAppId(appId: string, config: AuthConfig): string | null {
+  if (!appId || !APP_ID_RE.test(appId)) return "Invalid appId format";
+  // Optional production allowlist: reject any appId the deployment didn't declare,
+  // so an attacker can't mint arbitrary namespaces or probe tenants by guessing ids.
+  if (config.allowedAppIds && !config.allowedAppIds.includes(appId)) return "Unknown appId";
   return null;
 }
 
@@ -118,6 +131,15 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return hashUserAgent(req.headers.get("user-agent"));
   }
 
+  // Resolve the request's appId on authenticated routes from `appIdHeader`, falling
+  // back to config.appId for single-app deployments. Returns null when the supplied
+  // value is malformed (e.g. contains the ':' key separator) so the caller can fail
+  // closed (401) rather than build a key from attacker-controlled input (v0.4.0).
+  function headerAppId(req: Request): string | null {
+    const appId = req.headers.get(config.appIdHeader) ?? config.appId;
+    return validateAppId(appId, config) ? null : appId;
+  }
+
   // Client-safe copy of a user record: never echo the session token back to the
   // browser (it travels only in AuthResult.authToken). authPublicKey is public key
   // material, so it is safe to include.
@@ -153,7 +175,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     config,
 
     async challenge(req) {
-      const body = await readJson<{ publicKey?: string; email?: string }>(req);
+      const body = await readJson<{ appId?: string; publicKey?: string; email?: string }>(req);
+      const appId = body?.appId ?? config.appId;
+      const appErr = validateAppId(appId, config);
+      if (appErr) return error(appErr);
       if (body?.publicKey) {
         const e = validatePublicKey(body.publicKey);
         if (e) return error(e);
@@ -171,25 +196,26 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // lockout (H5); the residual per-target DoS is the developer's edge to own.
       const identifier = body?.publicKey ?? body?.email;
       if (identifier) {
-        const limited = await rateLimited(req, `challenge:${identifier}`);
+        const limited = await rateLimited(req, `challenge:${appId}:${identifier}`);
         if (limited) return limited;
       }
       // Wallet flow passes publicKey; email/biometric flow passes the account email
       // (or internal biometric id), which we resolve to the identity publicKey.
       let publicKey = body?.publicKey ?? null;
       if (!publicKey && body?.email) {
-        publicKey = await resolvePublicKeyByEmail(storage, body.email, config);
+        publicKey = await resolvePublicKeyByEmail(storage, appId, body.email, config);
       }
       if (!publicKey) return error("publicKey or email required");
-      const challenge = await issueChallenge(storage, publicKey, config);
+      const challenge = await issueChallenge(storage, appId, publicKey, config);
       // Email accounts also need their pinned PBKDF2 iteration count to re-derive the
       // appKey (and thus the auth keypair) before signing — public, not secret.
-      const user = body?.email ? await getUserByPublicKey(storage, publicKey, config) : null;
+      const user = body?.email ? await getUserByPublicKey(storage, appId, publicKey, config) : null;
       return json({ challenge, pbkdf2Iterations: user?.pbkdf2Iterations });
     },
 
     async register(req) {
       const body = await readJson<{
+        appId?: string;
         publicKey?: string;
         email?: string;
         authPublicKey?: string;
@@ -200,6 +226,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         pbkdf2Iterations?: number;
       }>(req);
       if (!body?.publicKey) return error("publicKey required");
+      const appId = body.appId ?? config.appId;
+      const appErr = validateAppId(appId, config);
+      if (appErr) return error(appErr);
       const pkErr = validatePublicKey(body.publicKey);
       if (pkErr) return error(pkErr);
       if (body.email) {
@@ -220,10 +249,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         return error("Invalid pbkdf2Iterations", 400);
       }
 
-      const limited = await rateLimited(req, `register:${body.email ?? body.publicKey}`);
+      const limited = await rateLimited(req, `register:${appId}:${body.email ?? body.publicKey}`);
       if (limited) return limited;
 
-      if (await getUserByPublicKey(storage, body.publicKey, config)) {
+      if (await getUserByPublicKey(storage, appId, body.publicKey, config)) {
         return error("Account already exists", 409);
       }
       // Email collision check. The client mints a fresh random publicKey on
@@ -234,8 +263,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // lets the client's "auto" mode fall back to loginWithEmail and recover
       // the original publicKey (the appKey is deterministic, so decryption of
       // the original wallets still succeeds).
+      // Per-APP email collision check: 409 only if THIS email already has an entry for
+      // THIS appId. The same email on a different app is fine — registration adds a new
+      // {appId -> publicKey} field to the shared email index instead of colliding (v0.4.0).
       if (body.email) {
-        const existing = await resolvePublicKeyByEmail(storage, body.email, config);
+        const existing = await resolvePublicKeyByEmail(storage, appId, body.email, config);
         if (existing) return error("Account already exists", 409);
       }
 
@@ -247,13 +279,14 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge)) {
           return error("Signature verification failed", 401);
         }
-        const ok = await consumeChallenge(storage, body.publicKey, body.challenge, config);
+        const ok = await consumeChallenge(storage, appId, body.publicKey, body.challenge, config);
         if (!ok) return error("Invalid or expired challenge", 401);
       } else if (!body.authPublicKey) {
         return error("authPublicKey required for email/biometric registration");
       }
 
       const user: UserData = {
+        appId,
         publicKey: body.publicKey,
         email: body.email,
         authPublicKey: body.authPublicKey,
@@ -272,10 +305,18 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     },
 
     async login(req) {
-      const body = await readJson<{ email?: string; signature?: string; challenge?: string }>(req);
+      const body = await readJson<{
+        appId?: string;
+        email?: string;
+        signature?: string;
+        challenge?: string;
+      }>(req);
       if (!body?.email || !body.signature || !body.challenge) {
         return error("email, signature and challenge required");
       }
+      const appId = body.appId ?? config.appId;
+      const appErr = validateAppId(appId, config);
+      if (appErr) return error(appErr);
 
       // Verify the signature FIRST, then rate-limit only on FAILURE. Two reasons:
       //  1. A valid login is never throttled, so an attacker spamming failed logins
@@ -285,26 +326,36 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       //     single-use challenge, so a junk signature can't burn a victim's pending
       //     challenge — only the real key-holder's request reaches consumeChallenge.
       // The server holds no passkey-derived secret; auth is proof-of-control of the key.
-      const publicKey = await resolvePublicKeyByEmail(storage, body.email, config);
-      const user = publicKey ? await getUserByPublicKey(storage, publicKey, config) : null;
+      const publicKey = await resolvePublicKeyByEmail(storage, appId, body.email, config);
+      const user = publicKey ? await getUserByPublicKey(storage, appId, publicKey, config) : null;
       const sigValid =
         !!user?.authPublicKey && verifyAuthSignature(user.authPublicKey, body.signature, body.challenge);
       const consumed =
-        sigValid && publicKey ? await consumeChallenge(storage, publicKey, body.challenge, config) : false;
+        sigValid && publicKey
+          ? await consumeChallenge(storage, appId, publicKey, body.challenge, config)
+          : false;
       if (user && sigValid && consumed) {
         await issueSession(storage, user, config, issueFingerprint(req));
         return json(asResult(user));
       }
-      const limited = await rateLimited(req, `login:${body.email}`);
+      const limited = await rateLimited(req, `login:${appId}:${body.email}`);
       if (limited) return limited;
       return error("Invalid credentials", 401);
     },
 
     async loginWallet(req) {
-      const body = await readJson<{ publicKey?: string; signature?: string; challenge?: string }>(req);
+      const body = await readJson<{
+        appId?: string;
+        publicKey?: string;
+        signature?: string;
+        challenge?: string;
+      }>(req);
       if (!body?.publicKey || !body.signature || !body.challenge) {
         return error("publicKey, signature and challenge required");
       }
+      const appId = body.appId ?? config.appId;
+      const appErr = validateAppId(appId, config);
+      if (appErr) return error(appErr);
       const pkErr = validatePublicKey(body.publicKey);
       if (pkErr) return error(pkErr);
 
@@ -313,17 +364,17 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // wallet login is never throttled by an attacker's failed attempts.
       const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge);
       const consumed = sigValid
-        ? await consumeChallenge(storage, body.publicKey, body.challenge, config)
+        ? await consumeChallenge(storage, appId, body.publicKey, body.challenge, config)
         : false;
       if (sigValid && consumed) {
-        const user = await getUserByPublicKey(storage, body.publicKey, config);
+        const user = await getUserByPublicKey(storage, appId, body.publicKey, config);
         // A valid signature proves key ownership; a missing account is not an attack,
         // so don't feed the failure counter — just report it.
         if (!user) return error("Wallet not registered", 404);
         await issueSession(storage, user, config, issueFingerprint(req));
         return json(asResult(user));
       }
-      const limited = await rateLimited(req, `login:${body.publicKey}`);
+      const limited = await rateLimited(req, `login:${appId}:${body.publicKey}`);
       if (limited) return limited;
       return error("Invalid credentials", 401);
     },
@@ -334,6 +385,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     // deterministic key and must not be overwritten).
     async connectWallet(req) {
       const body = await readJson<{
+        appId?: string;
         publicKey?: string;
         signature?: string;
         challenge?: string;
@@ -342,6 +394,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!body?.publicKey || !body.signature || !body.challenge) {
         return error("publicKey, signature and challenge required");
       }
+      const appId = body.appId ?? config.appId;
+      const appErr = validateAppId(appId, config);
+      if (appErr) return error(appErr);
       const pkErr = validatePublicKey(body.publicKey);
       if (pkErr) return error(pkErr);
       if (body.wallets !== undefined) {
@@ -354,18 +409,19 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // attacker's failed attempts.
       const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge);
       const consumed = sigValid
-        ? await consumeChallenge(storage, body.publicKey, body.challenge, config)
+        ? await consumeChallenge(storage, appId, body.publicKey, body.challenge, config)
         : false;
       if (!(sigValid && consumed)) {
-        const limited = await rateLimited(req, `connect:${body.publicKey}`);
+        const limited = await rateLimited(req, `connect:${appId}:${body.publicKey}`);
         if (limited) return limited;
         return error("Invalid credentials", 401);
       }
 
-      let user = await getUserByPublicKey(storage, body.publicKey, config);
+      let user = await getUserByPublicKey(storage, appId, body.publicKey, config);
       const isNew = !user;
       if (!user) {
         user = {
+          appId,
           publicKey: body.publicKey,
           authMethod: "wallet",
           wallets: body.wallets ?? [],
@@ -386,38 +442,51 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     // Revoke the current session. Always returns 200 { ok: true } and never leaks
     // whether the presented token was valid.
     async logout(req) {
+      const appId = headerAppId(req);
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
-      if (user && token) await revokeSession(storage, token, config);
+      const user = appId
+        ? await verifySession(storage, appId, token, publicKey, config, reqFingerprint(req))
+        : null;
+      if (appId && user && token) await revokeSession(storage, appId, token, config);
       return json({ ok: true });
     },
 
     async userData(req) {
+      const appId = headerAppId(req);
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
+      const user = appId
+        ? await verifySession(storage, appId, token, publicKey, config, reqFingerprint(req))
+        : null;
       if (!user) return error("Unauthorized", 401);
       return json({ user: publicUser(user) });
     },
 
     async searchWallet(req) {
-      const publicKey = new URL(req.url).searchParams.get("publicKey");
+      const url = new URL(req.url);
+      const publicKey = url.searchParams.get("publicKey");
       if (!publicKey) return error("publicKey required");
+      const appId = url.searchParams.get("appId") ?? config.appId;
+      const appErr = validateAppId(appId, config);
+      if (appErr) return error(appErr);
       const pkErr = validatePublicKey(publicKey);
       if (pkErr) return error(pkErr);
-      // Per-target rate limiting (see challenge): keyed by the queried publicKey so
-      // one abuser can't exhaust a shared bucket and block all existence lookups.
-      const limited = await rateLimited(req, `search:${publicKey}`);
+      // Per-target rate limiting (see challenge): keyed by the queried (app, publicKey)
+      // so one abuser can't exhaust a shared bucket and block all existence lookups.
+      const limited = await rateLimited(req, `search:${appId}:${publicKey}`);
       if (limited) return limited;
-      const user = await getUserByPublicKey(storage, publicKey, config);
+      const user = await getUserByPublicKey(storage, appId, publicKey, config);
       return user ? json({ exists: true }) : error("Wallet not found", 404);
     },
 
     async importWallet(req) {
+      const appId = headerAppId(req);
       const token = req.headers.get(config.sessionHeader);
       const publicKey = req.headers.get(config.publicKeyHeader);
-      const user = await verifySession(storage, token, publicKey, config, reqFingerprint(req));
+      const user = appId
+        ? await verifySession(storage, appId, token, publicKey, config, reqFingerprint(req))
+        : null;
       if (!user) return error("Unauthorized", 401);
 
       const body = await readJson<{ wallets?: EncryptedWallet[] }>(req);
