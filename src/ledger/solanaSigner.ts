@@ -8,7 +8,7 @@
 // This module is pure (no React) so it can be unit-tested without a device:
 // inject the two raw device methods and it produces a full signer.
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
-import { encodeOffchainMessage } from "../core/offchainMessage.js";
+import { offchainMessageCandidates } from "../core/offchainMessage.js";
 import type { SolanaSigner } from "../react/useSolanaSigner.js";
 
 export interface LedgerSolanaSignerDeps {
@@ -75,9 +75,25 @@ export function createLedgerSolanaSigner(deps: LedgerSolanaSignerDeps): SolanaSi
       for (const tx of txs) signed.push(await signOne(tx));
       return signed;
     },
+    // The accepted off-chain envelope depends on the device's firmware, with no
+    // negotiation — so cascade over the known layouts (legacy first, then v0),
+    // falling back ONLY when the device rejects the header with 0x6a81. Any other
+    // failure (user rejected, locked, blind-sign required) surfaces immediately.
     signMessage: async (message: Uint8Array): Promise<Uint8Array> => {
-      const envelope = encodeOffchainMessage(message, publicKey.toBytes());
-      return assert64(await deps.signOffchainMessage(deps.path, envelope));
+      const candidates = offchainMessageCandidates(message, publicKey.toBytes());
+      let lastError: unknown;
+      for (const envelope of candidates) {
+        try {
+          return assert64(await deps.signOffchainMessage(deps.path, envelope));
+        } catch (err) {
+          lastError = err;
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!msg.includes("0x6a81")) throw err; // not a header rejection — stop.
+        }
+      }
+      throw lastError instanceof Error
+        ? lastError
+        : new Error("Ledger rejected every known off-chain message format (0x6a81).");
     },
   };
 }

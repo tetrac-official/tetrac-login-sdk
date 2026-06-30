@@ -12,9 +12,14 @@ export {
 } from "./useSolanaLedger.js";
 export { createLedgerSolanaSigner, type LedgerSolanaSignerDeps } from "./solanaSigner.js";
 export { createLedgerTransport, mapLedgerDeviceError } from "./transport.js";
-// The off-chain envelope encoder now lives in /core (shared with the server
+// The off-chain envelope encoders now live in /core (shared with the server
 // verifier); re-exported here so /ledger consumers keep a single import surface.
-export { encodeOffchainMessage, type EncodeOffchainMessageOptions } from "../core/offchainMessage.js";
+export {
+  encodeOffchainMessage,
+  encodeOffchainMessageLegacy,
+  offchainMessageCandidates,
+  type EncodeOffchainMessageOptions,
+} from "../core/offchainMessage.js";
 // Re-export the signer shape so a consumer can type a Ledger signer without
 // reaching into the /react subpath.
 export type { SolanaSigner } from "../react/useSolanaSigner.js";

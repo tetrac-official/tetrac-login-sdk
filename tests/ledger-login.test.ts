@@ -18,6 +18,7 @@ import {
   walletLoginMessage,
   walletAppKeyMessage,
   encodeOffchainMessage,
+  encodeOffchainMessageLegacy,
   deriveAppKeyFromSignature,
   generateChallenge,
 } from "../src/core/index";
@@ -29,9 +30,13 @@ const toHex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 function softwareSign(kp: Keypair, message: Uint8Array): Uint8Array {
   return nacl.sign.detached(message, kp.secretKey);
 }
+// Legacy is what the cascade tries first (and most deployed Ledger apps accept).
 function ledgerSign(kp: Keypair, message: Uint8Array): Uint8Array {
-  const envelope = encodeOffchainMessage(message, kp.publicKey.toBytes());
-  return nacl.sign.detached(envelope, kp.secretKey);
+  return nacl.sign.detached(encodeOffchainMessageLegacy(message), kp.secretKey);
+}
+// V0 is the newer-firmware layout (embeds the signer pubkey).
+function ledgerSignV0(kp: Keypair, message: Uint8Array): Uint8Array {
+  return nacl.sign.detached(encodeOffchainMessage(message, kp.publicKey.toBytes()), kp.secretKey);
 }
 
 describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () => {
@@ -42,11 +47,18 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
     expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge)).toBe(true);
   });
 
-  it("accepts a Ledger's OFF-CHAIN envelope signature (fixes the 401)", () => {
+  it("accepts a Ledger LEGACY off-chain signature (fixes the 401 on deployed firmware)", () => {
     const kp = Keypair.generate();
     const challenge = generateChallenge();
     const sig = ledgerSign(kp, enc(walletLoginMessage(challenge)));
     // Before the fix this returned false → 401 Invalid credentials.
+    expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge)).toBe(true);
+  });
+
+  it("accepts a Ledger V0 off-chain signature (newer firmware)", () => {
+    const kp = Keypair.generate();
+    const challenge = generateChallenge();
+    const sig = ledgerSignV0(kp, enc(walletLoginMessage(challenge)));
     expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge)).toBe(true);
   });
 

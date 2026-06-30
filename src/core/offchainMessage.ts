@@ -1,26 +1,32 @@
-// Solana off-chain message (v0) envelope encoder — shared by the client Ledger
+// Solana off-chain message envelope encoders — shared by the client Ledger
 // signer (to build what the device signs) AND the server verifier (to
 // reconstruct the same preimage and accept a hardware-wallet login signature).
 // Lives in /core because it is pure, framework-agnostic byte work (no DOM, no
 // React, no @ledgerhq) used on both sides of the wire.
 //
-// It builds the exact byte preimage the Ledger Solana app parses and signs in
-// `signOffchainMessage` (INS 0x07). The layout is fixed by the device firmware
-// (`parse_offchain_message_header`), NOT by hw-app-solana — that library only
-// prepends the derivation path and chunks the buffer, so the caller MUST supply
-// the fully-formed envelope. The result is a standards-compliant Solana
-// off-chain message signature (same preimage as `solana sign-offchain-message`),
-// which verifies against this envelope — NOT against the raw message bytes.
+// THERE ARE TWO REAL-WORLD LAYOUTS. The Ledger Solana app's accepted format
+// depends on its firmware version, and there is no negotiation handshake — the
+// device rejects an unexpected header with status 0x6a81. So callers must try
+// the layouts in order (see offchainMessageCandidates) and verifiers must accept
+// any of them. This mirrors LedgerHQ's own device-sdk-ts v0→legacy fallback.
 //
-// V0 single-signer layout (header = 85 bytes, then the message):
-//   signing domain   16 bytes  0xFF "solana offchain"
-//   header version    1 byte   0x00
-//   application domain 32 bytes (all-zero = "no domain"; safe default)
-//   message format    1 byte   0 = RestrictedAscii, 1 = LimitedUtf8
-//   signer count      1 byte   0x01
-//   signer pubkey    32 bytes  the signing account (device checks it matches the path)
-//   message length    2 bytes  u16 little-endian (must equal the real length, != 0)
-//   message          <length> bytes
+//   LEGACY (older / currently most-deployed Solana app; the `solana
+//   sign-offchain-message` CLI format) — 20-byte header:
+//     signing domain   16  0xFF "solana offchain"
+//     header version    1  0x00
+//     message format    1  0 = RestrictedAscii, 1 = LimitedUtf8
+//     message length    2  u16 little-endian
+//     message          <length>
+//
+//   V0 / ANZA spec (newer firmware) — 85-byte header (single signer):
+//     signing domain   16  0xFF "solana offchain"
+//     header version    1  0x00
+//     application domain 32 (all-zero = "no domain")
+//     message format    1
+//     signer count      1  0x01
+//     signer pubkey    32  the signing account
+//     message length    2  u16 little-endian
+//     message          <length>
 //
 // Uint8Array-only: the SDK never relies on a global `Buffer`, which is not
 // reliably present in Next.js App Router client components.
@@ -41,7 +47,7 @@ const FORMAT_LIMITED_UTF8 = 0x01;
 const DEFAULT_MAX_MESSAGE_BYTES = 1212;
 
 export interface EncodeOffchainMessageOptions {
-  /** 32-byte application domain. Defaults to all-zero ("no domain"). */
+  /** 32-byte application domain (V0 layout only). Defaults to all-zero ("no domain"). */
   applicationDomain?: Uint8Array;
   /**
    * Allow a non-ASCII but valid UTF-8 message (format = LimitedUtf8). The device
@@ -53,7 +59,7 @@ export interface EncodeOffchainMessageOptions {
   maxMessageBytes?: number;
 }
 
-/** Printable ASCII (0x20–0x7e) plus newline (0x0a) — what the V0 RestrictedAscii format allows. */
+/** Printable ASCII (0x20–0x7e) plus newline (0x0a) — what the RestrictedAscii format allows. */
 function isPrintableAscii(bytes: Uint8Array): boolean {
   for (const c of bytes) {
     if (c === 0x0a) continue;
@@ -62,26 +68,12 @@ function isPrintableAscii(bytes: Uint8Array): boolean {
   return true;
 }
 
-/**
- * Build the V0 off-chain message envelope the Ledger Solana app validates and
- * signs. `signerPublicKey` must be the 32-byte ed25519 key of the signing
- * account (the device rejects the request if it doesn't match the path).
- *
- * @throws if the pubkey isn't 32 bytes, the message is empty/too long, or the
- *         message isn't ASCII (unless `allowUtf8` is set).
- */
-export function encodeOffchainMessage(
+/** Validate the message and resolve its format byte (shared by both layouts). */
+function prepareMessage(
   message: Uint8Array | string,
-  signerPublicKey: Uint8Array,
-  options: EncodeOffchainMessageOptions = {},
-): Uint8Array {
+  options: EncodeOffchainMessageOptions,
+): { msg: Uint8Array; format: number } {
   const msg = typeof message === "string" ? new TextEncoder().encode(message) : message;
-
-  if (signerPublicKey.length !== 32) {
-    throw new Error(
-      `Ledger off-chain message: signer public key must be 32 bytes (got ${signerPublicKey.length}).`,
-    );
-  }
   if (msg.length === 0) {
     throw new Error("Ledger off-chain message: message must be non-empty.");
   }
@@ -91,29 +83,71 @@ export function encodeOffchainMessage(
       `Ledger off-chain message: ${msg.length} bytes exceeds the ${maxLen}-byte on-device limit.`,
     );
   }
-
-  let format: number;
-  if (isPrintableAscii(msg)) {
-    format = FORMAT_RESTRICTED_ASCII;
-  } else if (options.allowUtf8) {
+  if (isPrintableAscii(msg)) return { msg, format: FORMAT_RESTRICTED_ASCII };
+  if (options.allowUtf8) {
     try {
       new TextDecoder("utf-8", { fatal: true }).decode(msg);
     } catch {
       throw new Error("Ledger off-chain message: message is not valid UTF-8.");
     }
-    format = FORMAT_LIMITED_UTF8;
-  } else {
+    return { msg, format: FORMAT_LIMITED_UTF8 };
+  }
+  throw new Error(
+    "Ledger off-chain message: only printable ASCII (and newlines) are supported by default. Pass { allowUtf8: true } to sign UTF-8 (the device then requires Blind Signing).",
+  );
+}
+
+function u16le(out: Uint8Array, offset: number, value: number): void {
+  out[offset] = value & 0xff;
+  out[offset + 1] = (value >> 8) & 0xff;
+}
+
+/**
+ * LEGACY off-chain message envelope (20-byte header) — the format the currently
+ * most-deployed Ledger Solana app (and the `solana sign-offchain-message` CLI)
+ * accepts. No application domain, no signer list.
+ */
+export function encodeOffchainMessageLegacy(
+  message: Uint8Array | string,
+  options: EncodeOffchainMessageOptions = {},
+): Uint8Array {
+  const { msg, format } = prepareMessage(message, options);
+  const out = new Uint8Array(20 + msg.length);
+  let o = 0;
+  out.set(SIGNING_DOMAIN, o);
+  o += SIGNING_DOMAIN.length;
+  out[o++] = HEADER_VERSION_V0;
+  out[o++] = format;
+  u16le(out, o, msg.length);
+  o += 2;
+  out.set(msg, o);
+  return out;
+}
+
+/**
+ * V0 / Anza-spec off-chain message envelope (85-byte single-signer header) the
+ * newer Ledger Solana firmware validates. `signerPublicKey` must be the 32-byte
+ * ed25519 key of the signing account.
+ *
+ * @throws if the pubkey isn't 32 bytes, the message is empty/too long, or the
+ *         message isn't ASCII (unless `allowUtf8` is set).
+ */
+export function encodeOffchainMessage(
+  message: Uint8Array | string,
+  signerPublicKey: Uint8Array,
+  options: EncodeOffchainMessageOptions = {},
+): Uint8Array {
+  if (signerPublicKey.length !== 32) {
     throw new Error(
-      "Ledger off-chain message: only printable ASCII (and newlines) are supported by default. Pass { allowUtf8: true } to sign UTF-8 (the device then requires Blind Signing).",
+      `Ledger off-chain message: signer public key must be 32 bytes (got ${signerPublicKey.length}).`,
     );
   }
-
+  const { msg, format } = prepareMessage(message, options);
   const appDomain = options.applicationDomain ?? new Uint8Array(APPLICATION_DOMAIN_LEN);
   if (appDomain.length !== APPLICATION_DOMAIN_LEN) {
     throw new Error(`Ledger off-chain message: applicationDomain must be ${APPLICATION_DOMAIN_LEN} bytes.`);
   }
 
-  // 16 + 1 + 32 + 1 + 1 + 32 + 2 = 85-byte header, then the message body.
   const out = new Uint8Array(85 + msg.length);
   let o = 0;
   out.set(SIGNING_DOMAIN, o);
@@ -125,8 +159,25 @@ export function encodeOffchainMessage(
   out[o++] = 0x01; // signer count
   out.set(signerPublicKey, o);
   o += 32;
-  out[o++] = msg.length & 0xff; // u16 little-endian length
-  out[o++] = (msg.length >> 8) & 0xff;
+  u16le(out, o, msg.length);
+  o += 2;
   out.set(msg, o);
   return out;
+}
+
+/**
+ * Every off-chain envelope a Ledger might sign for `message`, in the order a
+ * client should try them (legacy first — what most deployed apps accept; v0 for
+ * newer firmware). A signer cascades over these (falling back when the device
+ * returns 0x6a81), and a verifier accepts a signature matching ANY of them.
+ */
+export function offchainMessageCandidates(
+  message: Uint8Array | string,
+  signerPublicKey: Uint8Array,
+  options: EncodeOffchainMessageOptions = {},
+): Uint8Array[] {
+  return [
+    encodeOffchainMessageLegacy(message, options),
+    encodeOffchainMessage(message, signerPublicKey, options),
+  ];
 }
