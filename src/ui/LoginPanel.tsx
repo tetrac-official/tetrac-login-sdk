@@ -21,6 +21,7 @@ export function LoginPanel(props: LoginPanelProps) {
     onSuccess,
     onError,
     walletConnector,
+    hardwareWallet,
     passkeyRegistration,
     onPasskeyRegistered,
     biometricUserName = "tetrac-user",
@@ -85,6 +86,7 @@ export function LoginPanel(props: LoginPanelProps) {
           <WalletMethod
             key="wallet"
             connector={walletConnector}
+            hardwareWallet={hardwareWallet}
             icon={icons?.wallet}
             styles={styles}
             classNames={classNames}

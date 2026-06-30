@@ -160,6 +160,34 @@ available standalone from `@tetrac/login-sdk/client`
 (`enableBiometricUnlock` / `unlockViaBiometric` / `disableBiometricUnlock` / `hasBiometricUnlock`)
 and as `AuthClient` methods. Full design: [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
 
+### Hardware wallets (Ledger) through the stock UI
+
+`<LoginPanel>` and `<ExportKeyPanel>` support hardware-backed wallet accounts (e.g. a Ledger behind
+Phantom) via an optional `hardwareWallet` flag. The flag selects the newline-free, clear-signable
+app-key message; **the SDK does not detect hardware itself** — the app decides (a probe, a
+wallet-adapter signal like `adapter.name === "Ledger"`, or a user toggle) and reports the boolean,
+exactly as it already supplies `signMessage`.
+
+The one rule: **pass the *same* `hardwareWallet` value at login and at reveal** (and any
+`reauthenticate`) for a given account. The app key is re-derived each time; a mismatch derives a
+different key and the reveal fails with `wrong credentials` even though login "succeeded". Detect
+once per account, persist it keyed by public key, and report it consistently.
+
+```tsx
+// Login: the connector reports the encoding it used (wins), or pass a panel-level fallback.
+const connector: WalletConnector = {
+  connect: async () => ({ publicKey, signMessage, hardwareWallet: isLedger }),
+};
+<LoginPanel methods={["wallet"]} walletConnector={connector} /* hardwareWallet={isLedger} */ />;
+
+// Reveal: pass the SAME flag the account logged in with.
+<ExportKeyPanel wallet={wallet} walletSignMessage={signMessage} hardwareWallet={isLedger} />;
+```
+
+Both fields are optional and default to today's software-wallet behaviour — omit them and nothing
+changes. See [`docs/LEDGER_UI_SUPPORT_PRD.md`](./docs/LEDGER_UI_SUPPORT_PRD.md) and
+[`docs/LEDGER_SUPPORT_PRD.md`](./docs/LEDGER_SUPPORT_PRD.md) §6 for the full consumer contract.
+
 ## ⛓️ Chain scope: Solana vs EVM
 
 Both chains can have wallets generated and stored, but only one is an **authentication identity** — by design:

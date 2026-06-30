@@ -9,6 +9,12 @@ import type { LoginPanelProps, WalletConnector } from "./types.js";
 
 export interface WalletMethodProps {
   connector: WalletConnector;
+  /**
+   * Fallback hardware-wallet hint. The connector's own `hardwareWallet` (if it
+   * returns one) wins; this is used only when the connector reports nothing.
+   * Defaults to false.
+   */
+  hardwareWallet?: boolean;
   icon?: React.ReactNode;
   styles: Record<string, CSSProperties>;
   classNames?: LoginPanelProps["classNames"];
@@ -16,7 +22,15 @@ export interface WalletMethodProps {
   onError: (err: Error) => void;
 }
 
-export function WalletMethod({ connector, icon, styles, classNames, onSuccess, onError }: WalletMethodProps) {
+export function WalletMethod({
+  connector,
+  hardwareWallet: hardwareWalletHint,
+  icon,
+  styles,
+  classNames,
+  onSuccess,
+  onError,
+}: WalletMethodProps) {
   const { connectWallet } = useAuth();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,9 +40,11 @@ export function WalletMethod({ connector, icon, styles, classNames, onSuccess, o
     setBusy(true);
     setError(null);
     try {
-      const { publicKey, signMessage } = await connector.connect();
+      const { publicKey, signMessage, hardwareWallet } = await connector.connect();
+      // Connector's own signal wins; fall back to the panel-level hint, else false.
+      const isHardware = hardwareWallet ?? hardwareWalletHint ?? false;
       // connectWallet = register if new, login if known — one round trip.
-      const result = await connectWallet({ publicKey, signMessage });
+      const result = await connectWallet({ publicKey, signMessage, hardwareWallet: isHardware });
       onSuccess(result);
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));

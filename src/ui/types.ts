@@ -19,6 +19,15 @@ export interface WalletConnector {
   connect: () => Promise<{
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    /**
+     * True when the connected account is hardware-backed (e.g. a Ledger behind
+     * Phantom). Selects the newline-free, clear-signable app-key message and the
+     * off-chain-envelope key derivation. The app determines this (probe / adapter
+     * signal / user toggle); the SDK does not detect it. MUST be the same value
+     * the app later passes to <ExportKeyPanel> / reauthenticate for this account,
+     * or the reveal derives a different key and fails with "wrong credentials".
+     */
+    hardwareWallet?: boolean;
   }>;
   /** Optional label override, e.g. "Continue with Phantom". */
   label?: string;
@@ -64,6 +73,15 @@ export interface LoginPanelProps {
 
   /** Required to render the "wallet" method — see `WalletConnector`. */
   walletConnector?: WalletConnector;
+
+  /**
+   * Default hardware-wallet hint for the wallet method. The connector's own
+   * `hardwareWallet` (if it returns one) wins; this is the fallback. Defaults to
+   * false. Pass `true` on a hardware-focused surface to avoid a detection
+   * round-trip. Whatever value ultimately drives login MUST match the value
+   * passed to <ExportKeyPanel hardwareWallet> for the same account (see §1.3).
+   */
+  hardwareWallet?: boolean;
 
   /**
    * Optional icon rendered inside each method's button, keyed by method. The SDK
@@ -173,6 +191,12 @@ export interface ExportKeyPanelProps {
    * message to re-derive the key. Provide the connected wallet's signMessage.
    */
   walletSignMessage?: (message: Uint8Array) => Promise<Uint8Array>;
+  /**
+   * For a hardware-backed **wallet** account, re-derive the reveal key from the
+   * newline-free message. MUST match the value used at login for this account,
+   * or the reveal derives a different key and fails with "wrong credentials".
+   */
+  hardwareWallet?: boolean;
 
   /** Class on the outer container. */
   className?: string;
