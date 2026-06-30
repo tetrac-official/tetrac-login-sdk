@@ -45,6 +45,7 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
     description,
     passkeyRegistration,
     walletSignMessage,
+    hardwareWallet,
     className,
     classNames,
     styles: stylesOverride,
@@ -174,7 +175,7 @@ export function ExportKeyPanel(props: ExportKeyPanelProps) {
             type="button"
             className={classNames?.primaryButton}
             style={styles.primaryButton}
-            onClick={() => walletSignMessage && doReveal({ signMessage: walletSignMessage })}
+            onClick={() => walletSignMessage && doReveal({ signMessage: walletSignMessage, hardwareWallet })}
             disabled={loading || !walletSignMessage}
           >
             {loading ? "…" : "Sign with your wallet to reveal"}

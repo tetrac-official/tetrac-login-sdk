@@ -1,6 +1,6 @@
 {
   "name": "@tetrac/login-sdk",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Reusable, non-custodial authentication SDK: email/passkey, Web3 wallet, and biometric (WebAuthn PRF) login with client-side wallet generation. Redis / Upstash / Vercel KV storage.",
   "license": "MIT",
   "homepage": "https://github.com/tetrac-official/tetrac-login-sdk#readme",
