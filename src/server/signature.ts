@@ -1,7 +1,7 @@
 // Server-side Web3 signature verification (Solana, ed25519 via tweetnacl).
 import { PublicKey } from "@solana/web3.js";
 import nacl from "tweetnacl";
-import { walletLoginMessage, authLoginMessage } from "../core/index.js";
+import { walletLoginMessage, authLoginMessage, encodeOffchainMessage } from "../core/index.js";
 
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
@@ -20,6 +20,19 @@ function hexToBytes(hex: string): Uint8Array {
 /**
  * Verify that `signatureHex` is a valid signature, by `publicKeyBase58`, over the
  * canonical wallet-login message built from `challenge`.
+ *
+ * Accepts BOTH encodings, trying the cheap one first:
+ *  1. RAW — software wallets (Phantom et al.) sign the message bytes directly.
+ *     Byte-identical to the original behavior; software accounts are unaffected.
+ *  2. OFF-CHAIN — hardware wallets (Ledger) cannot sign raw bytes; they sign the
+ *     Solana off-chain message envelope. The login message is pure ASCII, so the
+ *     server reconstructs the V0 (format-0, zero app-domain) envelope — embedding
+ *     THIS request's pubkey as the signer — and verifies against that.
+ *
+ * The off-chain attempt is NOT a trust widening: both preimages embed the
+ * single-use `challenge`, and the envelope embeds `pubKeyBytes` as the signer, so
+ * a forged signature or a mismatched signer still fails. Replay protection
+ * (single-use challenge) is unchanged.
  */
 export function verifySolanaSignature(
   publicKeyBase58: string,
@@ -30,7 +43,12 @@ export function verifySolanaSignature(
     const message = new TextEncoder().encode(walletLoginMessage(challenge));
     const sig = hexToBytes(signatureHex);
     const pubKeyBytes = new PublicKey(publicKeyBase58).toBytes();
-    return nacl.sign.detached.verify(message, sig, pubKeyBytes);
+    // 1) Raw (software wallets) — the default, unchanged path.
+    if (nacl.sign.detached.verify(message, sig, pubKeyBytes)) return true;
+    // 2) Off-chain envelope (hardware wallets). encodeOffchainMessage throws on a
+    //    non-ASCII/oversized message; the outer catch turns that into `false`.
+    const envelope = encodeOffchainMessage(message, pubKeyBytes);
+    return nacl.sign.detached.verify(envelope, sig, pubKeyBytes);
   } catch {
     return false;
   }

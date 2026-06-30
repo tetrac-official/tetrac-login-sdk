@@ -1,6 +1,6 @@
 {
   "name": "@tetrac/login-sdk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Reusable, non-custodial authentication SDK: email/passkey, Web3 wallet, and biometric (WebAuthn PRF) login with client-side wallet generation. Redis / Upstash / Vercel KV storage.",
   "license": "MIT",
   "homepage": "https://github.com/tetrac-official/tetrac-login-sdk#readme",
@@ -59,6 +59,11 @@
       "types": "./dist/ui/index.d.ts",
       "import": "./dist/ui/index.js",
       "require": "./dist/ui/index.cjs"
+    },
+    "./ledger": {
+      "types": "./dist/ledger/index.d.ts",
+      "import": "./dist/ledger/index.js",
+      "require": "./dist/ledger/index.cjs"
     }
   },
   "scripts": {
@@ -77,6 +82,10 @@
     "@noble/hashes": "2.2.0"
   },
   "peerDependencies": {
+    "@ledgerhq/hw-app-solana": "^7.10.4",
+    "@ledgerhq/hw-transport": "^6.31.0",
+    "@ledgerhq/hw-transport-webhid": "^6.34.0",
+    "@ledgerhq/hw-transport-webusb": "^6.34.0",
     "@solana/web3.js": "^1.98.0",
     "@upstash/redis": "^1.34.0",
     "@vercel/kv": "^3.0.0",
@@ -87,6 +96,18 @@
     "viem": "^2.46.0"
   },
   "peerDependenciesMeta": {
+    "@ledgerhq/hw-app-solana": {
+      "optional": true
+    },
+    "@ledgerhq/hw-transport": {
+      "optional": true
+    },
+    "@ledgerhq/hw-transport-webhid": {
+      "optional": true
+    },
+    "@ledgerhq/hw-transport-webusb": {
+      "optional": true
+    },
     "@upstash/redis": {
       "optional": true
     },
@@ -104,6 +125,10 @@
     }
   },
   "devDependencies": {
+    "@ledgerhq/hw-app-solana": "7.10.4",
+    "@ledgerhq/hw-transport": "^6.31.0",
+    "@ledgerhq/hw-transport-webhid": "6.35.4",
+    "@ledgerhq/hw-transport-webusb": "6.34.4",
     "@solana/web3.js": "^1.98.4",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
