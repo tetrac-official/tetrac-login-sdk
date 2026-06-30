@@ -3,6 +3,7 @@
 export * from "./types.js";
 export * from "./config.js";
 export * from "./crypto.js";
+export * from "./offchainMessage.js";
 
 /** The canonical message a wallet signs to prove ownership during Web3 login (auth). */
 export function walletLoginMessage(challenge: string): string {

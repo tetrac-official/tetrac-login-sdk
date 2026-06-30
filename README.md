@@ -60,6 +60,7 @@ npm i react next
 | `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner`, `useExportKey` |
 | `@tetrac/login-sdk/ui` | browser (optional) | `LoginPanel`, `ExportKeyPanel` |
 | `@tetrac/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
+| `@tetrac/login-sdk/ledger` | browser (optional) | `useSolanaLedger` (native WebUSB/WebHID), `createLedgerSolanaSigner`, `encodeOffchainMessage` |
 
 ## 🖥️ Server (Next.js App Router)
 

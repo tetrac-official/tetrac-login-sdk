@@ -11,6 +11,13 @@ const external = [
   "ioredis",
   "@vercel/kv",
   "@upstash/redis",
+  // Ledger packages are optional peer deps loaded lazily inside the /ledger
+  // hook. Keep them external so they are never bundled and consumers supply a
+  // single copy (the transports are dynamically imported only on connect).
+  "@ledgerhq/hw-app-solana",
+  "@ledgerhq/hw-transport",
+  "@ledgerhq/hw-transport-webusb",
+  "@ledgerhq/hw-transport-webhid",
   // The /ui entry imports useAuth from the /react subpath. Marking it
   // external prevents tsup from re-inlining `useAuth` + `AuthContext` into
   // dist/ui/index.js, which would otherwise produce two AuthContext
@@ -51,6 +58,9 @@ export default defineConfig([
     entry: {
       "react/index": "src/react/index.ts",
       "ui/index": "src/ui/index.ts",
+      // Client hook: needs the "use client" banner and touches browser-only
+      // WebUSB/WebHID, so it belongs in this second (banner) pass.
+      "ledger/index": "src/ledger/index.ts",
     },
     clean: false, // the first pass already cleaned dist
     // tsup's rollup treeshake pass drops `banner` from the output, so it stays
