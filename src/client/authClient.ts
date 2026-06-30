@@ -3,7 +3,7 @@
 import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } from "../core/config.js";
 import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
-import { walletLoginMessage, walletAppKeyMessage } from "../core/index.js";
+import { walletLoginMessage, walletAppKeyMessage, walletAppKeyMessageHw } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
 import {
@@ -45,7 +45,11 @@ import {
  */
 export type ReauthCredentials =
   | { passkey: string }
-  | { signMessage: (message: Uint8Array) => Promise<Uint8Array> }
+  | {
+      signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+      /** Hardware (Ledger) account: re-derive the app key from the newline-free message. */
+      hardwareWallet?: boolean;
+    }
   | { registration: PasskeyRegistration }
   | { biometricUnlock: PasskeyRegistration };
 
@@ -118,7 +122,10 @@ export class AuthClient {
       return deriveAppKeyFromPasskey(creds.passkey, email, iterations, this.config.appId);
     }
     if ("signMessage" in creds) {
-      const sig = await creds.signMessage(new TextEncoder().encode(walletAppKeyMessage(this.config.appId)));
+      const keyMessage = creds.hardwareWallet
+        ? walletAppKeyMessageHw(this.config.appId)
+        : walletAppKeyMessage(this.config.appId);
+      const sig = await creds.signMessage(new TextEncoder().encode(keyMessage));
       return deriveAppKeyFromSignature(bytesToHex(sig));
     }
     if ("registration" in creds) {
@@ -258,11 +265,17 @@ export class AuthClient {
   private async walletHandshake(
     publicKey: string,
     signMessage: (message: Uint8Array) => Promise<Uint8Array>,
+    hardwareWallet = false,
   ): Promise<{ appKey: string; signatureHex: string; challenge: string }> {
     const { challenge } = await this.post<{ challenge: string }>("challenge", { publicKey });
     const enc = new TextEncoder();
     const authSig = await signMessage(enc.encode(walletLoginMessage(challenge)));
-    const keySig = await signMessage(enc.encode(walletAppKeyMessage(this.config.appId)));
+    // Hardware wallets derive the key from the newline-free message so the device
+    // can clear-sign it (a Ledger rejects newline content / forces blind signing).
+    const keyMessage = hardwareWallet
+      ? walletAppKeyMessageHw(this.config.appId)
+      : walletAppKeyMessage(this.config.appId);
+    const keySig = await signMessage(enc.encode(keyMessage));
     return {
       appKey: deriveAppKeyFromSignature(bytesToHex(keySig)),
       signatureHex: bytesToHex(authSig),
@@ -274,10 +287,13 @@ export class AuthClient {
   async loginWithWallet(params: {
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
+    hardwareWallet?: boolean;
   }): Promise<AuthResult> {
     const { appKey, signatureHex, challenge } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
+      params.hardwareWallet,
     );
     const result = await this.post<AuthResult>("login-wallet", {
       publicKey: params.publicKey,
@@ -296,10 +312,13 @@ export class AuthClient {
   async connectWallet(params: {
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
+    hardwareWallet?: boolean;
   }): Promise<AuthResult> {
     const { appKey, signatureHex, challenge } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
+      params.hardwareWallet,
     );
     // Sent only if the wallet is new; the server ignores it for returning wallets.
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
@@ -317,10 +336,13 @@ export class AuthClient {
   async registerWithWallet(params: {
     publicKey: string;
     signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
+    hardwareWallet?: boolean;
   }): Promise<AuthResult> {
     const { appKey, signatureHex, challenge } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
+      params.hardwareWallet,
     );
     // The connected wallet is the funds identity; generate extra (e.g. signing) wallets.
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });

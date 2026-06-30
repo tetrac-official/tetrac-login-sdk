@@ -17,6 +17,7 @@ import { verifySolanaSignature } from "../src/server/signature";
 import {
   walletLoginMessage,
   walletAppKeyMessage,
+  walletAppKeyMessageHw,
   encodeOffchainMessage,
   encodeOffchainMessageLegacy,
   deriveAppKeyFromSignature,
@@ -111,5 +112,30 @@ describe("Ledger app-key derivation is stable (fixes the encrypted-blob failure)
     const sw = deriveAppKeyFromSignature(toHex(softwareSign(kp, enc(walletAppKeyMessage("demo")))));
     const hw = deriveAppKeyFromSignature(toHex(ledgerSign(kp, enc(walletAppKeyMessage("demo")))));
     expect(hw).not.toBe(sw);
+  });
+});
+
+describe("walletAppKeyMessageHw — newline-free, Ledger clear-signable (fixes 0x6a82)", () => {
+  it("contains no newline and is pure printable ASCII", () => {
+    const msg = walletAppKeyMessageHw("ttc-demo");
+    expect(msg).not.toContain("\n");
+    expect(/^[\x20-\x7e]+$/.test(msg)).toBe(true);
+    // The default newline message would fail this — it is what triggers 0x6a82.
+    expect(walletAppKeyMessage("ttc-demo")).toContain("\n");
+  });
+
+  it("encodes as a legacy off-chain envelope without forcing UTF-8/blind-sign", () => {
+    // encodeOffchainMessageLegacy throws on non-ASCII unless allowUtf8; the HW
+    // message must pass as plain ASCII (format byte 0 at offset 17).
+    const env = encodeOffchainMessageLegacy(walletAppKeyMessageHw("ttc-demo"));
+    expect(env[17]).toBe(0x00); // MessageFormat.Ascii — no blind signing required
+  });
+
+  it("derives a stable app key for a hardware account (register === login)", () => {
+    const kp = Keypair.generate();
+    const msg = enc(walletAppKeyMessageHw("ttc-demo"));
+    const atRegister = deriveAppKeyFromSignature(toHex(ledgerSign(kp, msg)));
+    const atLogin = deriveAppKeyFromSignature(toHex(ledgerSign(kp, msg)));
+    expect(atLogin).toBe(atRegister);
   });
 });

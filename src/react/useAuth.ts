@@ -53,15 +53,26 @@ export function useAuth() {
       email: string;
       passkey: string;
     }) => Promise<AuthResult>,
-    loginWithWallet: wrap((p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
-      client.loginWithWallet(p),
+    loginWithWallet: wrap(
+      (p: {
+        publicKey: string;
+        signMessage: (m: Uint8Array) => Promise<Uint8Array>;
+        hardwareWallet?: boolean;
+      }) => client.loginWithWallet(p),
     ),
-    connectWallet: wrap((p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
-      client.connectWallet(p),
+    connectWallet: wrap(
+      (p: {
+        publicKey: string;
+        signMessage: (m: Uint8Array) => Promise<Uint8Array>;
+        hardwareWallet?: boolean;
+      }) => client.connectWallet(p),
     ),
     registerWithWallet: wrap(
-      (p: { publicKey: string; signMessage: (m: Uint8Array) => Promise<Uint8Array> }) =>
-        client.registerWithWallet(p),
+      (p: {
+        publicKey: string;
+        signMessage: (m: Uint8Array) => Promise<Uint8Array>;
+        hardwareWallet?: boolean;
+      }) => client.registerWithWallet(p),
     ),
     registerWithBiometric: wrap((p: { userName: string }) => client.registerWithBiometric(p)),
     loginWithBiometric: wrap((p: { registration: PasskeyRegistration }) => client.loginWithBiometric(p)),

@@ -31,6 +31,25 @@ export function walletAppKeyMessage(appId = "ttc"): string {
 }
 
 /**
+ * Newline-free variant of {@link WALLET_APP_KEY_MESSAGE} for HARDWARE wallets.
+ *
+ * A Ledger signs Solana off-chain messages, and its legacy firmware only accepts
+ * printable-ASCII content in the no-blind-sign format — a newline (0x0a) makes the
+ * device reject the message (status 0x6a82) or demand Blind Signing. This message
+ * is pure printable ASCII, so a Ledger derives its app key with a normal,
+ * clear-signed prompt. It is a SEPARATE domain string (CRYPTO_SPEC §7): a hardware
+ * account that derives its key from THIS message must always re-derive from it, so
+ * callers pass `hardwareWallet: true` consistently at register and login.
+ */
+export const WALLET_APP_KEY_MESSAGE_HW =
+  "Unlock your encrypted TTC wallet keys. Only sign this on a site you trust. This signature never leaves your device.";
+
+/** Domain-bound (`appId`) hardware app-key message — the newline-free counterpart of {@link walletAppKeyMessage}. */
+export function walletAppKeyMessageHw(appId = "ttc"): string {
+  return `${WALLET_APP_KEY_MESSAGE_HW} App: ${appId}`;
+}
+
+/**
  * Message an email/biometric account signs (with its derived ed25519 auth keypair)
  * to log in. The challenge is single-use and server-issued; signing it proves control
  * of the account's auth key without the server ever storing a passkey hash.
