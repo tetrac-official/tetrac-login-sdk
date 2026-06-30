@@ -13,7 +13,11 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
-import { encodeOffchainMessage } from "../src/core/offchainMessage";
+import {
+  encodeOffchainMessage,
+  encodeOffchainMessageLegacy,
+  offchainMessageCandidates,
+} from "../src/core/offchainMessage";
 import { createLedgerSolanaSigner } from "../src/ledger/solanaSigner";
 import { mapLedgerDeviceError } from "../src/ledger/transport";
 
@@ -111,16 +115,56 @@ describe("createLedgerSolanaSigner", () => {
     for (const tx of signed) expect(tx.verifySignatures()).toBe(true);
   });
 
-  it("signMessage wraps in the off-chain envelope and signs it verifiably", async () => {
+  it("signMessage signs the first accepted off-chain envelope (legacy) verifiably", async () => {
     const kp = Keypair.generate();
     const { signer, calls } = makeSigner(kp);
 
     const msg = new TextEncoder().encode("Sign in to Tetrac\nnonce: 12345");
     const sig = await signer.signMessage(msg);
 
-    const expectedEnvelope = encodeOffchainMessage(msg, kp.publicKey.toBytes());
-    expect(Buffer.from(calls.msg[0]!)).toEqual(Buffer.from(expectedEnvelope));
-    expect(nacl.sign.detached.verify(expectedEnvelope, sig, kp.publicKey.toBytes())).toBe(true);
+    // The mock device accepts the first candidate (legacy, 20-byte header).
+    const legacy = encodeOffchainMessageLegacy(msg);
+    expect(Buffer.from(calls.msg[0]!)).toEqual(Buffer.from(legacy));
+    expect(nacl.sign.detached.verify(legacy, sig, kp.publicKey.toBytes())).toBe(true);
+  });
+
+  it("signMessage cascades to v0 when the device rejects the legacy header (0x6a81)", async () => {
+    const kp = Keypair.generate();
+    const msg = new TextEncoder().encode("login challenge");
+    const legacy = encodeOffchainMessageLegacy(msg);
+    const v0 = encodeOffchainMessage(msg, kp.publicKey.toBytes());
+    const seenLengths: number[] = [];
+
+    // Firmware that only supports v0: rejects the legacy header with 0x6a81.
+    const signer = createLedgerSolanaSigner({
+      address: kp.publicKey.toBase58(),
+      path: PATH,
+      signTransaction: async () => new Uint8Array(64),
+      signOffchainMessage: async (_path, envelope) => {
+        seenLengths.push(envelope.length);
+        if (envelope.length === legacy.length) {
+          throw new Error("Ledger device: UNKNOWN_ERROR (0x6a81)");
+        }
+        return nacl.sign.detached(envelope, kp.secretKey);
+      },
+    });
+
+    const sig = await signer.signMessage(msg);
+    expect(seenLengths).toEqual([legacy.length, v0.length]); // tried legacy, then v0
+    expect(nacl.sign.detached.verify(v0, sig, kp.publicKey.toBytes())).toBe(true);
+  });
+
+  it("signMessage surfaces a non-0x6a81 device error immediately (no silent fallback)", async () => {
+    const kp = Keypair.generate();
+    const signer = createLedgerSolanaSigner({
+      address: kp.publicKey.toBase58(),
+      path: PATH,
+      signTransaction: async () => new Uint8Array(64),
+      signOffchainMessage: async () => {
+        throw new Error("Transaction was rejected on the Ledger device.");
+      },
+    });
+    await expect(signer.signMessage(new TextEncoder().encode("hi"))).rejects.toThrow(/rejected/);
   });
 
   it("rejects a non-64-byte device signature (fail-closed)", async () => {
@@ -136,6 +180,25 @@ describe("createLedgerSolanaSigner", () => {
 
 describe("encodeOffchainMessage", () => {
   const pk = new Uint8Array(32).fill(9);
+
+  it("lays out the legacy 20-byte envelope (no app domain, no signers)", () => {
+    const env = encodeOffchainMessageLegacy("Hi");
+    expect(env.length).toBe(20 + 2);
+    expect(env[0]).toBe(0xff);
+    expect(Buffer.from(env.slice(1, 16)).toString("ascii")).toBe("solana offchain");
+    expect(env[16]).toBe(0x00); // version
+    expect(env[17]).toBe(0x00); // format = RestrictedAscii
+    expect(env[18]).toBe(2); // length u16 LE low
+    expect(env[19]).toBe(0); // length u16 LE high
+    expect(Buffer.from(env.slice(20)).toString("ascii")).toBe("Hi");
+  });
+
+  it("offchainMessageCandidates returns [legacy, v0] in cascade order", () => {
+    const cands = offchainMessageCandidates("Hi", pk);
+    expect(cands).toHaveLength(2);
+    expect(Buffer.from(cands[0]!)).toEqual(Buffer.from(encodeOffchainMessageLegacy("Hi")));
+    expect(Buffer.from(cands[1]!)).toEqual(Buffer.from(encodeOffchainMessage("Hi", pk)));
+  });
 
   it("lays out the V0 single-signer envelope exactly per the Ledger firmware parser", () => {
     const env = encodeOffchainMessage("Hi", pk);
