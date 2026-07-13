@@ -49,6 +49,9 @@ export default defineConfig([
       "client/index": "src/client/index.ts",
       "server/index": "src/server/index.ts",
       "storage/index": "src/storage/index.ts",
+      // Its own entry, deliberately NOT re-exported from storage/index — a test kit must
+      // never be reachable from a production server bundle.
+      "storage/conformance": "src/storage/conformance.ts",
       "next/index": "src/next/index.ts",
     },
     clean: true,

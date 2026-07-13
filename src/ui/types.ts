@@ -45,7 +45,18 @@ export type LoginPanelSlot =
   | "iconWrap"
   | "error"
   | "divider"
-  | "muted";
+  | "muted"
+  // --- 0.5.0 additive: hardware-wallet toggle ---
+  | "toggle"
+  | "toggleTrack"
+  | "toggleKnob"
+  | "toggleLabel"
+  | "toggleDescription"
+  // --- 0.5.0 additive: passkey generator ---
+  | "passkeyField"
+  | "passkeyGenerateButton"
+  | "passkeyReveal"
+  | "passkeyRevealActions";
 
 /** Minimal appearance tokens. The skeleton intentionally ships just two. */
 export interface LoginPanelAppearance {
@@ -53,6 +64,52 @@ export interface LoginPanelAppearance {
   accent?: string;
   /** Border radius (px) applied to inputs / buttons. */
   radius?: number;
+}
+
+/** Object form of `hardwareWalletToggle` — customise copy / initial state. */
+export interface HardwareWalletToggleConfig {
+  /** Switch label. Default: "I'm using a Ledger hardware wallet". */
+  label?: React.ReactNode;
+  /**
+   * Accessible name for the switch. Only consulted when `label` is NOT a string
+   * (e.g. a ReactNode with an icon), so the announced name can track the custom
+   * visible label instead of the generic "Hardware wallet" fallback. When `label`
+   * is a string it is used verbatim as the accessible name and this is ignored.
+   */
+  ariaLabel?: string;
+  /**
+   * Helper text under the label. Default explains the reveal-consistency rule
+   * ("...must use the same Ledger to unlock/reveal later."). Pass `null` to omit.
+   * When present it is wired to the switch via `aria-describedby` so screen
+   * readers announce the caveat.
+   */
+  description?: React.ReactNode;
+  /**
+   * Initial on-state for the UNCONTROLLED toggle only (no `onHardwareWalletChange`).
+   * Ignored when controlled. Seeds from `defaultOn ?? hardwareWallet ?? false`.
+   */
+  defaultOn?: boolean;
+}
+
+/** When the passkey generator button is shown, relative to `emailMode`. */
+export type PasskeyGeneratorShowFor = "signup" | "auto" | "always";
+
+/** Object form of `passkeyGenerator`. */
+export interface PasskeyGeneratorConfig {
+  /**
+   * Random bytes of entropy. Default 24 (~192-bit). Clamped to a MINIMUM of 16
+   * bytes (128-bit) — smaller values are raised to 16, never honoured as-is.
+   */
+  bytes?: number;
+  /** Icon node for the generate button (SDK stays icon-agnostic). */
+  icon?: React.ReactNode;
+  /**
+   * When to show the button. Default follows `emailMode`: shown for signup/auto,
+   * hidden for signin. `"always"` overrides (shows even in signin).
+   */
+  showFor?: PasskeyGeneratorShowFor;
+  /** Called with each generated passkey (e.g. to nudge "save this"). */
+  onGenerate?: (passkey: string) => void;
 }
 
 export interface LoginPanelProps {
@@ -82,6 +139,42 @@ export interface LoginPanelProps {
    * passed to <ExportKeyPanel hardwareWallet> for the same account (see §1.3).
    */
   hardwareWallet?: boolean;
+
+  /**
+   * Render a hardware-wallet ("I'm using a Ledger") toggle directly BENEATH the
+   * wallet method. Opt-in; omitted → no toggle (byte-identical to today). When on,
+   * its value becomes the `hardwareWallet` hint for the wallet method (the
+   * connector's own report still wins, per WalletMethod). Pass `true` for
+   * defaults, or an object to customise copy / initial state.
+   *
+   * UNCONTROLLED by default (the panel owns the state, seeded from `defaultOn ??
+   * hardwareWallet ?? false`). To CONTROL it, also pass `onHardwareWalletChange` —
+   * then `hardwareWallet` is the source of truth and the panel holds no internal
+   * toggle state.
+   *
+   * Only renders when the `wallet` method is present AND a `walletConnector` is
+   * supplied; otherwise no toggle (it belongs to the wallet method).
+   */
+  hardwareWalletToggle?: boolean | HardwareWalletToggleConfig;
+
+  /**
+   * Controlled toggle callback. Supplying this makes the built-in toggle
+   * CONTROLLED: `hardwareWallet` becomes the source of truth and this fires on
+   * every flip. Omit it for the default uncontrolled behaviour.
+   */
+  onHardwareWalletChange?: (isHardware: boolean) => void;
+
+  /**
+   * Show a "generate a strong passkey" icon button inside the email passkey input
+   * (far right). One click fills the field with a CSPRNG-strong value and
+   * AUTO-REVEALS it once (with copy) so the user can save it — a generated passkey
+   * encrypts the account and CANNOT be recovered. Opt-in; omitted → no button
+   * (today's behaviour). Never persisted by the SDK; the reveal clears on unmount.
+   *
+   * Gating: default follows `emailMode` — shown for signup/auto, hidden for
+   * signin. `showFor: "always"` overrides.
+   */
+  passkeyGenerator?: boolean | PasskeyGeneratorConfig;
 
   /**
    * Optional icon rendered inside each method's button, keyed by method. The SDK

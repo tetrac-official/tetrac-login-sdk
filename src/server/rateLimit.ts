@@ -1,36 +1,31 @@
-// Sliding-window-ish counter rate limiting backed by the storage adapter.
-import type { StorageAdapter } from "../storage/adapter.js";
-import type { RateLimitConfig, KeyPrefixes } from "../core/config.js";
+// Rate limiting, delegated to the storage backend as a single atomic DECISION.
+import type { AuthStore, RateLimitBucket, RateLimitResult } from "../storage/store.js";
+import type { RateLimitConfig } from "../core/config.js";
 
-export interface RateLimitResult {
-  allowed: boolean;
-  remaining: number;
-}
+export type { RateLimitBucket, RateLimitResult };
 
 /**
- * Increment the counter for `identifier` (an IP, email, or pubKey) and report
- * whether it is still under the limit. The first hit in a window sets the TTL.
+ * Report whether `bucket` is still under its limit, counting this hit.
+ *
+ * This is deliberately a one-liner. Before v0.5.0 it was a two-step dance over KV
+ * primitives — `incr`, then infer "first hit of a new window" from `count === 1` and
+ * only THEN stamp the TTL — and that inference is the origin of the worst bug in the
+ * storage layer: a backend whose `incr` returns 16 (not 1) for a stale, expired counter
+ * never stamps the new window's TTL, so the identifier — an IP, an email, a public key —
+ * stays rate-limited FOREVER.
+ *
+ * Handing the backend the whole decision makes that class of bug unrepresentable, and it
+ * lets backends that need to shard the counter (any OCC engine — a hot counter is many
+ * writes to one row) do so invisibly. The window semantics are now the store's contract.
+ *
+ * NOTE (fail closed): there is no try/catch here, on purpose. If the store throws, the
+ * exception propagates and the request 500s. A rate limiter that cannot count must not
+ * grant permission.
  */
 export async function checkRateLimit(
-  storage: StorageAdapter,
-  identifier: string,
+  store: AuthStore,
+  bucket: RateLimitBucket,
   config: RateLimitConfig,
-  prefixes: KeyPrefixes,
 ): Promise<RateLimitResult> {
-  const key = `${prefixes.rateLimit}${identifier}`;
-  const count = await storage.incr(key);
-  if (count === 1) {
-    // First hit in a window: stamp the TTL.
-    await storage.expire(key, config.windowSeconds);
-  } else if (count > config.maxAttempts) {
-    // Self-heal: if a crash between a prior incr and its expire left the counter
-    // wedged over the limit with no TTL, it would block this identifier forever.
-    // Re-applying expire here is cheap and idempotent and guarantees the counter
-    // can drain. (When a TTL already exists this just refreshes the window tail.)
-    await storage.expire(key, config.windowSeconds);
-  }
-  return {
-    allowed: count <= config.maxAttempts,
-    remaining: Math.max(0, config.maxAttempts - count),
-  };
+  return store.hitRateLimit(bucket, config.windowSeconds, config.maxAttempts);
 }

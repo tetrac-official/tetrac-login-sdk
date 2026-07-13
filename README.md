@@ -42,9 +42,9 @@ npm i @tetrac/login-sdk
 # peers (supply what you use):
 npm i @solana/web3.js viem tweetnacl
 # storage backend (pick one):
-npm i ioredis            # dev (localhost)
-npm i @vercel/kv         # Vercel
-npm i @upstash/redis     # Upstash (edge-friendly)
+npm i ioredis            # dev (localhost) / self-hosted Redis
+npm i @upstash/redis     # recommended for serverless + edge
+npm i @vercel/kv         # legacy — Vercel sunset Vercel KV in Oct 2024; use Upstash
 # react/next bindings:
 npm i react next
 ```
@@ -56,7 +56,8 @@ npm i react next
 | `@tetrac/login-sdk/core` | anywhere | types, config, key derivation, AES, CSPRNG |
 | `@tetrac/login-sdk/client` | browser | wallet generation, sessions, WebAuthn, `AuthClient` |
 | `@tetrac/login-sdk/server` | backend | challenge/signature/session verify, route factory |
-| `@tetrac/login-sdk/storage` | backend | `StorageAdapter` + Redis/Vercel KV/Upstash/Memory |
+| `@tetrac/login-sdk/storage` | backend | `AuthStore` (the extension point) + `KvAuthStore`, `StorageAdapter`, Redis/Upstash/Vercel KV/Memory |
+| `@tetrac/login-sdk/storage/conformance` | tests | `authStoreConformanceCases` — the acceptance bar for a custom backend |
 | `@tetrac/login-sdk/react` | browser | `AuthProvider`, `useAuth`, `useUser`, `useWallets`, `useActiveWallet`, `useSigner`, `useSolanaSigner`, `useEvmSigner`, `useExportKey` |
 | `@tetrac/login-sdk/ui` | browser (optional) | `LoginPanel`, `ExportKeyPanel` |
 | `@tetrac/login-sdk/next` | Next App Router | `createNextAuthRoutes` |
@@ -69,9 +70,28 @@ npm i react next
 import { createNextAuthRoutes } from "@tetrac/login-sdk/next";
 import { resolveStorageAdapter } from "@tetrac/login-sdk/storage";
 
-const storage = await resolveStorageAdapter(); // Redis dev / KV / Upstash by env
+const storage = await resolveStorageAdapter(); // Redis dev / Upstash / KV by env
 export const { GET, POST } = createNextAuthRoutes({ storage });
 ```
+
+### Bring your own database
+
+`storage` takes a Redis-shaped KV backend. To use **anything else** — Postgres/Supabase, MySQL,
+SQLite, MongoDB, DynamoDB, Convex — implement the **`AuthStore`** port and pass `store` instead:
+
+```ts
+export const { GET, POST } = createNextAuthRoutes({ store: new MyStore(client) });
+```
+
+`AuthStore` is the domain port (users, sessions, challenges, and one atomic rate-limit *decision*),
+so your database does what it is good at instead of emulating Redis primitives. Both options are
+fully supported and `storage` needs no changes.
+
+> ⚠️ **A plausible-looking backend can be catastrophically wrong** — permanently locking users out,
+> accepting expired sessions, or replaying login challenges, all while passing a smoke test. Read
+> **[`docs/STORAGE_ADAPTERS.md`](./docs/STORAGE_ADAPTERS.md)** and verify against the shipped
+> conformance suite (`@tetrac/login-sdk/storage/conformance`) — it is the acceptance bar, not a
+> formality.
 
 Endpoints served (all under the mount point, e.g. `/api/auth/challenge`):
 `POST challenge | register | login | login-wallet | connect-wallet | import-wallet | logout`,
@@ -254,12 +274,17 @@ fall back to `DEFAULT_CONFIG` (nested groups merge shallowly). Defaults shown:
 ### Environment
 
 ```
-REDIS_URL=redis://localhost:6379        # dev
+REDIS_URL=redis://localhost:6379        # dev / self-hosted
 # prod (pick one):
-VERCEL=1                                 # @vercel/kv
-KV_REST_API_URL= / KV_REST_API_TOKEN=    # Vercel KV REST
-UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=
+UPSTASH_REDIS_REST_URL= / UPSTASH_REDIS_REST_TOKEN=   # recommended
+VERCEL=1                                 # @vercel/kv  (legacy — see below)
+KV_REST_API_URL= / KV_REST_API_TOKEN=    # Vercel KV REST (legacy)
 ```
+
+> **Vercel KV is a legacy backend.** Vercel sunset Vercel KV in Oct 2024 and now routes it to
+> Upstash via the Marketplace. `VercelKVAdapter` still works and is still supported — but new
+> deployments should use **Upstash**. `resolveStorageAdapter()` deliberately prefers Upstash over
+> Vercel KV when both are configured.
 
 ## 🛡️ Security model
 

@@ -10,6 +10,7 @@ import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { registerEmail, loginEmail } from "./_auth-helpers";
 import { issueChallenge, consumeChallenge } from "../src/server/challenge";
+import { KvAuthStore } from "../src/storage/store";
 import type { AuthConfig } from "../src/core/config";
 import { walletLoginMessage } from "../src/core/index";
 import { Keypair } from "@solana/web3.js";
@@ -51,12 +52,17 @@ describe("atomic challenge consumption (C9)", () => {
     const pk = "SolConcurrent11111111111111111111111111111";
 
     // Issue one challenge
-    const challenge = await issueChallenge(storage, APP, pk, testConfig);
+    const challenge = await issueChallenge(
+      new KvAuthStore(storage, testConfig.keyPrefixes),
+      APP,
+      pk,
+      testConfig,
+    );
 
     // Attempt to consume it twice concurrently
     const [r1, r2] = await Promise.all([
-      consumeChallenge(storage, APP, pk, challenge, testConfig),
-      consumeChallenge(storage, APP, pk, challenge, testConfig),
+      consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, pk, challenge),
+      consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, pk, challenge),
     ]);
 
     // At most one should succeed
@@ -64,27 +70,37 @@ describe("atomic challenge consumption (C9)", () => {
     expect(r1 && r2).toBe(false); // both can't be true
 
     // Third attempt must definitely fail
-    const r3 = await consumeChallenge(storage, APP, pk, challenge, testConfig);
+    const r3 = await consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, pk, challenge);
     expect(r3).toBe(false);
   });
 
   it("challenge for different public keys do not interfere", async () => {
     const storage = new MemoryAdapter();
 
-    const ch1 = await issueChallenge(storage, APP, "pk-1", testConfig);
-    const ch2 = await issueChallenge(storage, APP, "pk-2", testConfig);
+    const ch1 = await issueChallenge(
+      new KvAuthStore(storage, testConfig.keyPrefixes),
+      APP,
+      "pk-1",
+      testConfig,
+    );
+    const ch2 = await issueChallenge(
+      new KvAuthStore(storage, testConfig.keyPrefixes),
+      APP,
+      "pk-2",
+      testConfig,
+    );
 
     const [r1a, r2a] = await Promise.all([
-      consumeChallenge(storage, APP, "pk-1", ch1, testConfig),
-      consumeChallenge(storage, APP, "pk-2", ch2, testConfig),
+      consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, "pk-1", ch1),
+      consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, "pk-2", ch2),
     ]);
     expect(r1a).toBe(true);
     expect(r2a).toBe(true);
 
     // Can't reuse consumed challenges
     const [r1b, r2b] = await Promise.all([
-      consumeChallenge(storage, APP, "pk-1", ch1, testConfig),
-      consumeChallenge(storage, APP, "pk-2", ch2, testConfig),
+      consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, "pk-1", ch1),
+      consumeChallenge(new KvAuthStore(storage, testConfig.keyPrefixes), APP, "pk-2", ch2),
     ]);
     expect(r1b).toBe(false);
     expect(r2b).toBe(false);
@@ -92,7 +108,12 @@ describe("atomic challenge consumption (C9)", () => {
 
   it("consuming a non-existent challenge returns false", async () => {
     const storage = new MemoryAdapter();
-    const result = await consumeChallenge(storage, APP, "unknown-pk", "fake-challenge", testConfig);
+    const result = await consumeChallenge(
+      new KvAuthStore(storage, testConfig.keyPrefixes),
+      APP,
+      "unknown-pk",
+      "fake-challenge",
+    );
     expect(result).toBe(false);
   });
 });

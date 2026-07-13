@@ -59,6 +59,18 @@ export interface UserData {
   createdAt: number;
   /** PBKDF2 iteration count used to derive the app key (email users). Pinned at registration. */
   pbkdf2Iterations?: number;
+  /**
+   * SHA-256 of the user's CURRENT session token (v0.5.0) — never the token itself.
+   * Used solely to revoke the previous session on re-login (the digest IS the session
+   * key, so the raw token is not needed to find it).
+   *
+   * Before v0.5.0 this record instead carried a raw `authToken` bearer token, which
+   * meant a read of the store yielded live, replayable credentials for every logged-in
+   * user. That field is no longer written, and is scrubbed on the next write to a
+   * record that still has it (see issueSession). The raw token now exists only in the
+   * client's hands, delivered once via AuthResult.authToken.
+   */
+  authTokenHash?: string;
   [extra: string]: unknown;
 }
 

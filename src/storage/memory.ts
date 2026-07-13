@@ -36,7 +36,12 @@ export class MemoryAdapter implements StorageAdapter {
   }
 
   async del(key: string): Promise<void> {
+    // Real Redis DEL removes a key of ANY type, so it clears both keyspaces. Before
+    // v0.5.0 this deleted only from `store`, silently diverging from RedisAdapter —
+    // unobservable (no caller dels an email-index key) but enough to make this class's
+    // "normative reference implementation" status untrue. Fixed.
     this.store.delete(key);
+    this.hstore.delete(key);
   }
 
   async incr(key: string): Promise<number> {
@@ -82,4 +87,31 @@ export class MemoryAdapter implements StorageAdapter {
     const h = this.hstore.get(key);
     return h ? Object.fromEntries(h) : {};
   }
+
+  /**
+   * Reclaim expired entries (v0.5.0). This adapter expires LAZILY — `alive()` only
+   * deletes an entry when something reads it — and rate-limit counters, abandoned
+   * challenges, and expired sessions are typically NEVER read again. So a long-running
+   * process (a dev server, a soak test) grows monotonically. That is a real leak, and
+   * this is its fix.
+   *
+   * Space only: correctness never depends on it, because `alive()` already hides an
+   * expired entry from every read path.
+   */
+  async sweepExpired(limit?: number): Promise<number> {
+    const now = this.now();
+    let removed = 0;
+    for (const [key, entry] of this.store) {
+      if (limit !== undefined && removed >= limit) break;
+      if (entry.expiresAt != null && entry.expiresAt <= now) {
+        this.store.delete(key); // safe: Map iteration tolerates deletion of the current entry
+        removed++;
+      }
+    }
+    return removed;
+  }
+
+  // No `close()`: there is nothing to release. Omitted deliberately, so that callers'
+  // feature-detection (`await storage.close?.()`) is exercised against an adapter that
+  // genuinely lacks it.
 }

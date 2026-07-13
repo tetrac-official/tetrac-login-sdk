@@ -120,6 +120,25 @@ export function hashUserAgent(userAgent: string | null | undefined): string | un
   return bytesToHex(sha256(utf8ToBytes(userAgent)));
 }
 
+/**
+ * SHA-256 (hex) of a session token (v0.5.0). Storage NEVER sees the raw token —
+ * only this digest, both as the session key and as UserData.authTokenHash. The raw
+ * token is a bearer credential that exists only in the client's hands.
+ *
+ * A bare hash (no salt, no KDF) is correct here and PBKDF2 would be actively wrong:
+ * generateSessionToken() is randomHex(32) — 256 bits of CSPRNG output — so there is
+ * no dictionary to stretch against and no precomputation that beats a uniform 2^256
+ * space. Stretching would only add latency to EVERY authenticated request. This is
+ * the same construction used for API keys and GitHub PATs.
+ *
+ * Why it matters: read access to the store (a backup, a replica, a leaked Supabase
+ * `public` schema, a slow-query log) no longer yields replayable credentials — only
+ * digests. See PRD/v0.5.0-PRD.md §1.
+ */
+export function hashSessionToken(token: string): string {
+  return bytesToHex(sha256(utf8ToBytes(token)));
+}
+
 /** Generate a 256-bit wallet-login challenge (64 hex chars). */
 export function generateChallenge(): string {
   return randomHex(32);

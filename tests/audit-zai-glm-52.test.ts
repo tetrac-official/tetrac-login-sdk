@@ -9,6 +9,7 @@
 //
 // Run: npm test -- audit-zai-glm-52
 import { createAuthHandlers } from "../src/server/routes";
+import { KvAuthStore } from "../src/storage/store";
 import { MemoryAdapter } from "../src/storage/memory";
 import { getUserByPublicKey } from "../src/server/session";
 import { timingSafeEqual, encryptSecret } from "../src/core/crypto";
@@ -58,7 +59,11 @@ describe("F3 — register REJECTS an out-of-band pbkdf2Iterations (RESOLVED)", (
     expect(res.status).toBe(400); // F3 fixed: was 201
 
     // Nothing was persisted — the weak count never made it onto a record.
-    const user = await getUserByPublicKey(storage, DEFAULT_CONFIG.appId, SOL_PUB, DEFAULT_CONFIG);
+    const user = await getUserByPublicKey(
+      new KvAuthStore(storage, DEFAULT_CONFIG.keyPrefixes),
+      DEFAULT_CONFIG.appId,
+      SOL_PUB,
+    );
     expect(user).toBeNull();
   });
 

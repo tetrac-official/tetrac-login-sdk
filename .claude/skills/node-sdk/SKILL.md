@@ -24,9 +24,44 @@ A library's job is to **defer to the host** for shared singletons (React, react-
 
 | Bucket | Installed in consumer? | Use for |
 |---|---|---|
-| `dependencies` | Yes, automatically | Private runtime utilities your SDK owns end-to-end (e.g. `crypto-es`, `nanoid`, an internal helper lib). Safe to duplicate. |
-| `peerDependencies` | No — consumer must install | Shared singletons that **must not** be duplicated: React, react-dom, the framework (Next.js), GraphQL, the framework's types. Anything where two copies = bugs. |
+| `dependencies` | Yes, automatically | Private runtime utilities your SDK owns end-to-end (e.g. `@noble/hashes`, `nanoid`, an internal helper lib). Safe to duplicate. **Keep this list as short as you can** — every entry is supply-chain surface you impose on every consumer. |
+| `peerDependencies` | No — consumer must install | Shared singletons that **must not** be duplicated: React, react-dom, the framework (Next.js), GraphQL, the framework's types. Anything where two copies = bugs. **Also: heavy, swappable backends** (database drivers) — see below. |
 | `devDependencies` | No | Build-time tools: TypeScript, tsup, jest, eslint, `@types/*` you compile against. |
+
+> **A `dependency` is a decision you make on behalf of every consumer.** This repo's own SDK ships
+> exactly **one** runtime dependency (`@noble/hashes`); it previously carried `crypto-es` and removed
+> it precisely to shrink that surface. When you can implement something against a platform API (Web
+> Crypto, `fetch`) instead of taking a dep, do that.
+
+### Optional peers: swappable backends and drivers
+
+The peer rule is usually taught for React. It applies just as well to anything **large, swappable,
+and chosen by the consumer** — database drivers being the common case. Declare them as peers, mark
+them optional, and load them with a lazy `import()` so a consumer who doesn't use them pays nothing
+at install time *or* in bundle size:
+
+```jsonc
+{
+  "peerDependencies": {
+    "ioredis": "^5.6.0",
+    "@upstash/redis": "^1.34.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": { "optional": true },
+    "@upstash/redis": { "optional": true }
+  }
+}
+```
+
+```ts
+// Never a top-level import — that would pull the driver into every consumer's bundle.
+const { default: Redis } = await import("ioredis");
+```
+
+The corollary: **depend on a structural interface, not on the driver's types.** Define a minimal
+`RedisLike` interface describing the handful of methods you actually call, and accept anything that
+structurally matches. Your SDK then never imports the driver's types at all, so a consumer on a
+different driver major version cannot break your build.
 
 ### The peerDependencies rule, expanded
 
@@ -120,6 +155,50 @@ Notes:
 - `"types"` must come **first** in each entry, or TS may pick the wrong file (especially under `moduleResolution: "bundler"` / `"node16"`).
 - Keep `main` / `module` / `types` at the top level as fallbacks for older tooling.
 - `"sideEffects": false` enables tree-shaking in bundlers. Only set this if your SDK truly has no side effects on import.
+- **Every subpath needs its own build entry.** An `exports` entry pointing at a `dist/` file your bundler never emits is a 404 that only shows up in a consumer's install, not in your build. Adding the export and adding the entry are one change, not two.
+
+### Ship test kits on their own subpath — never from the main barrel
+
+If your SDK asks third parties to implement an interface (a storage adapter, a plugin, a transport),
+ship them an **executable conformance suite** so they can self-certify. But put it on a **dedicated
+subpath**, and do **not** re-export it from the package root or from the module it tests:
+
+```jsonc
+{
+  "exports": {
+    "./storage": { "types": "./dist/storage/index.d.ts", "import": "./dist/storage/index.js", "require": "./dist/storage/index.cjs" },
+    "./storage/conformance": {
+      "types": "./dist/storage/conformance.d.ts",
+      "import": "./dist/storage/conformance.js",
+      "require": "./dist/storage/conformance.cjs"
+    }
+  }
+}
+```
+
+Two reasons, and the first is the one people miss:
+
+1. **A barrel re-export drags the test kit into production bundles.** If `storage/index.ts` re-exports
+   the suite, then `import { RedisAdapter } from "pkg/storage"` in a server route pulls the entire
+   suite — fixtures, assertion helpers, and all — into the deployed bundle. `sideEffects: false` and
+   tree-shaking *usually* save you; "usually" is not a guarantee you want to rely on for dead code
+   that ships to production. A separate entry point makes it structurally impossible.
+2. **The suite must not depend on a test framework.** Return an array of `{ name, run(): Promise<void> }`
+   cases that **throw** on failure, rather than calling `describe`/`it`. Consumers then run it under
+   Jest, Vitest, or `node:test` — whatever they already use — without inheriting your runner:
+
+   ```ts
+   import { authStoreConformanceCases } from "@scope/my-sdk/storage/conformance";
+   for (const c of authStoreConformanceCases(() => new MyStore(client))) {
+     it(c.name, () => c.run());
+   }
+   ```
+
+**And write the cases failing-first.** A conformance suite that cannot fail is decoration: 24 green
+checkmarks give exactly as much confidence as 24 empty functions. Keep a **negative control** in your
+own test suite — a deliberately-naive implementation with the bugs you're warning about — and assert
+the suite *catches* each one. That test is what makes the suite an acceptance bar rather than a
+formality.
 
 ## Canonical SDK package.json
 
@@ -152,14 +231,16 @@ Notes:
   },
 
   "dependencies": {
-    "crypto-es": "^2.1.0"
+    "@noble/hashes": "2.2.0"
   },
 
   "peerDependencies": {
-    "react": ">=18"
+    "react": ">=18",
+    "ioredis": "^5.6.0"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": { "optional": true },
+    "ioredis": { "optional": true }
   },
 
   "devDependencies": {
@@ -178,11 +259,14 @@ Note especially what's **absent**: `@types/react` is not in dependencies or peer
 
 1. **Putting React or `@types/react` in `dependencies`.** Causes "Invalid hook call" at runtime and duplicate-type errors at build time. *Always* a peer (React) or devDep (types).
 2. **Omitting `files`.** Ships your `src/`, tests, fixtures, and sometimes `.env*`. Inflates package size and can leak secrets.
-3. **Building against the latest `@types/react`.** Forces consumers to upgrade. Build against the lowest supported version.
-4. **Pinning peer versions (`"react": "18.2.0"`).** Use ranges: `">=18"`, `"^18 || ^19"`. Pinning forces version churn on consumers.
-5. **Forgetting `prepublishOnly: "npm run build"`.** Ship a stale `dist/` and consumers get yesterday's code.
-6. **Committing the SDK's `node_modules/`.** Doesn't matter if `files` excludes it for normal publish — but `file:` consumers (yarn classic) will copy it verbatim. Keep the SDK source tree clean before any `file:` install.
-7. **Using `"types"` last in `exports` entries.** TS may pick the JS file as types. `"types"` first, always.
+3. **Putting a database driver in `dependencies`.** You've now installed `ioredis` (or `pg`, or `mongodb`) into every consumer, including the ones using a different backend entirely. Optional peer + lazy `import()`.
+4. **Re-exporting a test kit from the main barrel.** It follows your production imports into the consumer's server bundle. Give it its own subpath.
+5. **Adding an `exports` subpath without a build entry.** The map points at a file that is never emitted; your build stays green and the consumer's install 404s.
+6. **Building against the latest `@types/react`.** Forces consumers to upgrade. Build against the lowest supported version.
+7. **Pinning peer versions (`"react": "18.2.0"`).** Use ranges: `">=18"`, `"^18 || ^19"`. Pinning forces version churn on consumers.
+8. **Forgetting `prepublishOnly: "npm run build"`.** Ship a stale `dist/` and consumers get yesterday's code.
+9. **Committing the SDK's `node_modules/`.** Doesn't matter if `files` excludes it for normal publish — but `file:` consumers (yarn classic) will copy it verbatim. Keep the SDK source tree clean before any `file:` install.
+10. **Using `"types"` last in `exports` entries.** TS may pick the JS file as types. `"types"` first, always.
 
 ## Why duplicate-package bugs happen — three cases
 
@@ -238,9 +322,13 @@ Run through this before every `npm publish`:
 
 - [ ] `files: ["dist"]` set; `npm pack --dry-run` lists only `dist/`, `package.json`, `README.md`, `LICENSE`.
 - [ ] No React/Next/framework in `dependencies`. They're peers, or absent.
+- [ ] `dependencies` is as short as it can be — every entry is supply-chain surface imposed on every consumer.
+- [ ] Optional backends/drivers are **optional peers** + lazy `import()`, and are typed structurally (`RedisLike`) rather than by importing the driver's own types.
 - [ ] `@types/react` (and other framework `@types/*`) only in `devDependencies`, pinned to the **lowest** supported version.
 - [ ] `peerDependencies` uses ranges (`">=18"`), not pins.
 - [ ] `exports` map present, every entry has `types` listed **first**.
+- [ ] **Every `exports` subpath has a matching build entry** — grep the built `dist/` for each path in the map. A missing artifact fails only in the consumer's install.
+- [ ] Test kits / conformance suites live on their **own subpath**, are **not** re-exported from the main barrel, and depend on **no** test framework.
 - [ ] `prepublishOnly` (or `prepack`) runs the build.
 - [ ] `sideEffects: false` if accurate (enables consumer tree-shaking).
 - [ ] `engines.node` declared.
