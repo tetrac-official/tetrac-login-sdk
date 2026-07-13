@@ -24,6 +24,30 @@ jobs:
         # engines.node is ">=18" (package.json): test the floor and current LTS.
         node-version: ["18.x", "20.x"]
 
+    # A REAL Redis for the AuthStore conformance suite (tests/storage-conformance-redis.test.ts).
+    #
+    # MemoryAdapter is the normative reference implementation that every future backend is written
+    # to match — but atomicity and expiry are properties of the ENGINE, and a mock only asserts we
+    # mocked Redis the way we imagined it. Running the suite against the real thing is what makes
+    # "MemoryAdapter matches Redis" a tested fact instead of a code comment.
+    #
+    # The suite SKIPS itself when REDIS_URL is unset (so `npm test` works on a laptop with no
+    # Docker) — which means a missing service here would silently reduce it to zero cases. The
+    # suite guards against exactly that: in CI it asserts REDIS_URL is set and fails if it isn't.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      REDIS_URL: redis://localhost:6379
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6

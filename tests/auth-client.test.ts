@@ -163,6 +163,57 @@ describe("AuthClient — web3 wallet", () => {
     const res = await client.registerWithWallet(w);
     expect(res.user.wallets.some((x) => x.chain === "solana")).toBe(true);
   });
+
+  // --- v0.5.1: a Web3 login must NOT mint a second Solana funds wallet ---------------
+  //
+  // The connected wallet (Phantom/Solflare/Ledger) IS the user's Solana funds wallet and
+  // becomes UserData.publicKey. Generating an embedded Solana `funds` wallet alongside it
+  // gave the user a wallet they never asked for, whose private key the SDK holds and the
+  // export UI will happily reveal — and which useActiveWallet()/useWallets() then surfaced
+  // as "the Solana funds wallet", shadowing the real one. An app rendering that as a
+  // deposit address would send the user's funds to a wallet they don't know they own.
+
+  it("🚨 connectWallet does NOT create an embedded Solana `funds` wallet", async () => {
+    const w = walletSigner();
+    const res = await client.connectWallet(w);
+
+    const embeddedSolFunds = res.user.wallets.filter((x) => x.chain === "solana" && x.role === "funds");
+    expect(embeddedSolFunds).toHaveLength(0);
+
+    // The connected wallet is the identity, and the SDK holds NO key for it.
+    expect(res.user.publicKey).toBe(w.publicKey);
+    expect(res.user.wallets.some((x) => x.publicKey === res.user.publicKey)).toBe(false);
+  });
+
+  it("🚨 registerWithWallet does NOT create an embedded Solana `funds` wallet", async () => {
+    const w = walletSigner();
+    const res = await client.registerWithWallet(w);
+
+    expect(res.user.wallets.filter((x) => x.chain === "solana" && x.role === "funds")).toHaveLength(0);
+    expect(res.user.publicKey).toBe(w.publicKey);
+    expect(res.user.wallets.some((x) => x.publicKey === res.user.publicKey)).toBe(false);
+  });
+
+  it("still generates the OTHER wallets a connected Solana wallet cannot provide", async () => {
+    // ONLY the redundant Solana `funds` role is stripped. A Solana `signing` (hot/session)
+    // wallet and the EVM wallets are genuinely additional keys the connected Solana wallet
+    // cannot provide — over-fixing by skipping generation entirely would silently delete
+    // the user's EVM wallet. (This client is configured walletGen.evm = ["funds"].)
+    const w = walletSigner();
+    const res = await client.registerWithWallet(w);
+
+    expect(res.user.wallets.some((x) => x.chain === "solana" && x.role === "signing")).toBe(true);
+    expect(res.user.wallets.some((x) => x.chain === "evm" && x.role === "funds")).toBe(true);
+  });
+
+  it("email accounts DO still get an embedded Solana funds wallet (it is their identity)", async () => {
+    // Guard against over-fixing: for email/biometric the embedded funds wallet IS the
+    // account identity, so it must keep being generated.
+    const res = await client.registerWithEmail({ email: "web3guard@example.com", passkey: PASSKEY });
+    const funds = res.user.wallets.find((x) => x.chain === "solana" && x.role === "funds");
+    expect(funds).toBeDefined();
+    expect(funds!.publicKey).toBe(res.user.publicKey); // the funds wallet IS the identity
+  });
 });
 
 describe("AuthClient — reveal/unlock re-auth guarantees", () => {

@@ -63,7 +63,7 @@ Two practical consequences you MUST surface to the user before starting:
 | `useWallets()` (Solana subpath) | `useAuth().publicKey` + `user.wallets` from `/api/auth/user-data` |
 | `useExportWallet({ address })` | `useExportKey(walletBlob).reveal(reauth)` — enforces a fresh re-auth ceremony (preferred); low-level: `useSigner().decrypt(walletBlob)` |
 | `embeddedWallets.solana.createOnLogin: "users-without-wallets"` | Automatic — `registerWithEmail` / `registerWithBiometric` / `connectWallet` generate the bundle |
-| `user.linkedAccounts.find(a => a.walletClientType === 'privy')` | `user.wallets.find(w => w.chain === "solana" && w.role === "funds")` |
+| `user.linkedAccounts.find(a => a.walletClientType === 'privy')` | **`useActiveWallet()`** — do **not** hand-roll `wallets.find(w => w.role === "funds")` (see the ⚠️ below) |
 | `solanaWallet.signTransaction({ transaction: bytes })` | Build a `Keypair` via `useSigner().solanaKeypair(walletBlob)`, then `tx.partialSign(kp)` |
 | Privy's hosted UI / `appearance: {...}` | Build your own login UI; SDK is headless |
 
@@ -615,7 +615,24 @@ After the migration, walk through each one. Don't skip — Privy gave you a lot 
 
 **Embedded EVM wallet.** Privy auto-created an EVM wallet on Base. The SDK's `walletGen: { evm: ["funds"] }` does the same, but only on email/biometric registration. If a user signs in via `connectWallet` (Solana signature), they don't get an EVM wallet automatically because `connectWallet` registers them as `authMethod: "wallet"` and the EVM key would be encrypted under a key derived from the Solana signature — fine for them, but no Privy-equivalent EVM identity on external-wallet users. Decide if that matters for your app.
 
-**`user.linkedAccounts` is gone.** Anywhere code probed `user.linkedAccounts` to find embedded vs external, switch to `user.wallets.find((w) => w.chain === "solana" && w.role === "funds")` (embedded) vs `useExternalWallet().connected` (external).
+**`user.linkedAccounts` is gone — and don't replace it with `role === "funds"`. ⚠️** Use
+**`useActiveWallet()`** (or `useWallets().find(w => w.isIdentity)`).
+
+`role === "funds"` looks like the obvious translation and it is **wrong for Web3 accounts**. For an
+email/biometric account the embedded Solana `funds` wallet *is* the identity. For a
+`authMethod: "wallet"` account the identity is the **connected wallet** (`user.publicKey`) — the SDK
+holds no key for it, and it is *not* in `user.wallets`. So:
+
+- `wallets.find(w => w.role === "funds")` returns **nothing** for a clean Web3 account…
+- …or, on an account created **before v0.5.1**, it returns a **stray embedded wallet** that the SDK
+  should never have generated. Render that as a deposit address and the user sends funds to a wallet
+  they don't know they own. (Fixed in v0.5.1 — `connectWallet`/`registerWithWallet` no longer mint a
+  second Solana funds wallet, and `useActiveWallet()` now resolves the Web3 identity from the record
+  rather than from the wallet-adapter connection.)
+
+`useActiveWallet()` gets this right on both paths, and returns `encrypted: null` for an external
+wallet — which is also your signal that there is **nothing to export** (you cannot export a Phantom
+key). Gate any export UI on `active?.encrypted`, exactly as the demo does.
 
 **`embeddedWallets.showWalletUIs: false`** — no equivalent needed; the SDK has no UI to hide.
 

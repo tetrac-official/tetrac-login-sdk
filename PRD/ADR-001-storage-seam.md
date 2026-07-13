@@ -4,10 +4,9 @@
 the current `StorageAdapter` without degenerating under load. Is `StorageAdapter` the wrong seam —
 and if so, do we re-engineer it now?
 
-- **Status:** 🟡 Proposed — decision required before `PRD/v0.5.0-PRD.md` §3 (the conformance suite)
-  is built, because the suite is the acceptance bar for whichever interface we pick. Building it
-  against the wrong seam is the one genuinely wasteful outcome available to us.
-- **Recommendation:** **Yes — introduce a domain-level `AuthStore` port, additively.** Keep
+- **Status:** ✅ **ACCEPTED AND IMPLEMENTED** — shipped in **`0.5.0`**. The refactor described below
+  is done, not planned. See the ledger immediately after this list.
+- **Recommendation (adopted):** introduce a domain-level `AuthStore` port, additively. Keep
   `StorageAdapter` as a *KV-backend* contract, and ship `KvAuthStore`, which implements `AuthStore`
   on top of any `StorageAdapter`. Redis / Upstash / Vercel KV / Memory keep working **unchanged**.
   Convex, Postgres, DynamoDB, Firestore, and Durable Objects implement `AuthStore` **natively**.
@@ -15,6 +14,42 @@ and if so, do we re-engineer it now?
   intrinsic to the problem — they are **artifacts of the KV seam**, and they disappear when the port
   is expressed in the domain's own vocabulary. Convex is what made this visible, but it is not a
   Convex-specific finding.
+
+### What landed (`0.5.0`) — the implementation ledger
+
+| ADR item | Status | Where |
+|---|---|---|
+| `AuthStore` domain port (11 methods) | ✅ | [`src/storage/store.ts`](../src/storage/store.ts) |
+| `KvAuthStore` — `AuthStore` over any `StorageAdapter` | ✅ | same file |
+| `session.ts` / `challenge.ts` / `rateLimit.ts` take `store: AuthStore` | ✅ | `src/server/*` |
+| `createNextAuthRoutes({ storage })` still works; `{ store }` added | ✅ | `src/server/routes.ts` |
+| `hitRateLimit(bucket, window, max)` — one atomic **decision**, structured bucket | ✅ | `store.ts` |
+| Sessions keyed by `SHA-256(token)`, in **both** storage locations | ✅ | `crypto.ts`, `session.ts` |
+| Optional `sweepExpired?()` / `close?()`, honestly feature-detected | ✅ | `adapter.ts`, `store.ts` |
+| One conformance suite, on `AuthStore` | ✅ | [`src/storage/conformance.ts`](../src/storage/conformance.ts) |
+| …with a **negative control** proving it can fail | ✅ | `tests/storage-conformance-negative.test.ts` |
+| …**run against a REAL Redis** in CI | ✅ | `tests/storage-conformance-redis.test.ts` + `.github/workflows/ci.yml` |
+| Convex backend | ⛔ **Deliberately not built** — §6.2. The seam makes it *expressible*; demand decides if it ships. |
+
+**Two deliberate deviations from the interface sketched in §3**, both improvements found while
+implementing:
+
+1. **`RateLimitBucket.appId` is optional**, not required. The client-IP bucket is intentionally
+   *global* across endpoints and tenants (one abusive IP is throttled everywhere at once), so it has
+   no `appId`. Forcing one would have meant inventing a sentinel value.
+2. **`normalizeEmail()` is exported and mandated**, and the conformance suite tests it. Every
+   `AuthStore` must route both the email-index write and read through it. This was not in the ADR and
+   it needs to be: the alternative — letting each backend delegate case-insensitivity to its column
+   collation — would on MySQL *also* case-fold the `appId` and the base58 public key, silently merging
+   distinct tenants and distinct accounts. Case-insensitivity is a property of **the email**, not of
+   the keyspace.
+
+**One item from §3 that did *not* fully land, and why:** the `publicKey|fingerprint` string-splitting
+hack is gone from `session.ts` (which now speaks `SessionValue`), but `KvAuthStore` still encodes to
+that string internally — a KV backend has to serialize to *something*, and this is the historical
+Redis value format. It is safe (base58 public keys and hex fingerprints cannot contain `|`), but it is
+an artifact of the KV port, and a **native** `AuthStore` backend must store `publicKey` and
+`fingerprint` as two typed fields rather than copying it.
 
 ---
 

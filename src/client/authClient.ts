@@ -71,6 +71,29 @@ const DEFAULT_WALLET_GEN: WalletGenConfig = {
   evm: ["funds", "signing"],
 };
 
+/**
+ * The wallet bundle to generate for a WEB3 (connected-wallet) login.
+ *
+ * For email/biometric accounts the embedded Solana `funds` wallet IS the account
+ * identity — it is generated here and its public key becomes `UserData.publicKey`.
+ *
+ * For a Web3 login that is NOT true: the user's connected wallet (Phantom, Solflare,
+ * Ledger…) is already their Solana funds wallet, and it becomes `UserData.publicKey`.
+ * Generating a SECOND Solana `funds` wallet gives them a wallet they never asked for,
+ * whose private key the SDK holds and will happily reveal, and — worse — which
+ * `useActiveWallet()`/`useWallets()` then surface as "the Solana funds wallet",
+ * shadowing the real one. An app rendering that as a deposit address would send the
+ * user's funds to a wallet they don't know they own. (v0.5.1)
+ *
+ * So: strip the `funds` role from Solana. Other roles still make sense — a Solana
+ * `signing` (hot/session) wallet, and EVM wallets, are genuinely additional keys the
+ * connected Solana wallet cannot provide.
+ */
+function web3WalletGen(gen: WalletGenConfig): WalletGenConfig {
+  const solana = gen.solana?.filter((role) => role !== "funds");
+  return { ...gen, solana: solana?.length ? solana : undefined };
+}
+
 function bytesToHex(bytes: Uint8Array): string {
   let hex = "";
   for (const b of bytes) hex += b.toString(16).padStart(2, "0");
@@ -321,7 +344,8 @@ export class AuthClient {
       params.hardwareWallet,
     );
     // Sent only if the wallet is new; the server ignores it for returning wallets.
-    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
+    // NO embedded Solana `funds` wallet: the wallet they just connected IS it (web3WalletGen).
+    const bundle = await generateWalletBundle({ appKey, ...web3WalletGen(this.walletGen) });
     const result = await this.post<AuthResult>("connect-wallet", {
       publicKey: params.publicKey,
       signature: signatureHex,
@@ -344,8 +368,9 @@ export class AuthClient {
       params.signMessage,
       params.hardwareWallet,
     );
-    // The connected wallet is the funds identity; generate extra (e.g. signing) wallets.
-    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
+    // The connected wallet IS the Solana funds identity — generate only the extra wallets
+    // (Solana `signing`, EVM). web3WalletGen strips the redundant Solana `funds` role.
+    const bundle = await generateWalletBundle({ appKey, ...web3WalletGen(this.walletGen) });
     const result = await this.post<AuthResult>("register", {
       publicKey: params.publicKey,
       authMethod: "wallet",
