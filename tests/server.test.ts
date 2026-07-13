@@ -1,4 +1,5 @@
 import { Keypair } from "@solana/web3.js";
+import { hashSessionToken } from "../src/core/crypto";
 import nacl from "tweetnacl";
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
@@ -193,7 +194,7 @@ describe("session lifecycle (H1)", () => {
       storage,
       config: { sessionTtlSeconds: 100 },
     });
-    const sessionStoreKey = `session:ttc:${body.authToken}`;
+    const sessionStoreKey = `session:ttc:${hashSessionToken(body.authToken)}`;
 
     expect(await storage.get(sessionStoreKey)).toBe(body.publicKey); // alive now
     now += 99_000; // still inside the 100s TTL
@@ -205,25 +206,25 @@ describe("session lifecycle (H1)", () => {
   it("a new login revokes the previous session token", async () => {
     const { h, storage, body, appKey } = await registerEmailUser();
     const firstToken = body.authToken;
-    expect(await storage.get(`session:ttc:${firstToken}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:ttc:${hashSessionToken(firstToken)}`)).toBe(body.publicKey);
 
     const login = await loginEmail(h, { email: "user@example.com", appKey });
     const loginBody = await login.json();
     expect(loginBody.authToken).not.toBe(firstToken);
     // Old token is revoked; only the new one resolves.
-    expect(await storage.get(`session:ttc:${firstToken}`)).toBeNull();
-    expect(await storage.get(`session:ttc:${loginBody.authToken}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:ttc:${hashSessionToken(firstToken)}`)).toBeNull();
+    expect(await storage.get(`session:ttc:${hashSessionToken(loginBody.authToken)}`)).toBe(body.publicKey);
   });
 
   it("logout revokes the presented session token and always returns 200 { ok }", async () => {
     const { h, storage, body } = await registerEmailUser();
     const token = body.authToken;
-    expect(await storage.get(`session:ttc:${token}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBe(body.publicKey);
 
     const res = await h.logout(req({}, { "ttc-auth-token": token, "ttc-public-key": body.publicKey }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
-    expect(await storage.get(`session:ttc:${token}`)).toBeNull(); // revoked
+    expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBeNull(); // revoked
   });
 });
 

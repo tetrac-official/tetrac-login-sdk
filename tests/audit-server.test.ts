@@ -9,6 +9,8 @@
 // SERVERSIDE-11 (no input validation), WEBAUTHN-1 (login now requires a challenge
 // signature, not a bearer hash).
 import { createAuthHandlers } from "../src/server/routes";
+import { KvAuthStore } from "../src/storage/store";
+import { hashSessionToken } from "../src/core/crypto";
 import { MemoryAdapter } from "../src/storage/memory";
 import { getUserByPublicKey } from "../src/server/session";
 import { DEFAULT_CONFIG } from "../src/core/config";
@@ -172,7 +174,7 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
     // The victim's live session now lives under "session:<token>" (NOT "pubKey:session:<token>").
     const { body } = await registerUser(h, "victim@example.com");
     const token = body.authToken;
-    expect(await storage.get(`session:ttc:${token}`)).toBe(body.publicKey);
+    expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBe(body.publicKey);
 
     // An attacker can't even register publicKey="session:<token>" — strict Solana
     // validation rejects it (400, ':' isn't base58), so the namespace collision the
@@ -184,13 +186,17 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
       wallets: [],
     });
     expect(atk.status).toBe(400);
-    expect(await storage.get(`session:ttc:${token}`)).toBe(body.publicKey); // intact
+    expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBe(body.publicKey); // intact
   });
 
   it("getUserByPublicKey guards JSON.parse — a non-JSON stored value yields null, not a crash", async () => {
     const storage = new MemoryAdapter();
     await storage.set("pubKey:ttc:weird", "not-json{"); // malformed record
-    const user = await getUserByPublicKey(storage, "ttc", "weird", DEFAULT_CONFIG);
+    const user = await getUserByPublicKey(
+      new KvAuthStore(storage, DEFAULT_CONFIG.keyPrefixes),
+      "ttc",
+      "weird",
+    );
     expect(user).toBeNull();
   });
 });

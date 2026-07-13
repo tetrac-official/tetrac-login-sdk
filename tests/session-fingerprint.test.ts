@@ -4,6 +4,7 @@
 // is rejected. Enforcement is per-session: a bound session stays bound even if the
 // flag is later disabled.
 import { createAuthHandlers } from "../src/server/routes";
+import { hashSessionToken } from "../src/core/crypto";
 import { MemoryAdapter } from "../src/storage/memory";
 import { hashUserAgent } from "../src/core/crypto";
 import { deriveAuthPublicKey } from "../src/client/authKey";
@@ -52,7 +53,7 @@ describe("session→User-Agent binding (WI-23)", () => {
     const h = createAuthHandlers({ storage });
     const { authToken, publicKey } = await (await register(h, UA_A)).json();
 
-    expect(await storage.get(`session:ttc:${authToken}`)).toBe(publicKey); // no "|fingerprint"
+    expect(await storage.get(`session:ttc:${hashSessionToken(authToken)}`)).toBe(publicKey); // no "|fingerprint"
     // A totally different UA still verifies — binding is off.
     expect((await userData(h, authToken, publicKey, UA_B)).status).toBe(200);
   });
@@ -62,7 +63,9 @@ describe("session→User-Agent binding (WI-23)", () => {
     const h = createAuthHandlers({ storage, config: { bindSessionToUserAgent: true } });
     const { authToken, publicKey } = await (await register(h, UA_A)).json();
 
-    expect(await storage.get(`session:ttc:${authToken}`)).toBe(`${publicKey}|${hashUserAgent(UA_A)}`);
+    expect(await storage.get(`session:ttc:${hashSessionToken(authToken)}`)).toBe(
+      `${publicKey}|${hashUserAgent(UA_A)}`,
+    );
     expect((await userData(h, authToken, publicKey, UA_A)).status).toBe(200);
   });
 

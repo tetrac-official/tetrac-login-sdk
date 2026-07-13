@@ -13,6 +13,8 @@ export interface RedisLike {
   hset(key: string, field: string, value: string): Promise<unknown>;
   hdel(key: string, field: string): Promise<unknown>;
   hgetall(key: string): Promise<Record<string, string>>;
+  /** OPTIONAL so existing mocks (which have no quit) still satisfy this type. ioredis has it. */
+  quit?(): Promise<unknown>;
 }
 
 export class RedisAdapter implements StorageAdapter {
@@ -62,4 +64,19 @@ export class RedisAdapter implements StorageAdapter {
     // ioredis returns {} for a missing key, never null.
     return (await this.client.hgetall(key)) ?? {};
   }
+
+  /**
+   * Release the ioredis socket (v0.5.0). ioredis holds a live TCP connection, and until
+   * now there was no way to release it: Jest hangs on the open handle, and a long-lived
+   * Node/Express server leaks a connection per reload with no graceful-shutdown path.
+   *
+   * Idempotent, and safe against a client that has no `quit` (a mock, or a pooled client
+   * the app owns and closes itself) — hence the feature-detect.
+   */
+  async close(): Promise<void> {
+    await this.client.quit?.();
+  }
+
+  // No `sweepExpired()`: Redis expiry is native and exact, so there is nothing to
+  // reclaim. Omitted deliberately.
 }

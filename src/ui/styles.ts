@@ -13,7 +13,9 @@ const DEFAULT_ACCENT = "#111111";
 export function buildStyles(appearance?: LoginPanelAppearance): Record<LoginPanelSlot, CSSProperties> {
   const radius = appearance?.radius ?? DEFAULT_RADIUS;
   // `accent` is kept for API stability but the new design uses one flat colour
-  // for every button (no gradient, no primary/secondary split).
+  // for every button (no gradient, no primary/secondary split). The 0.5.0
+  // hardware-wallet toggle applies `appearance.accent` to its ON-state track
+  // inline in LoginPanel (state-dependent), so buildStyles still ignores it here.
   void (appearance?.accent ?? DEFAULT_ACCENT);
 
   const baseInput: CSSProperties = {
@@ -81,6 +83,89 @@ export function buildStyles(appearance?: LoginPanelAppearance): Record<LoginPane
     error: { color: "#b91c1c", fontSize: 13 },
     divider: { border: "none", borderTop: "1px solid #e4e4e7", margin: 0 },
     muted: { color: "#71717a", fontSize: 13 },
+
+    // --- 0.5.0: hardware-wallet toggle (accessible switch) ---
+    // Row: [track+knob] [label / description column]. Sits directly under the
+    // wallet button inside the method stack.
+    toggle: {
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 12,
+      padding: "4px 2px",
+      cursor: "pointer",
+      userSelect: "none",
+    },
+    // The visible switch body. `background` here is the OFF colour; the ON colour
+    // (appearance.accent) is applied inline in LoginPanel (state-dependent).
+    toggleTrack: {
+      position: "relative",
+      flexShrink: 0,
+      width: 44,
+      height: 26,
+      borderRadius: 999,
+      background: "#d4d4d8",
+      transition: "background 120ms ease",
+      boxSizing: "border-box",
+      marginTop: 2,
+    },
+    // The sliding knob. The on-transform (translateX) is applied inline.
+    toggleKnob: {
+      position: "absolute",
+      top: 3,
+      left: 3,
+      width: 20,
+      height: 20,
+      borderRadius: 999,
+      background: "#ffffff",
+      boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+      transition: "transform 120ms ease",
+    },
+    toggleLabel: { fontSize: 14, fontWeight: 600, color: "#111111", lineHeight: 1.3 },
+    toggleDescription: { fontSize: 12, color: "#71717a", lineHeight: 1.4, marginTop: 2 },
+
+    // --- 0.5.0: passkey generator ---
+    // Positioned wrapper around the passkey <input> so the generate button can be
+    // an absolutely-positioned right adornment. `position: relative` is the
+    // load-bearing bit; the input inside gets right padding inline so typed text
+    // never slides under the button. This wrapper is only rendered when the
+    // generator is active — the no-generator render stays byte-identical.
+    passkeyField: { position: "relative", display: "block", width: "100%" },
+    passkeyGenerateButton: {
+      position: "absolute",
+      top: "50%",
+      right: 8,
+      transform: "translateY(-50%)",
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: 32,
+      height: 32,
+      padding: 0,
+      borderRadius: Math.max(8, radius - 6),
+      border: "1px solid #d4d4d8",
+      background: "#ffffff",
+      color: "#111111",
+      cursor: "pointer",
+      fontSize: 14,
+      lineHeight: 1,
+    },
+    // The one-time reveal block under the input — monospace secret + warning.
+    // Amber, mirrors ExportKeyPanel.secretBlock so the two "here is a secret"
+    // surfaces read the same.
+    passkeyReveal: {
+      padding: 12,
+      borderRadius: radius,
+      border: "1px solid #fde68a",
+      background: "#fffbeb",
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      fontSize: 13,
+      wordBreak: "break-all",
+      userSelect: "all",
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+    },
+    passkeyRevealActions: { display: "flex", gap: 8, alignItems: "center" },
   };
 }
 

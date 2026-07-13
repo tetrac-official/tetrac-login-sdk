@@ -37,6 +37,10 @@ export function selectStorageBackend(): StorageBackend {
     );
   }
 
+  // Upstash is checked BEFORE Vercel KV, and that ordering is now DELIBERATE rather than
+  // incidental: Vercel sunset Vercel KV (Oct 2024) and routes it to Upstash via the
+  // Marketplace, so on a Vercel deployment that has both, Upstash is the live product and
+  // @vercel/kv is the legacy shim. Do not reorder these two. (v0.5.0)
   if (env("UPSTASH_REDIS_REST_URL") && env("UPSTASH_REDIS_REST_TOKEN")) return { kind: "upstash" };
   if (env("VERCEL") || env("KV_REST_API_URL")) return { kind: "vercelkv" };
 

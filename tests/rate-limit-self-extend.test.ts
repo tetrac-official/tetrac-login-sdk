@@ -11,6 +11,7 @@
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { checkRateLimit } from "../src/server/rateLimit";
+import { KvAuthStore } from "../src/storage/store";
 import type { RateLimitConfig, KeyPrefixes } from "../src/core/config";
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
@@ -24,9 +25,15 @@ function req(body: unknown, headers: Record<string, string> = {}): Request {
 const defaultPrefixes: KeyPrefixes = {
   challenge: "challenge:",
   pubKey: "pubKey:",
+  session: "session:",
   email: "email:",
   rateLimit: "ratelimit:",
 };
+
+// v0.5.0: rate limiting is now one atomic DECISION on the AuthStore port, so these
+// tests drive it through KvAuthStore (the Redis-shaped backend, unchanged underneath).
+const store = (s: MemoryAdapter) => new KvAuthStore(s, defaultPrefixes);
+const bucket = (identifier: string) => ({ endpoint: "login", appId: "ttc", identifier });
 
 describe("rate limit window behavior (C7)", () => {
   it("rate-limited identifier clears after the window expires", async () => {
@@ -36,17 +43,17 @@ describe("rate limit window behavior (C7)", () => {
 
     // Exhaust the limit
     for (let i = 0; i < 3; i++) {
-      const r = await checkRateLimit(storage, "user-1", config, defaultPrefixes);
+      const r = await checkRateLimit(store(storage), bucket("user-1"), config);
       expect(r.allowed).toBe(true);
     }
-    const exceeded = await checkRateLimit(storage, "user-1", config, defaultPrefixes);
+    const exceeded = await checkRateLimit(store(storage), bucket("user-1"), config);
     expect(exceeded.allowed).toBe(false);
 
     // Advance past the window
     now += 61_000;
 
     // Should be allowed again (window expired)
-    const reset = await checkRateLimit(storage, "user-1", config, defaultPrefixes);
+    const reset = await checkRateLimit(store(storage), bucket("user-1"), config);
     expect(reset.allowed).toBe(true);
   });
 
@@ -57,12 +64,12 @@ describe("rate limit window behavior (C7)", () => {
 
     // Exhaust the limit
     for (let i = 0; i < 3; i++) {
-      await checkRateLimit(storage, "user-2", config, defaultPrefixes);
+      await checkRateLimit(store(storage), bucket("user-2"), config);
     }
 
     // Hit the limit a few more times (each triggers the self-heal expire)
     for (let i = 0; i < 5; i++) {
-      const r = await checkRateLimit(storage, "user-2", config, defaultPrefixes);
+      const r = await checkRateLimit(store(storage), bucket("user-2"), config);
       expect(r.allowed).toBe(false);
     }
 
@@ -70,7 +77,7 @@ describe("rate limit window behavior (C7)", () => {
     now += 30_000;
 
     // Still blocked because the last self-heal refreshed the TTL
-    const stillBlocked = await checkRateLimit(storage, "user-2", config, defaultPrefixes);
+    const stillBlocked = await checkRateLimit(store(storage), bucket("user-2"), config);
     expect(stillBlocked.allowed).toBe(false);
   });
 
@@ -78,20 +85,20 @@ describe("rate limit window behavior (C7)", () => {
     const storage = new MemoryAdapter();
     const config: RateLimitConfig = { maxAttempts: 2, windowSeconds: 60 };
 
-    const a1 = await checkRateLimit(storage, "alice", config, defaultPrefixes);
-    const b1 = await checkRateLimit(storage, "bob", config, defaultPrefixes);
+    const a1 = await checkRateLimit(store(storage), bucket("alice"), config);
+    const b1 = await checkRateLimit(store(storage), bucket("bob"), config);
     expect(a1.allowed).toBe(true);
     expect(b1.allowed).toBe(true);
 
-    const a2 = await checkRateLimit(storage, "alice", config, defaultPrefixes);
+    const a2 = await checkRateLimit(store(storage), bucket("alice"), config);
     expect(a2.allowed).toBe(true);
 
     // Alice exceeds limit
-    const a3 = await checkRateLimit(storage, "alice", config, defaultPrefixes);
+    const a3 = await checkRateLimit(store(storage), bucket("alice"), config);
     expect(a3.allowed).toBe(false);
 
     // Bob is unaffected
-    const b2 = await checkRateLimit(storage, "bob", config, defaultPrefixes);
+    const b2 = await checkRateLimit(store(storage), bucket("bob"), config);
     expect(b2.allowed).toBe(true);
   });
 
@@ -113,12 +120,12 @@ describe("rate limit window behavior (C7)", () => {
 
     // Exhaust the limit
     for (let i = 0; i < 3; i++) {
-      await checkRateLimit(storage, "crash-user", config, defaultPrefixes);
+      await checkRateLimit(store(storage), bucket("crash-user"), config);
     }
 
     // Without self-heal, the counter is stuck with no TTL and blocks forever.
     // The self-heal (count > maxAttempts) calls expire.
-    const r = await checkRateLimit(storage, "crash-user", config, defaultPrefixes);
+    const r = await checkRateLimit(store(storage), bucket("crash-user"), config);
     expect(r.allowed).toBe(false);
     expect(expireCalled).toBe(true); // self-heal kicked in
 
@@ -132,7 +139,7 @@ describe("rate limit window behavior (C7)", () => {
     // Hit the limit many times — MemoryAdapter.incr returns numbers
     // (not infinite). Verify it stays blocked.
     for (let i = 0; i < 20; i++) {
-      const r = await checkRateLimit(storage, "overflow-user", config, defaultPrefixes);
+      const r = await checkRateLimit(store(storage), bucket("overflow-user"), config);
       if (i < 5) {
         expect(r.allowed).toBe(true);
       } else {
