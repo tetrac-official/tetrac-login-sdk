@@ -247,10 +247,21 @@ export class KvAuthStore implements AuthStore {
       // and drops the stale TTL, which is what makes this correct — and is exactly the
       // invariant a naive SQL upsert gets wrong, producing a permanent lockout.)
       await this.kv.expire(key, windowSeconds);
-    } else if (count > maxAttempts) {
-      // Self-heal: a crash between a prior incr and its expire would leave the counter
-      // wedged over the limit with NO TTL, blocking this identifier forever. Re-applying
-      // expire is cheap and idempotent and guarantees the counter can drain.
+    } else if (count === maxAttempts + 1) {
+      // Self-heal, ONCE per window — deliberately not on every over-limit hit.
+      //
+      // The hazard being healed is a crash between a prior incr and its expire, which
+      // leaves the counter with NO TTL and would block this identifier forever. Firing on
+      // the FIRST hit past the cap heals that within at most `maxAttempts` further
+      // requests, which is all the guarantee is worth.
+      //
+      // Firing on EVERY over-limit hit (`count > maxAttempts`) instead made each one
+      // extend the window, so the counter never drained while traffic continued. Once past
+      // the cap a single request per window held it there indefinitely and `count` grew
+      // without bound. Because these buckets are keyed on a CALLER-SUPPLIED email or
+      // public key, that turned a throttle into an unauthenticated, targeted denial of
+      // service against a named account, at traffic well under the published limit.
+      // See tests/rate-limit-sustained-lockout.test.ts.
       await this.kv.expire(key, windowSeconds);
     }
     return {
