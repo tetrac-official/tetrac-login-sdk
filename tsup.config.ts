@@ -11,6 +11,12 @@ const external = [
   "ioredis",
   "@vercel/kv",
   "@upstash/redis",
+  // SQL drivers (ADR-002). The SDK types them STRUCTURALLY (PgLike/MysqlLike/SqliteLike)
+  // and never imports them, so these should never appear in the graph at all — listing
+  // them is belt-and-braces so a stray import can't bundle a database driver into dist.
+  "pg",
+  "mysql2",
+  "better-sqlite3",
   // Ledger packages are optional peer deps loaded lazily inside the /ledger
   // hook. Keep them external so they are never bundled and consumers supply a
   // single copy (the transports are dynamically imported only on connect).
@@ -52,6 +58,7 @@ export default defineConfig([
       // Its own entry, deliberately NOT re-exported from storage/index — a test kit must
       // never be reachable from a production server bundle.
       "storage/conformance": "src/storage/conformance.ts",
+      "storage/sql/index": "src/storage/sql/index.ts",
       "next/index": "src/next/index.ts",
     },
     clean: true,

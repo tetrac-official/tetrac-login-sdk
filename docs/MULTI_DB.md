@@ -1,10 +1,26 @@
 # Feature PRD — Pluggable database providers / Bring-Your-Own-Database (`0.6.0`)
 
-> **Retargeted to `0.6.0`.** The backend-agnostic groundwork this document depends on — the session-
-> token hashing (§4.6), the optional `close?()` / `sweepExpired?()` methods (§3.3), the conformance
-> suite (§7), the `MemoryAdapter.del` fix (§3.8), and the `/login` key-validation prerequisite
-> (§3.9) — ships first, **Redis-only**, in **[`PRD/v0.5.0-PRD.md`](../PRD/v0.5.0-PRD.md)**. No new
-> database provider ships in `0.5.0`. This document remains the design for the adapters themselves.
+> ## ⚠️ Read this first — the AUDIENCE of this document has changed
+>
+> **[`PRD/ADR-002`](../PRD/ADR-002-uniform-backend-architecture.md) supersedes the *strategy* of this
+> document, though not its content.**
+>
+> Everything below is **correct**, and it is why we are changing course: this is *eleven pages of
+> "here is how to correctly emulate the thing we already know how to do."* If we understand the right
+> answer that precisely, it belongs **in code, once** — not in a document each integrator must read,
+> internalize, and re-implement per engine. Exporting this analysis to N backend authors is how you
+> get a silent, catastrophic bug in someone's production deployment.
+>
+> Under ADR-002 the SDK **owns** this logic (`SqlAuthStore` + a ~30-line dialect per engine), so:
+>
+> - **If you are integrating the SDK** — you do not need this document. You need
+>   **[`docs/DATABASES.md`](./DATABASES.md)** (which database to pick) and four steps. None of the
+>   hazards below are yours.
+> - **If you are a maintainer writing a dialect** — this is your spec. Read it in full.
+>
+> **Also landed already (`0.5.0`, Redis-only):** session-token hashing (§4.6), `close?()` /
+> `sweepExpired?()` (§3.3), the conformance suite (§7), the `MemoryAdapter.del` fix (§3.8), and the
+> `/login` key-validation prerequisite (§3.9). See **[`PRD/v0.5.0-PRD.md`](../PRD/v0.5.0-PRD.md)**.
 
 Let a developer back `@tetrac/login-sdk` with **whatever database they already run** —
 PostgreSQL (incl. Supabase), MySQL, SQLite, MongoDB, Couchbase, or a fully custom store —
@@ -14,7 +30,13 @@ is undocumented, unverified, and has no first-party adapter outside the Redis fa
 PRD formalizes the existing extension point, spells out the **non-obvious correctness
 contract** a new backend must honor, and ships batteries-included adapters for it.
 
-- **Status:** 📝 Proposed. Not yet implemented.
+- **Status:** ✅ **DELIVERED — but not the way this document proposed.** The *goal* (Postgres,
+  MySQL, SQLite behind the SDK) shipped in **`0.6.0`**. The *strategy* did not: this document asked
+  each **integrator** to implement an adapter and honor the hazards below, and
+  [`PRD/ADR-002`](../PRD/ADR-002-uniform-backend-architecture.md) replaced that with **the SDK owning
+  the correctness** (`SqlAuthStore` + a ~30-line dialect per engine). The hazard analysis below is
+  still correct and still load-bearing — it is now the SDK's **internal spec** for dialects, not the
+  integrator's homework. Mongo/DynamoDB (a `DocumentAuthStore`) remain **not built**.
 - **Shape:** **Additive.** No change to `StorageAdapter`'s 10 required method signatures; no
   behavior change for any currently-configured deployment; no new runtime `dependencies`.
   Any app on `0.4.x` upgrades with zero code changes. Three existing files need a source edit,
@@ -382,6 +404,12 @@ data — the dotted-`appId` case (§3.4) is the one that catches the realistic b
 
 ### 3.8 `del` semantics across the two keyspaces — an ambiguity to resolve now
 
+> ✅ **LANDED in `0.5.0` — out of `0.6.0` scope.** Resolved as specified: `del` now removes the key
+> from **both** keyspaces, and `MemoryAdapter.del` was fixed to match (it previously cleared only the
+> string map, silently diverging from `RedisAdapter` — which made the "normative reference
+> implementation" not actually normative). Pinned by a conformance case.
+
+
 Real Redis `DEL` removes a key of **any** type. `RedisAdapter` inherits that.
 `MemoryAdapter.del` deletes only from its string map, never `hstore`. **These already disagree.**
 It is unobservable today (no caller ever `del`s an email-index key), but a two-table SQL adapter
@@ -393,6 +421,11 @@ forces the question — does `del` touch `ttc_kv_hash`?
 > single new adapter is written.
 
 ### 3.9 Every substring of a key must be length-bounded *before* it reaches the adapter 🚨
+
+> ✅ **LANDED in `0.5.0` — out of `0.6.0` scope.** `/login` now validates `body.email` before it can
+> reach a storage key, matching `/register`. The ≤320-byte bound this section's column sizing depends
+> on is therefore real rather than assumed.
+
 
 §3.6 sizes the key column at 512 by deriving a worst case from the validators. That derivation is
 only sound if the validators actually run on every path that builds a key. **On the email-login
@@ -433,6 +466,12 @@ adds a keyed write to that path.
 > losslessly is non-conformant.*
 
 ### 3.10 Storage failures must fail **closed**
+
+> ✅ **LANDED in `0.5.0` — out of `0.6.0` scope.** Now a written contract clause on `AuthStore` *and* a
+> regression test (a `BrokenRateLimitStore` whose `hitRateLimit` throws, asserting the route rejects
+> rather than allowing). Note it is deliberately NOT a conformance case: you cannot inject a fault
+> into an arbitrary conforming store handed to you as a black box.
+
 
 `checkRateLimit` has no `try`/`catch`: if `incr` throws, the exception propagates out of the route
 and the request 500s. That is the **correct** behavior — a rate limiter that cannot count must not
@@ -573,6 +612,12 @@ rather than silently depending on it. Driver **query logging must not log parame
 the bundler will try to bundle them and fail at build.
 
 ### 4.6 Hash the session token before it becomes a key 🚨 — the highest-leverage change here
+
+> ✅ **LANDED in `0.5.0` — out of `0.6.0` scope.** Shipped, and *larger* than this section originally
+> specified: the raw token was stored in **two** places (the session key **and** the `UserData` blob),
+> so hashing only the key would have been a false fix — a leaked table would still have yielded live,
+> replayable credentials. Both now store `SHA-256(token)`. Cost: one forced re-login on upgrade.
+
 
 Everything above hardens the *container*. This hardens the *contents*, and it is the one change
 that degrades gracefully when the container fails anyway.

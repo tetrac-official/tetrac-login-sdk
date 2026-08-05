@@ -33,4 +33,11 @@ export default {
     "/node_modules/(?!(@solana|rpc-websockets|uuid|jayson|superstruct|borsh|@noble|@solana-program)/)",
   ],
   testMatch: ["**/tests/**/*.test.ts?(x)"],
+  // Jest's 5s default is too tight for this suite, for two independent reasons — and both bite
+  // hardest exactly where the machine is busiest (CI, or a laptop running the Docker engines):
+  //   • PBKDF2 is DELIBERATELY slow. A single email register/login does a 100k-iteration
+  //     derivation, and several tests do multiple.
+  //   • The real-engine runs (Postgres/MySQL/Redis) talk to containers over TCP.
+  // A test that fails only under load is worse than useless: it trains people to re-run CI.
+  testTimeout: 30_000,
 };

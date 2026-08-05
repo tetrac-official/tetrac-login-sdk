@@ -13,9 +13,16 @@
 [![CI](https://github.com/tetrac-official/tetrac-login-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/tetrac-official/tetrac-login-sdk/actions/workflows/ci.yml)
 
 [**npm**](https://www.npmjs.com/package/@tetrac/login-sdk) ·
+[Changelog](./CHANGELOG.md) ·
 [Security policy](./SECURITY.md) ·
 [Crypto spec](./docs/CRYPTO_SPEC.md) ·
-[Threat model](./docs/THREAT_MODEL.md)
+[Threat model](./docs/THREAT_MODEL.md) ·
+[Choosing a database](./docs/DATABASES.md) ·
+[Storage backends](./docs/STORAGE_ADAPTERS.md)
+
+> **Upgrading from `0.4.x`?** `0.5.0` stores session tokens as SHA-256 digests, so **every user is
+> logged out once** on deploy. It self-heals (users just sign in again) and nothing else is breaking —
+> see the [changelog](./CHANGELOG.md).
 
 </div>
 
@@ -76,22 +83,80 @@ export const { GET, POST } = createNextAuthRoutes({ storage });
 
 ### Bring your own database
 
-`storage` takes a Redis-shaped KV backend. To use **anything else** — Postgres/Supabase, MySQL,
-SQLite, MongoDB, DynamoDB, Convex — implement the **`AuthStore`** port and pass `store` instead:
+> **Which one?** → **[`docs/DATABASES.md`](./docs/DATABASES.md)** — the honest pros/cons of each.
+> Short version: **PostgreSQL** unless you already run something else (it covers Supabase, Neon, RDS,
+> Railway, Render, Fly and CockroachDB with one implementation). And **Cloudflare Workers KV cannot
+> back this SDK** — no atomic increment, no atomic get-and-delete; rate limiting would silently not
+> work and login challenges would be replayable. Use Durable Objects.
+
+**PostgreSQL, MySQL, and SQLite are first-class** — and the setup is the *same four steps* for each.
+You write no queries, no schema, and no expiry logic: the SDK owns all of it
+([ADR-002](./PRD/ADR-002-uniform-backend-architecture.md)).
+
+```bash
+# 1. install the driver you already use
+npm i pg          # or mysql2 / better-sqlite3
+```
+
+```ts
+// 2. create the schema — the SDK emits it. Do NOT hand-roll it: the column types and keys
+//    are load-bearing (they're what make lost writes and collation collisions impossible).
+import { schemaFor } from "@tetrac/login-sdk/storage/sql";
+console.log(schemaFor("postgres")); // → run this against your DB
+```
+
+```ts
+// 3. point the SDK at it — the only line that differs between databases
+import { createPostgresAuthStore } from "@tetrac/login-sdk/storage/sql";
+import { Pool } from "pg";
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL }); // module-level singleton!
+const store = await createPostgresAuthStore({ client: pool }); // preflight runs here
+
+export const { GET, POST } = createNextAuthRoutes({ store });
+```
+
+```ts
+// 4. wire the sweeper (space + PII: rate-limit rows hold emails and IPs)
+export const GET = () => store.sweepExpired();  // hit from a cron
+```
+
+`createMysqlAuthStore` and `createSqliteAuthStore` are identical in shape. **Preflight refuses to
+boot** on the misconfigurations that would otherwise fail silently and catastrophically — a
+Supabase table in the world-readable `public` schema, a MySQL server not in strict mode (it would
+truncate wallet blobs into oblivion), a SQLite file sitting under `public/`.
+
+<details>
+<summary><b>Anything else</b> — Mongo, DynamoDB, Convex, or a homegrown store</summary>
+
+Implement the **`AuthStore`** port directly and pass `store`. It is the domain port — users,
+sessions, challenges, and **one atomic rate-limit decision** (`hitRateLimit`) rather than an `incr`
+primitive.
 
 ```ts
 export const { GET, POST } = createNextAuthRoutes({ store: new MyStore(client) });
 ```
 
-`AuthStore` is the domain port (users, sessions, challenges, and one atomic rate-limit *decision*),
-so your database does what it is good at instead of emulating Redis primitives. Both options are
-fully supported and `storage` needs no changes.
+⚠️ Here you *are* on the hook for correctness — a plausible-looking backend can permanently lock
+users out, accept expired sessions, or replay login challenges while passing every smoke test. Read
+**[`docs/STORAGE_ADAPTERS.md`](./docs/STORAGE_ADAPTERS.md)** and verify against the shipped
+conformance suite (`@tetrac/login-sdk/storage/conformance`), **against a real engine, not a mock**.
 
-> ⚠️ **A plausible-looking backend can be catastrophically wrong** — permanently locking users out,
-> accepting expired sessions, or replaying login challenges, all while passing a smoke test. Read
-> **[`docs/STORAGE_ADAPTERS.md`](./docs/STORAGE_ADAPTERS.md)** and verify against the shipped
-> conformance suite (`@tetrac/login-sdk/storage/conformance`) — it is the acceptance bar, not a
-> formality.
+</details>
+
+Existing `storage` (Redis) deployments need no changes — a `StorageAdapter` is auto-wrapped.
+
+### Graceful shutdown
+
+Adapters that hold a connection expose an optional `close()` — `RedisAdapter` quits its ioredis
+socket. Callers **feature-detect**, so it is safe on any backend:
+
+```ts
+await storage.close?.();   // or store.close?.()
+```
+
+Long-lived servers (Node/Express) should call it on shutdown; serverless and REST-based backends
+(Upstash, Vercel KV) have nothing to release and correctly omit it.
 
 Endpoints served (all under the mount point, e.g. `/api/auth/challenge`):
 `POST challenge | register | login | login-wallet | connect-wallet | import-wallet | logout`,
@@ -178,7 +243,7 @@ confuse it with `{ registration }`, which is the biometric-**primary** flow wher
 the app key — the two resolve to different keys and are not interchangeable. The same functions are
 available standalone from `@tetrac/login-sdk/client`
 (`enableBiometricUnlock` / `unlockViaBiometric` / `disableBiometricUnlock` / `hasBiometricUnlock`)
-and as `AuthClient` methods. Full design: [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
+and as `AuthClient` methods. Full design: [`features/unlockViaBiometric.md`](./features/unlockViaBiometric-0.3.0.md).
 
 ### Hardware wallets (Ledger) through the stock UI
 
@@ -312,12 +377,21 @@ KV_REST_API_URL= / KV_REST_API_TOKEN=    # Vercel KV REST (legacy)
   32-byte challenge (5-min TTL, atomic consume). Email/biometric accounts sign with an ed25519 keypair
   derived from the app key; the server stores **only** the public key (`authPublicKey`) and verifies the
   signature. Web3 logins verify a Solana signature with `tweetnacl`.
+- **The store holds no replayable credentials** (v0.5.0). Session bearer tokens are persisted as
+  **`SHA-256` digests** — as the session key *and* inside the user record. The raw token exists only in
+  the client's hands. So a leaked backup, a read replica, a query log, or a misconfigured Supabase
+  schema yields **digests, not credentials**: an attacker learns *that* a session exists and who owns
+  it, and cannot become that user. (The token is 256 bits of CSPRNG output, so a bare hash is
+  preimage-secure with no KDF — the construction used for API keys.) What this does **not** fix: the
+  store still holds encrypted wallet blobs, which are an offline-cracking corpus — your
+  `securityLevel` decides how long they hold. See [`docs/THREAT_MODEL.md`](./docs/THREAT_MODEL.md)
+  (T7b, R8, R9).
 - Biometric: WebAuthn `userVerification: required`; PRF preferred; gate fallback wraps its secret
   under a non-extractable AES-GCM key in IndexedDB.
 - Optional biometric unlock (any account): the current app key is wrapped with HKDF-SHA-256 +
   authenticated AES-256-GCM under a passkey secret and stored per-device; unwrapping always needs a
   fresh biometric assertion. Purged on `disableBiometricUnlock` and on logout (`clearSession`).
-  See [`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md).
+  See [`features/unlockViaBiometric.md`](./features/unlockViaBiometric-0.3.0.md).
 - Sessions: opaque 256-bit bearer tokens, **single active session** (each login revokes the prior token),
   server-side TTL (**4h default**). `logout()` revokes via `POST /logout` with `keepalive` so it lands
   during page unload. Optional `bindSessionToUserAgent` (default off) pins a session to `SHA-256(User-Agent)`
@@ -344,7 +418,7 @@ you green automatically.
 
 Every change — feature or bug fix — lands the same way: **write it down, prove it with a
 test, then make it pass.** The vault-singleton fix is the reference example end-to-end:
-PRD [`features/sdk-vault-singleton.md`](./features/sdk-vault-singleton.md) → test
+PRD [`features/sdk-vault-singleton.md`](./features/sdk-vault-singleton-0.3.1.md) → test
 [`tests/dual-bundle-vault.test.ts`](./tests/dual-bundle-vault.test.ts) → fix in
 `src/client/session.ts`.
 
@@ -360,7 +434,7 @@ Add `features/<short-name>.md` **before** you write code:
   **keys, sessions, signatures, or storage**.
 
 Keep it short, and link it from the README where a reader would look for it (see how
-[`features/unlockViaBiometric.md`](./features/unlockViaBiometric.md) is referenced above).
+[`features/unlockViaBiometric.md`](./features/unlockViaBiometric-0.3.0.md) is referenced above).
 
 ### 2. Add a test that proves it — `tests/<short-name>.test.ts`
 

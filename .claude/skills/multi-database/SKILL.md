@@ -1,42 +1,73 @@
 ---
 name: multi-database
-description: Implement, review, or debug a storage backend for `@tetrac/login-sdk` — either an `AuthStore` (the domain port, v0.5.0+; the right choice for Postgres/Supabase, MongoDB, DynamoDB, Convex, Durable Objects) or a `StorageAdapter` (the legacy KV port behind Redis/Upstash/Vercel KV). Encodes the non-obvious correctness contract a backend MUST honor: expiry-on-read, the permanent-rate-limit-lockout bug, atomic get-and-delete, per-field hash atomicity, binary/non-padding collation, key sizing, injection safety, and fail-closed error handling. Use when — writing or reviewing a storage backend; picking a database for the SDK; wiring Postgres/Supabase/SQLite/Mongo/MySQL/DynamoDB/Convex behind the SDK; running the conformance suite; or debugging symptoms like "user permanently rate-limited", "session accepted after it expired", "challenge replayed", "email index lost a write", "two accounts collided", "wallets disappeared / user locked out of their wallets", "Supabase table is world-readable", "Convex write conflict / OCC". Triggers — "add a database", "Postgres adapter", "Supabase auth store", "Convex backend", "custom StorageAdapter", "AuthStore", "bring my own database", "multi-db", "storage conformance".
+description: Back `@tetrac/login-sdk` with a database, or debug one. Postgres/Supabase, MySQL, and SQLite are SHIPPED (v0.6.0, `@tetrac/login-sdk/storage/sql`) — do NOT hand-write those; use `createPostgresAuthStore` / `createMysqlAuthStore` / `createSqliteAuthStore` and the generated schema. Redis/Upstash ship as `StorageAdapter`. Only a NEW engine class (Mongo, DynamoDB, Convex, Durable Objects) needs a hand-written `AuthStore`, and this skill encodes the correctness contract it must honor: expiry-on-read, the permanent-rate-limit-lockout bug, atomic get-and-delete (challenge replay), no-lost-write on the email index, normalizeEmail (never a case-insensitive collation), injection safety, fail-closed errors — plus how to run the shipped conformance suite against a real engine. Use when — choosing a database for the SDK; wiring Postgres/Supabase/MySQL/SQLite/Mongo/DynamoDB/Convex behind it; adding a SQL dialect; running the conformance suite or the Docker engine tests; or debugging "user permanently rate-limited", "session accepted after it expired", "challenge replayed", "email index lost a write", "two accounts collided", "locked out of their wallets", "Supabase table is world-readable", "preflight refuses to boot", "Convex write conflict / OCC". Triggers — "add a database", "Postgres adapter", "Supabase auth store", "MySQL backend", "SQL dialect", "Convex backend", "custom AuthStore", "hitRateLimit", "bring my own database", "multi-db", "storage conformance", "test:docker".
 ---
 
 # Backing `@tetrac/login-sdk` with a database
 
-The server layer never imports a database client — it depends on an interface, and
-`createNextAuthRoutes()` accepts any implementation. So backing the SDK with a new database is
-*already* possible. The hard part was never the code.
+## 🛑 STOP — for Postgres, MySQL, and SQLite, there is nothing to implement
 
-**The hard part is that a reasonable, working-looking backend can be catastrophically wrong.** Every
-hazard below produces a backend that passes a smoke test and then, days later, permanently locks
-users out, accepts expired sessions, or silently corrupts one account into another. Each is a
-required conformance case.
+These are **shipped** (v0.6.0). Do not hand-write an `AuthStore` for them. Do not hand-write the
+schema. Both are load-bearing and both are already correct:
 
-## Which port do I implement? — read this first
+```ts
+import { createPostgresAuthStore, schemaFor } from "@tetrac/login-sdk/storage/sql";
 
-There are **two**, and picking the wrong one is the most expensive mistake available.
+// 1. schemaFor("postgres" | "mysql" | "sqlite")  → run it against your DB
+// 2. point the SDK at it. Preflight runs here and REFUSES TO BOOT on the dangerous stuff.
+const store = await createPostgresAuthStore({ client: pool });
+export const { GET, POST } = createNextAuthRoutes({ store });
+```
+
+`createPostgresAuthStore` covers **Postgres, Supabase, Neon, RDS/Aurora, Railway, Render, Fly, and
+CockroachDB** — one Postgres wire protocol. `createMysqlAuthStore` and `createSqliteAuthStore` are
+the same shape. Redis/Upstash stay on `{ storage }` and are unchanged.
+
+**Why the hard stop:** every hazard in this document *used to be* the integrator's problem. Under
+[ADR-002](../../../PRD/ADR-002-uniform-backend-architecture.md) the SDK owns them — one engine
+(`SqlAuthStore`) plus a ~30-line dialect per database. Hand-writing a Postgres backend today means
+re-deriving eight correctness rules that are already written, tested against real engines, and
+fixed. **You would be reintroducing solved bugs.**
+
+## So when do I actually implement something?
+
+| You want… | Do this |
+|---|---|
+| Postgres / Supabase / Neon / RDS / CockroachDB | `createPostgresAuthStore` — **nothing to write** |
+| MySQL / MariaDB | `createMysqlAuthStore` — **nothing to write** |
+| SQLite / libSQL / Turso | `createSqliteAuthStore` — **nothing to write** |
+| Redis / Upstash / Vercel KV | `{ storage }` — **nothing to write** |
+| **Another SQL engine** (e.g. Oracle, MSSQL) | A **`SqlDialect`** — ~30 lines. See *Adding a SQL dialect*. |
+| **A non-SQL engine** (Mongo, DynamoDB, Firestore, Convex, Durable Objects) | A hand-written **`AuthStore`**. This is the only case where the eight hazards below are yours. |
+
+**Companion docs:** [`docs/DATABASES.md`](../../../docs/DATABASES.md) (which database, and why —
+including the ones that **cannot** work); [`PRD/ADR-002`](../../../PRD/ADR-002-uniform-backend-architecture.md)
+(why the SDK owns the correctness); [`docs/STORAGE_ADAPTERS.md`](../../../docs/STORAGE_ADAPTERS.md)
+(the `AuthStore` contract). The invariants also live in the interfaces themselves —
+`src/storage/store.ts`, `src/storage/adapter.ts`, `src/storage/sql/types.ts`.
+
+## The two ports (only relevant if the table above sent you here)
 
 | Port | What it is | Implement it when |
 |---|---|---|
-| **`AuthStore`** (`src/storage/store.ts`) — **the real extension point** | The **domain** port: `getUser`, `putUser`, `getPublicKeyByEmail`, `putChallenge`, `takeChallenge`, `putSession`, `getSession`, `deleteSession`, **`hitRateLimit`**, + optional `sweepExpired`/`close`. | **Almost always.** Any real database: Postgres/Supabase, MongoDB, DynamoDB, SQLite, MySQL, Convex, Durable Objects. |
-| **`StorageAdapter`** (`src/storage/adapter.ts`) | The **KV** port: 10 Redis-shaped primitives (`get`/`set`/`del`/`incr`/`expire`/`getdel`/`hget`/`hset`/`hdel`/`hgetall`). `KvAuthStore` wraps any of these into an `AuthStore`. | Only when the backend genuinely **is** a Redis-style KV store with native atomic `INCR`, TTL, and `GETDEL`. |
+| **`AuthStore`** (`src/storage/store.ts`) | The **domain** port: `getUser`, `putUser`, `getPublicKeyByEmail`, `putChallenge`, `takeChallenge`, `putSession`, `getSession`, `deleteSession`, **`hitRateLimit`**, + optional `sweepExpired`/`close`. | A **non-SQL** engine the SDK doesn't ship. |
+| **`StorageAdapter`** (`src/storage/adapter.ts`) | The **KV** port: 10 Redis-shaped primitives. `KvAuthStore` wraps any of these into an `AuthStore`. | Only a genuine Redis-style store with native atomic `INCR`, TTL, and `GETDEL`. |
 
-**Why this split exists (v0.5.0 / `PRD/ADR-001-storage-seam.md`):** `StorageAdapter` is named for
-what it *is* (a key-value store), not what it is *for* (auth state). That forces every backend to
-**emulate Redis** rather than do what it's good at. The clearest proof is `incr`:
+**Why `AuthStore` and not the KV port** ([ADR-001](../../../PRD/ADR-001-storage-seam.md)):
+`StorageAdapter` is named for what it *is* (a key-value store), not what it is *for* (auth state),
+so every backend must **emulate Redis**. The clearest proof is `incr`:
 
-> A rate-limit counter is *many writes to one row*. On **Convex**, that is the *documented
+> A rate-limit counter is *many writes to one row*. On **Convex** that is the *documented
 > anti-pattern* — OCC write conflicts, and the mutation eventually **throws** under exactly the burst
-> traffic a rate limiter exists to survive. The correct fix is a **sharded** counter. But
-> `incr(key)` is a *primitive*, not a *decision* — so the KV port **forbids the only correct
-> implementation.** `hitRateLimit(bucket, window, max)` allows it, invisibly.
+> traffic a rate limiter exists to survive. The fix is a **sharded** counter. But `incr(key)` is a
+> *primitive*, not a *decision* — so the KV port **forbids the only correct implementation.**
+> `hitRateLimit(bucket, window, max)` allows it, invisibly.
 
-**Consequence: six of the seven hazards below are artifacts of the KV port.** They are listed
-because Redis-family adapters and `KvAuthStore` still live in that world — but if you are
-implementing `AuthStore` against a real database, most of them **cannot occur**, because you are
-storing typed fields instead of emulating Redis on opaque strings. Each hazard is tagged.
+**Consequence: several hazards below are artifacts of the KV port, not of the problem.** Hazards
+**1, 5, 6** (permanent lockout, collation, key sizing) largely evaporate under `AuthStore` — you
+store typed fields instead of emulating Redis over concatenated strings. Hazards **2, 3, 7, 8**
+(expiry-on-read, atomic get-and-delete, injection, email normalization) **survive both ports**.
+Those are the real ones.
 
 ## The one rule for the KV port
 
@@ -51,7 +82,7 @@ add validation, and must not add interpretation.** (Under `AuthStore` this rule 
 
 ---
 
-## The seven ways a backend goes wrong
+## The eight ways a backend goes wrong
 
 ### 1. `incr` on an expired key → permanent rate-limit lockout 🚨
 
@@ -88,7 +119,8 @@ RETURNING value;
 
 `MemoryAdapter.incr` does exactly this via `alive()`, which self-deletes the expired entry first.
 **`MemoryAdapter` is the normative reference implementation** — when this skill and `MemoryAdapter`
-disagree, `MemoryAdapter` (which matches real Redis) is right.
+disagree, `MemoryAdapter` is right. And that is no longer a claim: the conformance suite runs against
+a **live Redis** in CI, so "MemoryAdapter matches Redis" is a *tested fact* rather than a comment.
 
 ### 2. Expiry must be enforced **on read**, never by a background reaper 🚨
 
@@ -198,11 +230,32 @@ Keys and values carry attacker-influenced substrings (emails, public keys, a req
 - Conformance feeds `' OR 1=1 --`, `{"$gt":""}`, `{"$ne":null}`, and `$`/`.`-containing keys through
   **every** method and asserts they round-trip as inert data.
 
+### 8. Email matching goes through `normalizeEmail()` — NEVER through a collation 🚨
+
+> **Survives BOTH ports.** It is a required conformance case, and it is the one hazard whose "obvious"
+> fix creates a *worse* bug than the one it solves.
+
+`A@B.com` and `a@b.com` must be the same account on every backend. The SDK exports the function that
+decides this, and every `AuthStore` MUST route **both** the email-index write (`putUser`) and the read
+(`getPublicKeyByEmail`) through it:
+
+```ts
+import { normalizeEmail } from "@tetrac/login-sdk/storage";   // lowercase + trim
+```
+
+The tempting shortcut is to skip it and let a **case-insensitive column collation** do the work. On
+MySQL that is a disaster, because the collation does not only apply to the email: it *also* case-folds
+the **`appId`** and the **base58 public key** in the same table. Tenants `Acme` and `acme` merge into
+one namespace, and two distinct Solana addresses differing only in case merge into one row (hazard 5).
+
+> **Case-insensitivity is a property of the EMAIL, not of the keyspace.** Normalize the value in code;
+> keep the storage byte-exact.
+
 ---
 
 ## Errors must fail **closed**
 
-`checkRateLimit` has no `try`/`catch`: if `incr` throws, the request 500s. That is **correct** — a
+`checkRateLimit` has no `try`/`catch`: if the store throws, the request 500s. That is **correct** — a
 rate limiter that cannot count must not grant permission.
 
 Pooled SQL clients fail in ways an in-process Redis client mostly doesn't (pool exhaustion,
@@ -211,17 +264,40 @@ those is a security control silently switching off:**
 
 | Swallowed error | What actually happens |
 |---|---|
-| `incr` returns `0`/`1` on failure | `count <= maxAttempts` ⇒ **rate limiting is disabled**, under exactly the load that broke it |
-| `set` swallows a write failure | `issueSession` returns a token that was never stored ⇒ every later request 401s |
-| `get`/`hget` return `null` on failure | "backend is down" is indistinguishable from "key is absent" |
+| `hitRateLimit` returns `{allowed: true}` (or `incr` → `0`/`1`) on failure | **rate limiting is disabled** — under exactly the load that broke it |
+| `putSession` / `set` swallows a write failure | a token is issued that was never stored ⇒ every later request 401s |
+| `getUser` / `getSession` / `get` return `null` on failure | "the backend is down" becomes indistinguishable from "no such user / no such session" |
 
-> **Adapters propagate storage errors.** `null` means *"the backend answered, and the key is
-> absent"* — **never** *"the backend did not answer."* Bounded retries for transient connection
-> errors are fine; converting an error into a value is not.
+> **Backends propagate storage errors.** `null` means *"the backend answered, and it is absent"* —
+> **never** *"the backend did not answer."* Bounded retries for transient connection errors are fine;
+> converting an error into a value is not.
+
+**This is deliberately NOT a conformance case**, and it is worth knowing why: you cannot inject a
+fault into an arbitrary conforming store handed to you as a black box. It is enforced instead by a
+*caller-side* test in the SDK (a `BrokenRateLimitStore` whose `hitRateLimit` throws, asserting the
+route rejects rather than allows). A green conformance run says nothing about this — so review it by
+hand, every time.
 
 ---
 
-## Deployment hazards that are not in the code
+## Deployment hazards — now mostly CHECKED, not documented
+
+> **Preflight runs at construction and REFUSES TO BOOT** on the ones that fail silently and
+> catastrophically. Prose never stopped these; a failed deploy does. For the shipped SQL backends
+> you get this for free:
+>
+> | Check | Level |
+> |---|---|
+> | Tables in Supabase's world-readable **`public` schema** | 🚨 **error — refuses to boot** |
+> | **MySQL not in strict mode** (silent truncation ⇒ user loses every wallet) | 🚨 **error** |
+> | MySQL key columns not **binary** (would merge tenants and accounts) | 🚨 **error** |
+> | Schema not created | 🚨 **error** |
+> | **SQLite file under a web-served directory** (`public/auth.db`) | 🚨 **error** |
+> | SQLite file world-readable; nondeterministic Postgres collation | ⚠️ warn |
+>
+> A hand-written `AuthStore` gets none of this. Implement `preflight()` if you write one.
+
+The rest below is still yours — the SDK cannot audit your VPC:
 
 - **Supabase 🚨** — Supabase auto-generates a **PostgREST API over every table in the `public`
   schema**, served to anyone holding the browser-shipped `anon` key. A table created the obvious way
@@ -311,48 +387,132 @@ tenant map); and a long key **cannot be a Convex field name** (64-char cap) — 
 Note also: **Vercel KV is a sunset product** (deprecated Oct 2024, now a Marketplace redirect to
 Upstash). The `VercelKVAdapter` still works, but point new deployments at **Upstash**.
 
-## Writing the adapter
+---
+
+## Adding a SQL dialect — ~30 lines, and you cannot break the security properties
+
+A new SQL engine (Oracle, MSSQL, …) is a `SqlDialect`. It declares only what genuinely differs
+between engines. **It contains no auth logic at all**, which is the point: a dialect author never
+writes a rate limiter, so a dialect author cannot introduce a rate-limit lockout.
+
+```ts
+export interface SqlDialect {
+  name: string;
+  tables: SqlTables;
+  placeholder(i: number): string;            // "$1" (pg) | "?" (mysql/sqlite)
+  supportsReturning: boolean;                // MySQL: FALSE — the engine then uses a locking txn
+  forUpdate: string;                         // " FOR UPDATE"
+  upsert(conflictCols, setClauses): string;  // ON CONFLICT … | ON DUPLICATE KEY UPDATE …
+  deleteExpiredLimited(table, limit, i): string;
+  ddl(): string;                             // the schema. The SDK emits it; the user never picks a type.
+  preflight(driver): Promise<PreflightIssue[]>;
+}
+```
+
+Copy `src/storage/sql/dialects/postgres.ts` and adjust. Then run the conformance suite against the
+real engine (below) — that is the acceptance bar, and it is the *same* suite every other engine
+passes.
+
+**MySQL is the worked example of why this works.** It has the three worst SQL hazards, and all three
+are absorbed by the dialect + generated DDL, never by the integrator:
+
+| MySQL hazard | Where it is solved |
+|---|---|
+| **No `DELETE … RETURNING`** — atomic get-and-delete (the only defense against challenge REPLAY) can't be one statement | `supportsReturning: false`. The **engine** transparently switches to `SELECT … FOR UPDATE` + `DELETE` in a transaction. |
+| **Case-INSENSITIVE default collation** — two distinct base58 keys, or `Acme`/`acme`, merge into one row | The DDL uses **`VARBINARY`**. (`utf8mb4_bin` is *not* enough — it is `PAD SPACE`, so `'k'` and `'k '` still collide.) |
+| **Silent truncation** in non-strict mode — a clipped wallet blob is invalid JSON ⇒ the user loses every wallet | **`MEDIUMTEXT`**, plus **preflight refuses to boot** if strict mode is off. |
+
+## 🐳 Testing against real engines — `npm run test:docker`
+
+```bash
+npm run test:docker    # spin up Postgres + MySQL + Redis, run the FULL suite, tear down
+npm run docker:up      # leave them running while you iterate
+npm run test:engines   # just the storage conformance suites
+```
+
+SQLite runs in-process on every `npm test` (no Docker) — it is a real SQL engine with real
+transactions, so `SqlAuthStore` is exercised constantly. Postgres, MySQL, and Redis run in
+`docker-compose.test.yml` and in CI.
+
+> **🚨 Do not trust a mock, and do not trust one engine.** Both bugs that shipped in the first cut of
+> the SQL engine were invisible to mocks, invisible on SQLite, invisible on Postgres, and only
+> appeared when MySQL was run **for real**:
+>
+> 1. **A semicolon inside a DDL comment** (`-- epoch ms; filtered on every read`) shattered the
+>    `CREATE TABLE` when the schema was split on `;`. Because the halves were `CREATE TABLE IF NOT
+>    EXISTS`, the result was a **silently incomplete schema**, not a loud failure. (Fixed: use
+>    `schemaStatementsFor()`, which strips comments before splitting.)
+> 2. **`mysql2` returns `VARBINARY` columns as `Buffer`, not `string`.** Every key read back as
+>    bytes, so every `===` was false — the email index never resolved and sessions never validated.
+>    Silent, and only on MySQL. (Fixed in the driver: it decodes `Uint8Array` → UTF-8.)
+>
+> Atomicity, collation, expiry, and **wire format** are properties of the ENGINE. A mock only asserts
+> that you mocked it the way you imagined — and the imagining was wrong both times.
+
+## Writing a KV `StorageAdapter` — only for a real Redis-style store
 
 1. **Mirror the existing shape.** `src/storage/redis.ts` and `kv.ts` are the pattern: a thin class
    over a structurally-typed `*Like` client interface, so the SDK never hard-depends on driver types.
    New drivers go in `peerDependencies` + `peerDependenciesMeta.optional: true` (as `ioredis` is
    today) and are loaded via lazy `import()`, so an unused driver is never bundled.
-2. **Two keyspaces, two tables.** `ttc_kv (key PK, value, expires_at)` and
-   `ttc_kv_hash (key, field, value, PRIMARY KEY (key, field))`.
+2. **Two keyspaces.** Strings, and the hash used by the email index.
 3. **`del` removes the key from BOTH keyspaces** (real Redis `DEL` is type-agnostic).
-4. **Optional methods:** `close?()` (release pooled connections; omit for REST clients) and
-   `sweepExpired?(limit?)` (space only — never the expiry authority). Callers feature-detect, so
-   omitting them is valid.
-5. **Run the conformance suite.** It is exported for exactly this purpose and is the acceptance bar:
+4. The four expiry invariants are written into `src/storage/adapter.ts`'s doc comments — read them
+   there, at the point of implementation.
+
+## Verify it — the conformance suite IS the acceptance bar
 
 ```ts
 import { authStoreConformanceCases } from "@tetrac/login-sdk/storage/conformance";
 
-// Implementing AuthStore (the normal case) — test it directly:
-for (const c of authStoreConformanceCases(() => new MyStore(client))) {
-  it(c.name, () => c.run());   // framework-agnostic: Jest, Vitest, or node:test
-}
-
-// Implementing the KV StorageAdapter instead? Wrap it and run the SAME suite —
-// there is only one acceptance bar:
-for (const c of authStoreConformanceCases(() => new KvAuthStore(new MyAdapter(client)))) {
-  it(c.name, () => c.run());
+for (const c of authStoreConformanceCases(() => new MyStore(client), {
+  // Supply only if your backend takes an injectable clock — it makes the expiry cases instant.
+  // Omit against a real engine and the suite REALLY SLEEPS, which is what you want.
+  advance: (ms) => { clock += ms; },
+  supportsSweep: true,        // run the sweepExpired cases instead of silently skipping them
+})) {
+  it(c.name, () => c.run());  // framework-agnostic: Jest, Vitest, or node:test
 }
 ```
 
-Test against a **real engine in Docker**, not a mock. Atomicity, collation, and expiry are
-properties of the **engine** — a mock only asserts that you mocked it the way you imagined.
+Implementing the KV port instead? Wrap it and run the **same** suite — there is one bar:
 
-## Reviewing an adapter — the fast path
+```ts
+authStoreConformanceCases(() => new KvAuthStore(new MyAdapter(client)));
+```
 
-Ask these seven questions in order. Each maps to a hazard above, and a "no" is a blocker:
+Three things to hold yourself to:
 
-1. Does `incr` on an **expired** key return `1` and drop the stale TTL — **in one statement**?
-2. Does **every read** filter on expiry, with no reaper required for correctness?
-3. Is `getdel` **atomic** (one statement, or an explicit transaction)?
-4. Is `hset` a **per-field** upsert — not read-modify-write, and not a dotted Mongo path?
-5. Are the key/field columns **binary and non-padding**, and ≥512 bytes?
-6. Are **all** values parameterized, with nothing interpolated into a query or a Mongo path?
-7. Do storage errors **propagate** rather than resolve to a benign default?
+- **Run it against a real engine in Docker, not a mock.** Atomicity, collation, and expiry are
+  properties of the **engine**; a mock only asserts you mocked it the way you *imagined*. The SDK does
+  this to itself: the suite runs against a live `redis:7-alpine` in CI, which is what makes
+  `MemoryAdapter`'s "matches Redis" a **tested fact** rather than a code comment.
+- **A suite that cannot fail is decoration.** The SDK keeps a *negative control* —
+  `tests/storage-conformance-negative.test.ts` implements the store a competent engineer plausibly
+  writes on the first try (counter with no window, get-then-delete challenge, expiry left to "the
+  reaper", read-modify-write email index, case-folded keys) and asserts the suite **catches all
+  seven** bugs. Do the same for your backend before you trust a green run.
+- **Green ≠ safe.** The suite cannot test fail-closed (see above), and it cannot test your
+  *deployment* — TLS, RLS, least privilege, query logs. Those are below.
 
-Then: does `del` clear both keyspaces, and does the conformance suite pass **against a real engine**?
+## Reviewing a backend — the fast path
+
+**Any backend** (a "no" is a blocker):
+
+1. Does **every read** filter on expiry — `getSession`, `takeChallenge` — with **no reaper** required
+   for correctness?
+2. Is `takeChallenge` **atomic** (one statement, or an explicit transaction)?
+3. Can two concurrent `putUser` calls for one email under different `appId`s **both** survive?
+4. Is the email indexed and looked up via **`normalizeEmail()`**, not a case-insensitive collation?
+5. Does `hitRateLimit` let a limited identifier through **after its window elapses**?
+6. Are **all** values parameterized — and on Mongo, passed as scalar values, never as filter objects
+   or update paths?
+7. Do storage errors **propagate** rather than resolve to `{allowed: true}` / `null`?
+8. Is `tokenHash` stored **as given** (already a digest) and `SessionValue` stored as typed fields?
+
+**KV adapters, additionally:** does `incr` on an **expired** key return `1` and drop the stale TTL, in
+one statement? Does `incr` on a **live** key leave its TTL alone? Does `del` clear both keyspaces?
+
+**Then:** does the conformance suite pass **against a real engine**, and does the *deployment* clear
+the hazards above (TLS `verify-full`, non-`public` schema on Supabase, DML-only role, no parameter
+logging)?

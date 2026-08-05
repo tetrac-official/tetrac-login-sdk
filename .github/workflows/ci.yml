@@ -45,8 +45,49 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      # A REAL Postgres for the SQL engine (ADR-002). SQLite already runs the full
+      # conformance suite in-process on every `npm test` — this proves the DIALECT
+      # ABSTRACTION holds: same engine code, different placeholder syntax, different upsert,
+      # different DELETE…LIMIT, and all 24 cases still pass. If that's true, adding MySQL
+      # really is ~30 lines rather than a security review.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tetrac_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # MySQL is the ACID TEST for ADR-002 — the engine with all three notorious hazards (no
+      # DELETE…RETURNING, a case-insensitive default collation, silent truncation). It is also
+      # the only place two real bugs surfaced: a semicolon inside a DDL comment shattering the
+      # schema split, and mysql2 returning VARBINARY as Buffer so every key comparison failed.
+      # Neither was visible on SQLite or Postgres, and neither was reachable from a mock.
+      #
+      # STRICT_ALL_TABLES on purpose: preflight refuses to boot without it (non-strict MySQL
+      # truncates a wallet blob into invalid JSON and the user loses every wallet in it).
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: pw
+          MYSQL_DATABASE: tetrac_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -ppw"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
     env:
       REDIS_URL: redis://localhost:6379
+      POSTGRES_URL: postgres://postgres:postgres@localhost:5432/tetrac_test
+      MYSQL_URL: mysql://root:pw@localhost:3306/tetrac_test
 
     steps:
       - name: Checkout

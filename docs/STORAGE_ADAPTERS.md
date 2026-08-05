@@ -1,5 +1,35 @@
 # Storage backends — the contract
 
+> ## 🛑 STOP — do you actually need this document?
+>
+> **Postgres/Supabase, MySQL, and SQLite are SHIPPED** (v0.6.0). Do **not** hand-write an `AuthStore`
+> for them, and do **not** hand-write the schema. Both are load-bearing, and both are already correct
+> and tested against real engines:
+>
+> ```ts
+> import { createPostgresAuthStore, schemaFor } from "@tetrac/login-sdk/storage/sql";
+>
+> // schemaFor("postgres" | "mysql" | "sqlite") → run it against your DB
+> const store = await createPostgresAuthStore({ client: pool }); // preflight runs here
+> export const { GET, POST } = createNextAuthRoutes({ store });
+> ```
+>
+> One function covers **Postgres, Supabase, Neon, RDS/Aurora, Railway, Render, Fly, and CockroachDB**.
+> Redis/Upstash stay on `{ storage }`, unchanged. See [`DATABASES.md`](./DATABASES.md) to choose.
+>
+> **Everything below is the correctness contract the SDK already satisfies on your behalf**
+> ([ADR-002](../PRD/ADR-002-uniform-backend-architecture.md)). Read it only if you are:
+>
+> - implementing a **non-SQL** backend the SDK doesn't ship (MongoDB, DynamoDB, Firestore, Convex,
+>   Durable Objects), **or**
+> - adding a **SQL dialect** for a new engine (that's ~30 lines — see the `multi-database` skill), **or**
+> - reviewing/debugging a backend.
+>
+> If you are none of those, hand-writing a Postgres backend means re-deriving eight correctness rules
+> that are already written, tested, and fixed. **You would be reintroducing solved bugs.**
+
+---
+
 `@tetrac/login-sdk` never imports a database client. The server layer depends on an interface, and
 `createNextAuthRoutes({ store })` accepts **any** implementation. So backing the SDK with your own
 database is supported, and always was.
