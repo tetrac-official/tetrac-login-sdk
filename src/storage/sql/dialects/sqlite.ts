@@ -91,7 +91,9 @@ CREATE TABLE IF NOT EXISTS ${tables.challenges} (
   public_key  TEXT NOT NULL,
   challenge   TEXT NOT NULL,
   expires_at  INTEGER NOT NULL,
-  PRIMARY KEY (app_id, public_key)
+  -- Keyed by CHALLENGE VALUE: several may be outstanding for one identity at once, so
+  -- issuing one never invalidates another already in flight.
+  PRIMARY KEY (app_id, public_key, challenge)
 );
 
 CREATE TABLE IF NOT EXISTS ${tables.rateLimits} (

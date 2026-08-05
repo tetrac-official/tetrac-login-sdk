@@ -51,7 +51,15 @@ console.log(
 
 // One shared DB + one shared auth service, serving multiple apps.
 const db = new MemoryAdapter();
-const h = createAuthHandlers({ storage: db, config: { origin: "https://test.example" } });
+const h = createAuthHandlers({
+  storage: db,
+  config: {
+    origin: "https://test.example",
+    // This script creates several accounts back-to-back to prove tenant isolation. The
+    // default 2/min creation ceiling is deliberate but is not what is under test here.
+    accountCreationRateLimit: { windowSeconds: 60, maxAttempts: 100 },
+  },
+});
 
 // 1) Email index is a { appId: publicKey } map — the requested shape.
 console.log("Email index → { appId: publicKey } map:");

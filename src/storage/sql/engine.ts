@@ -174,8 +174,8 @@ export class SqlAuthStore implements AuthStore {
     await this.run(
       this.driver,
       `INSERT INTO ${t.challenges} (app_id, public_key, challenge, expires_at) VALUES (?, ?, ?, ?) ` +
-        this.dialect.upsert(["app_id", "public_key"], ["challenge = ?", "expires_at = ?"]),
-      [appId, publicKey, challenge, expiresAt, challenge, expiresAt],
+        this.dialect.upsert(["app_id", "public_key", "challenge"], ["expires_at = ?"]),
+      [appId, publicKey, challenge, expiresAt, expiresAt],
     );
   }
 
@@ -185,18 +185,21 @@ export class SqlAuthStore implements AuthStore {
    *
    * Note `expires_at > ?` — an expired challenge is invisible, with no sweeper required.
    */
-  async takeChallenge(appId: string, publicKey: string): Promise<string | null> {
+  async takeChallenge(appId: string, publicKey: string, presented: string): Promise<boolean> {
     const t = this.dialect.tables;
     const now = this.now();
 
+    // Consume THE presented value, not "whatever is stored for this identity". One
+    // identity may hold several outstanding challenges — issuing must never invalidate one
+    // already in flight — so burning one has to leave the others usable.
     if (this.dialect.supportsReturning) {
       // Postgres / SQLite: one statement. The engine guarantees atomicity.
       const rows = await this.run<{ challenge: string }>(
         this.driver,
-        `DELETE FROM ${t.challenges} WHERE app_id = ? AND public_key = ? AND expires_at > ? RETURNING challenge`,
-        [appId, publicKey, now],
+        `DELETE FROM ${t.challenges} WHERE app_id = ? AND public_key = ? AND challenge = ? AND expires_at > ? RETURNING challenge`,
+        [appId, publicKey, presented, now],
       );
-      return rows[0]?.challenge ?? null;
+      return rows.length > 0;
     }
 
     // MySQL has no DELETE…RETURNING. Lock the row, read it, delete it, commit — which is
@@ -205,17 +208,17 @@ export class SqlAuthStore implements AuthStore {
     return this.driver.transaction(async (tx) => {
       const rows = await this.run<{ challenge: string }>(
         tx,
-        `SELECT challenge FROM ${t.challenges} WHERE app_id = ? AND public_key = ? AND expires_at > ?` +
+        `SELECT challenge FROM ${t.challenges} WHERE app_id = ? AND public_key = ? AND challenge = ? AND expires_at > ?` +
           this.dialect.forUpdate,
-        [appId, publicKey, now],
+        [appId, publicKey, presented, now],
       );
-      const challenge = rows[0]?.challenge;
-      if (challenge == null) return null;
-      await this.run(tx, `DELETE FROM ${t.challenges} WHERE app_id = ? AND public_key = ?`, [
-        appId,
-        publicKey,
-      ]);
-      return challenge;
+      if (rows.length === 0) return false;
+      await this.run(
+        tx,
+        `DELETE FROM ${t.challenges} WHERE app_id = ? AND public_key = ? AND challenge = ?`,
+        [appId, publicKey, presented],
+      );
+      return true;
     });
   }
 

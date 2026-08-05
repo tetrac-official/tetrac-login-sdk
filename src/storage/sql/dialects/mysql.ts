@@ -107,7 +107,9 @@ CREATE TABLE IF NOT EXISTS ${tables.challenges} (
   public_key  VARBINARY(128) NOT NULL,
   challenge   VARBINARY(128) NOT NULL,
   expires_at  BIGINT         NOT NULL,
-  PRIMARY KEY (app_id, public_key),
+  -- Keyed by CHALLENGE VALUE: several may be outstanding for one identity at once, so
+  -- issuing one never invalidates another already in flight.
+  PRIMARY KEY (app_id, public_key, challenge),
   KEY ttc_challenges_expires_idx (expires_at)
 ) ENGINE=InnoDB;
 

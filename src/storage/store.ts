@@ -134,10 +134,31 @@ export interface AuthStore {
   getPublicKeyByEmail(appId: string, email: string): Promise<string | null>;
 
   // --- challenges (single-use, TTL-bound) ---------------------------------------
+  /**
+   * ADD a challenge for this identity. Challenges ACCUMULATE — issuing one must never
+   * invalidate another that is already in flight.
+   *
+   * 🚨 A single slot per (appId, publicKey) was a targeted denial of login. `/challenge`
+   * is unauthenticated and accepts any public key or email, so anyone who can name an
+   * account could overwrite the challenge its owner was in the middle of signing. At
+   * securityLevel 2 the victim spends ~7s in PBKDF2 before submitting, which is an
+   * enormous window: one request per attempt, from anywhere, holds a named user out of
+   * their own account indefinitely.
+   *
+   * Each challenge expires independently, so the set drains on its own and is bounded by
+   * the issuance rate limit — there is nothing to evict, and eviction would reintroduce
+   * the same attack (flood the set, push the victim's out).
+   */
   putChallenge(appId: string, publicKey: string, challenge: string, ttlSeconds: number): Promise<void>;
-  /** ATOMIC get-and-delete. Returns the stored challenge and removes it; null if absent
-   *  OR expired. The CALLER does the constant-time compare — never the backend. */
-  takeChallenge(appId: string, publicKey: string): Promise<string | null>;
+  /**
+   * ATOMICALLY consume THE presented challenge. Returns true if it was present (and
+   * removes it), false if absent or expired.
+   *
+   * Atomicity is the entire replay defense: of N concurrent callers presenting the same
+   * value, exactly ONE may get true. Consuming by value means one identity's outstanding
+   * challenges are independent — burning one leaves the others usable.
+   */
+  takeChallenge(appId: string, publicKey: string, presented: string): Promise<boolean>;
 
   // --- sessions (keyed by the token's SHA-256 digest, never the token) -----------
   putSession(appId: string, tokenHash: string, value: SessionValue, ttlSeconds: number): Promise<void>;
@@ -287,16 +308,25 @@ export class KvAuthStore implements AuthStore {
     return this.kv.hget(this.emailKey(email), appId);
   }
 
-  async putChallenge(appId: string, publicKey: string, challenge: string, ttlSeconds: number): Promise<void> {
-    await this.kv.set(appScoped(this.prefixes.challenge, appId, publicKey), challenge, {
-      exSeconds: ttlSeconds,
-    });
+  // One key PER CHALLENGE VALUE: `challenge:{appId}:{publicKey}:{challenge}`. That is what
+  // lets challenges accumulate — issuing one cannot overwrite another already in flight —
+  // and it keeps the consume a single atomic GETDEL on an exact key.
+  //
+  // The challenge is 64 hex chars minted by generateChallenge(), and consumeChallenge
+  // rejects anything else BEFORE it reaches here, so the value can never carry the ':'
+  // separator or escape its namespace.
+  private challengeKey(appId: string, publicKey: string, challenge: string): string {
+    return `${appScoped(this.prefixes.challenge, appId, publicKey)}:${challenge}`;
   }
 
-  async takeChallenge(appId: string, publicKey: string): Promise<string | null> {
-    // One GETDEL: two concurrent consumes cannot both read the value before either
-    // deletes it — only one sees it. This is the entire challenge-replay defense.
-    return this.kv.getdel(appScoped(this.prefixes.challenge, appId, publicKey));
+  async putChallenge(appId: string, publicKey: string, challenge: string, ttlSeconds: number): Promise<void> {
+    await this.kv.set(this.challengeKey(appId, publicKey, challenge), "1", { exSeconds: ttlSeconds });
+  }
+
+  async takeChallenge(appId: string, publicKey: string, presented: string): Promise<boolean> {
+    // One GETDEL on the exact key: two concurrent consumes of the SAME challenge cannot
+    // both observe it — only one does. This is the entire challenge-replay defense.
+    return (await this.kv.getdel(this.challengeKey(appId, publicKey, presented))) !== null;
   }
 
   async putSession(appId: string, tokenHash: string, value: SessionValue, ttlSeconds: number): Promise<void> {

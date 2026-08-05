@@ -1,7 +1,10 @@
 // Issue and consume single-use, TTL-bound wallet-login challenges.
 import type { AuthStore } from "../storage/store.js";
 import type { AuthConfig } from "../core/config.js";
-import { generateChallenge, timingSafeEqual } from "../core/crypto.js";
+import { generateChallenge } from "../core/crypto.js";
+
+/** Exactly what generateChallenge() produces: 256 bits as 64 hex chars. */
+const CHALLENGE_RE = /^[0-9a-f]{64}$/i;
 
 /** Create a challenge for an (app, public key) pair and store it with the configured TTL. */
 export async function issueChallenge(
@@ -30,7 +33,13 @@ export async function consumeChallenge(
   publicKey: string,
   presented: string,
 ): Promise<boolean> {
-  const stored = await store.takeChallenge(appId, publicKey);
-  if (!stored) return false;
-  return timingSafeEqual(stored, presented);
+  // The presented value becomes part of a storage key, so it is validated to the exact
+  // shape generateChallenge() mints — 64 hex chars — BEFORE it reaches the backend. That
+  // bounds the key and makes the ':' namespace separator unrepresentable.
+  if (!CHALLENGE_RE.test(presented)) return false;
+  // Consume THIS value. Matching happens on an exact key / primary key rather than by
+  // comparing a fetched string, so there is no fetched secret to compare in variable time.
+  // A challenge is not a secret the attacker guesses anyway: it is server-issued, public
+  // to the holder, and useless without a signature over it.
+  return store.takeChallenge(appId, publicKey, presented);
 }

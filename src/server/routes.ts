@@ -140,6 +140,29 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return null;
   }
 
+  // The deployment-wide ceiling on NEW ACCOUNTS. One bucket: no appId, no identifier.
+  //
+  // That is the entire point. Every other bucket is keyed on an email or a public key
+  // lifted from the request body, so an attacker who generates a fresh keypair per request
+  // gets a fresh counter and the limit never fires — which is how an anonymous client
+  // creates unbounded, permanent, un-swept records. There is no key here to rotate.
+  //
+  // It is NOT app-scoped either: `appId` also comes from the request, so scoping by it
+  // would hand back the same rotation (unless allowedAppIds is set, which it is not by
+  // default).
+  //
+  // CALL THIS ONLY WHERE A RECORD IS ACTUALLY CREATED. The client's "auto" mode registers
+  // first and falls back to login on 409, so returning users hit /register on every normal
+  // sign-in; charging them would turn a 2/min creation ceiling into a 2/min login ceiling.
+  async function accountCreationLimited(): Promise<Response | null> {
+    const r = await checkRateLimit(
+      store,
+      { endpoint: "create", identifier: "global" },
+      config.accountCreationRateLimit,
+    );
+    return r.allowed ? null : error("Too many new accounts right now — try again shortly", 429);
+  }
+
   // Every wallet signature is verified against config.origin — SERVER config, never the
   // request. Echoing a client-supplied origin back into the message would reinstate
   // exactly the relay attack the binding exists to prevent. resolveConfig guarantees the
@@ -346,6 +369,12 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         return error("authPublicKey required for email/biometric registration");
       }
 
+      // Every collision check has passed, so this request WILL create a record. Charge the
+      // deployment-wide ceiling here — not at the top — so a returning user's 409 (the
+      // client's "auto" mode registers first, then falls back to login) costs nothing.
+      const capped = await accountCreationLimited();
+      if (capped) return capped;
+
       const user: UserData = {
         appId,
         publicKey: body.publicKey,
@@ -498,6 +527,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       let user = await getUserByPublicKey(store, appId, body.publicKey);
       const isNew = !user;
       if (!user) {
+        // The other creation path. A valid signature is required to get here, but keypairs
+        // are free to generate, so without this it is the same unbounded record creation
+        // by a different door.
+        const cappedNew = await accountCreationLimited();
+        if (cappedNew) return cappedNew;
         user = {
           appId,
           publicKey: body.publicKey,

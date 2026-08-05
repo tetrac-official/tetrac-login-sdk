@@ -272,13 +272,13 @@ describe("P1 — challenges are single-use via atomic getdel (replay-safe)", () 
     const ch = await h.challenge(req({ publicKey: SOL_PUB }));
     const { challenge } = (await ch.json()) as { challenge: string };
 
-    // First consume: derives via the challenge handler indirectly; here we exercise
-    // consumeChallenge directly through a login-shaped flow is heavy, so verify the
-    // storage contract: the key exists, and is gone after one getdel.
-    // Key is app-scoped (v0.4.0): challenge:{appId}:{publicKey}, default appId "ttc".
-    const key = `${DEFAULT_CONFIG.keyPrefixes.challenge}${DEFAULT_CONFIG.appId}:${SOL_PUB}`;
-    expect(await storage.get(key)).toBe(challenge);
-    expect(await storage.getdel(key)).toBe(challenge);
+    // Verify the storage contract directly: the entry exists, and one atomic getdel
+    // removes it. The key is app-scoped AND value-scoped —
+    // challenge:{appId}:{publicKey}:{challenge} — so several challenges can be
+    // outstanding for one identity and issuing one never overwrites another.
+    const key = `${DEFAULT_CONFIG.keyPrefixes.challenge}${DEFAULT_CONFIG.appId}:${SOL_PUB}:${challenge}`;
+    expect(await storage.get(key)).not.toBeNull();
+    expect(await storage.getdel(key)).not.toBeNull();
     expect(await storage.getdel(key)).toBeNull(); // second consume → null (single-use)
   });
 });

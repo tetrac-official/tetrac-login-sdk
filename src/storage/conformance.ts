@@ -173,40 +173,73 @@ export function authStoreConformanceCases(
 
   // === CHALLENGES =================================================================
 
-  add("🚨 challenge: N concurrent takeChallenge — exactly ONE caller observes the value", async (store) => {
-    await store.putChallenge("app1", PK_A, "the-challenge", 300);
+  add("🚨 challenge: N concurrent takeChallenge — exactly ONE caller wins", async (store) => {
+    const c = "a".repeat(64);
+    await store.putChallenge("app1", PK_A, c, 300);
 
-    const results = await Promise.all(Array.from({ length: 8 }, () => store.takeChallenge("app1", PK_A)));
-    const winners = results.filter((r) => r === "the-challenge");
+    const results = await Promise.all(Array.from({ length: 8 }, () => store.takeChallenge("app1", PK_A, c)));
     assertEqual(
-      winners.length,
+      results.filter(Boolean).length,
       1,
-      "CHALLENGE REPLAY: more than one caller observed the same single-use challenge. " +
+      "CHALLENGE REPLAY: more than one caller consumed the same single-use challenge. " +
         "takeChallenge must be an ATOMIC get-and-delete — it is the sole mechanism closing " +
         "the replay race.",
     );
   });
 
   add("challenge: a consumed challenge is gone", async (store) => {
-    await store.putChallenge("app1", PK_A, "once", 300);
-    assertEqual(await store.takeChallenge("app1", PK_A), "once", "first take returns the value");
-    assertEqual(await store.takeChallenge("app1", PK_A), null, "second take must return null");
+    const c = "b".repeat(64);
+    await store.putChallenge("app1", PK_A, c, 300);
+    assertEqual(await store.takeChallenge("app1", PK_A, c), true, "first take consumes it");
+    assertEqual(await store.takeChallenge("app1", PK_A, c), false, "second take must fail");
+  });
+
+  add("🚨 challenge: issuing a NEW challenge does not invalidate one already in flight", async (store) => {
+    // A single slot per identity was a targeted denial of login: /challenge is
+    // unauthenticated and accepts any public key, so one request from anywhere
+    // overwrote whatever the account's owner was in the middle of signing — a ~7s
+    // window at securityLevel 2, repeatable indefinitely.
+    const inFlight = "c".repeat(64);
+    const attacker = "d".repeat(64);
+    await store.putChallenge("app1", PK_A, inFlight, 300);
+    await store.putChallenge("app1", PK_A, attacker, 300);
+
+    assertEqual(
+      await store.takeChallenge("app1", PK_A, inFlight),
+      true,
+      "TARGETED LOCKOUT: issuing a second challenge destroyed the first. Challenges must " +
+        "ACCUMULATE per identity — each expiring on its own — so that anyone able to name " +
+        "an account cannot invalidate its owner's in-flight login.",
+    );
+    // …and the two are independent: burning one leaves the other usable.
+    assertEqual(await store.takeChallenge("app1", PK_A, attacker), true, "the other survives");
+  });
+
+  add("challenge: consuming one value does not consume a different one", async (store) => {
+    const a = "e".repeat(64);
+    const b = "f".repeat(64);
+    await store.putChallenge("app1", PK_A, a, 300);
+    await store.putChallenge("app1", PK_A, b, 300);
+    assertEqual(await store.takeChallenge("app1", PK_A, a), true, "a is consumed");
+    assertEqual(await store.takeChallenge("app1", PK_A, a), false, "a is now gone");
+    assertEqual(await store.takeChallenge("app1", PK_A, b), true, "b was untouched");
   });
 
   add("🚨 challenge: an expired challenge is invisible — with NO sweep having run", async (store) => {
-    await store.putChallenge("app1", PK_A, "stale", 1);
+    const c = "1".repeat(64);
+    await store.putChallenge("app1", PK_A, c, 1);
     await advance(1000);
     assertEqual(
-      await store.takeChallenge("app1", PK_A),
-      null,
+      await store.takeChallenge("app1", PK_A, c),
+      false,
       "expiry MUST be enforced on the READ path. A TTL index / cron / reaper is space " +
         "reclamation only — Mongo sweeps ~60s late, DynamoDB up to days — and relying on " +
         "it means accepting expired challenges.",
     );
   });
 
-  add("challenge: absent challenge returns null (never throws)", async (store) => {
-    assertEqual(await store.takeChallenge("app1", PK_B), null, "absent challenge is null");
+  add("challenge: an absent challenge returns false (never throws)", async (store) => {
+    assertEqual(await store.takeChallenge("app1", PK_B, "9".repeat(64)), false, "absent is false");
   });
 
   // === SESSIONS ===================================================================
@@ -463,11 +496,13 @@ export function authStoreConformanceCases(
     for (const [i, payload] of nasty.entries()) {
       // As a challenge value, a session owner, and a rate-limit identifier: the backend
       // must treat every one of these as OPAQUE DATA and never as syntax.
+      // The challenge is now part of the lookup key, so an injection-shaped VALUE must
+      // still address exactly its own entry and nothing else.
       await store.putChallenge("app1", `pk-${i}`, payload, 300);
       assertEqual(
-        await store.takeChallenge("app1", `pk-${i}`),
-        payload,
-        `injection-shaped challenge value must round-trip verbatim: ${payload}`,
+        await store.takeChallenge("app1", `pk-${i}`, payload),
+        true,
+        `injection-shaped challenge value must address exactly its own entry: ${payload}`,
       );
 
       await store.putSession("app1", `h-${i}`, { publicKey: payload }, 300);

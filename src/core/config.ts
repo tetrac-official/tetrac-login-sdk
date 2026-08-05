@@ -144,6 +144,25 @@ export interface AuthConfig {
   trustedProxyHops: number;
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
+  /**
+   * Ceiling on ACCOUNT CREATION for the whole deployment. Default **2 per 60s**.
+   *
+   * This is the one bucket that is not keyed on anything the caller supplies. Every other
+   * bucket is keyed on an email or a public key taken from the request body, so an
+   * attacker rotating either gets a fresh counter and the limit never fires — which is how
+   * an anonymous client creates unbounded permanent records. A single global counter has
+   * no key to rotate.
+   *
+   * Charged ONLY when a record is actually created — not on every `/register` hit. The
+   * client's "auto" mode registers first and falls back to login on 409, so returning
+   * users hit `/register` routinely; counting those would throttle ordinary logins.
+   *
+   * SIZE THIS FROM YOUR SIGNUP VOLUME. It is a capacity number, not a security dial. If a
+   * launch does 200 signups an hour, 2/min is comfortable; if it does 200 in five minutes,
+   * this will reject real users, who then see a 429 and must retry. That failure is
+   * recoverable — nobody is locked out of an existing account — but it is still a failure.
+   */
+  accountCreationRateLimit: RateLimitConfig;
   webauthn: WebAuthnConfig;
   /**
    * Idle window (ms) before the in-browser app key auto-locks. After it locks,
@@ -186,6 +205,10 @@ export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
   rateLimit: {
     windowSeconds: 60,
     maxAttempts: 10,
+  },
+  accountCreationRateLimit: {
+    windowSeconds: 60,
+    maxAttempts: 2,
   },
   webauthn: {
     rpName: "TTC",
@@ -233,6 +256,10 @@ export function resolveConfig(override?: DeepPartial<AuthConfig>): AuthConfig {
     origin: normalizeOrigin(origin),
     keyPrefixes: { ...DEFAULT_CONFIG.keyPrefixes, ...override?.keyPrefixes },
     rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...override?.rateLimit },
+    accountCreationRateLimit: {
+      ...DEFAULT_CONFIG.accountCreationRateLimit,
+      ...override?.accountCreationRateLimit,
+    },
     webauthn: { ...DEFAULT_CONFIG.webauthn, ...override?.webauthn },
   } as AuthConfig;
 }
