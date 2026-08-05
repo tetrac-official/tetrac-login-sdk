@@ -26,8 +26,11 @@ export interface WebAuthnConfig {
   /** Relying Party ID — must match the site's registrable domain. */
   rpId?: string;
   rpName: string;
-  /** Prefer the PRF extension (derive encryption key from authenticator). */
-  preferPrf: boolean;
+  // NOTE: there is no PRF opt-out. The WebAuthn PRF extension is required for every
+  // biometric flow; an authenticator without it throws PrfUnavailableError. Serving
+  // such a device would mean storing a secret the page can read — i.e. one any script
+  // on the origin can read — which is not a weaker tier of the guarantee but its
+  // absence. Those users get email + passkey or a Web3 wallet instead.
 }
 
 /** Developer-chosen key-derivation strength. Higher = stronger but slower. */
@@ -175,7 +178,6 @@ export const DEFAULT_CONFIG: AuthConfig = {
   },
   webauthn: {
     rpName: "TTC",
-    preferPrf: true,
   },
   autoLockMs: 15_000,
   lockOnHide: true,

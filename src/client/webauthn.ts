@@ -1,21 +1,39 @@
 // Biometric / passkey auth via WebAuthn. Browser-only.
 //
-// Two modes (matching next-ttc PasskeyService):
-//  - PRF (preferred): derive a high-entropy secret from the authenticator's PRF
-//    extension. The secret never leaves the Secure Enclave's derivation and is
-//    not stored anywhere — it is re-derived on each unlock.
-//  - Gate (fallback): when PRF is unavailable, keep a random secret that can
-//    only be read after a successful userVerification assertion. The secret is
-//    never persisted readably: it is wrapped under a NON-EXTRACTABLE AES-GCM
-//    CryptoKey (PRD §3) which IndexedDB structured-clones, so any script on the
-//    origin sees only the opaque key handle + IV + ciphertext, never the plaintext.
+// PRF ONLY. The authenticator's PRF extension derives a high-entropy secret on every
+// assertion; it is never stored, on disk or anywhere else. An authenticator without PRF
+// is refused (PrfUnavailableError) rather than downgraded.
+//
+// There is deliberately no software fallback. The only way to serve a non-PRF device
+// would be to mint a random secret and keep it locally — and any such secret must be
+// readable by the page in order to be usable, which means readable by any script on the
+// origin, with no biometric ceremony involved. That is not a weaker tier of the same
+// guarantee; it is the absence of the guarantee. Non-PRF devices use email + passkey or
+// a Web3 wallet, both of which re-derive their key from something the user supplies.
 import type { WebAuthnConfig } from "../core/config.js";
+
+/**
+ * Thrown when the authenticator has no PRF extension. Catch this to steer the user to
+ * email + passkey or a Web3 wallet.
+ *
+ * PRF support cannot be detected before the ceremony — the browser only reports it in
+ * the credential's extension results — so attempt-then-catch is the only way to know.
+ */
+export class PrfUnavailableError extends Error {
+  constructor() {
+    super(
+      "[tetrac] This authenticator does not support the WebAuthn PRF extension, so it " +
+        "cannot derive an encryption key without storing one on the device. " +
+        "Offer email + passkey or a Web3 wallet instead.",
+    );
+    this.name = "PrfUnavailableError";
+  }
+}
 
 export interface PasskeyRegistration {
   credentialId: string; // base64url
   salt: string; // base64url — PRF eval input
   rpId: string;
-  mode: "prf" | "gate";
 }
 
 export function b64urlEncode(buf: ArrayBuffer | Uint8Array): string {
@@ -62,7 +80,11 @@ function rpIdOf(config: WebAuthnConfig): string {
   return config.rpId ?? (typeof window !== "undefined" ? window.location.hostname : "localhost");
 }
 
-/** Register a new passkey credential, requesting the PRF extension. */
+/**
+ * Register a new passkey credential with the PRF extension.
+ *
+ * @throws {PrfUnavailableError} if the authenticator does not report PRF support.
+ */
 export async function registerPasskey(
   config: WebAuthnConfig,
   userName: string,
@@ -86,39 +108,26 @@ export async function registerPasskey(
         residentKey: "preferred",
       },
       timeout: 60_000,
-      extensions: config.preferPrf ? ({ prf: {} } as AuthenticationExtensionsClientInputs) : undefined,
+      extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
     },
   })) as PublicKeyCredential | null;
 
   if (!cred) throw new Error("Passkey registration was cancelled");
 
   const ext = cred.getClientExtensionResults() as { prf?: { enabled?: boolean } };
-  const mode: "prf" | "gate" = config.preferPrf && ext.prf?.enabled ? "prf" : "gate";
+  if (!ext.prf?.enabled) throw new PrfUnavailableError();
 
-  const reg: PasskeyRegistration = {
+  return {
     credentialId: b64urlEncode(cred.rawId),
     salt: b64urlEncode(salt),
     rpId,
-    mode,
   };
-
-  // Gate mode needs a stored secret unlocked by future assertions.
-  if (mode === "gate") {
-    await gateStore(reg.credentialId, toHex(randomBytes(32)));
-  }
-  return reg;
-}
-
-function fromHex(hex: string): Uint8Array<ArrayBuffer> {
-  const out = new Uint8Array(new ArrayBuffer(hex.length / 2));
-  for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
 }
 
 /**
- * Unlock and return the passkey-derived secret (hex). For PRF mode this is the
- * PRF output; for gate mode it is the stored secret, returned only after a
- * successful biometric assertion. Use the result as the app/encryption key.
+ * Unlock and return the passkey-derived secret (hex): the authenticator's PRF output for
+ * this credential's salt, released only after a successful `userVerification` assertion.
+ * Re-derived every call and never persisted. Use the result as the app/encryption key.
  */
 export async function derivePasskeySecret(reg: PasskeyRegistration): Promise<string> {
   const assertion = (await navigator.credentials.get({
@@ -128,136 +137,41 @@ export async function derivePasskeySecret(reg: PasskeyRegistration): Promise<str
       allowCredentials: [{ type: "public-key", id: b64urlDecode(reg.credentialId) }],
       userVerification: "required",
       timeout: 60_000,
-      extensions:
-        reg.mode === "prf"
-          ? ({ prf: { eval: { first: b64urlDecode(reg.salt) } } } as AuthenticationExtensionsClientInputs)
-          : undefined,
+      extensions: {
+        prf: { eval: { first: b64urlDecode(reg.salt) } },
+      } as AuthenticationExtensionsClientInputs,
     },
   })) as PublicKeyCredential | null;
 
   if (!assertion) throw new Error("Biometric verification was cancelled");
 
-  if (reg.mode === "prf") {
-    const ext = assertion.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer } } };
-    const prf = ext.prf?.results?.first;
-    if (!prf) throw new Error("PRF result missing; authenticator may not support PRF");
-    return toHex(new Uint8Array(prf));
-  }
-
-  // Gate mode: assertion succeeded (biometric verified) -> release stored secret.
-  const secret = await gateLoad(reg.credentialId);
-  if (!secret) throw new Error("Gate secret not found for this credential");
-  return secret;
+  const ext = assertion.getClientExtensionResults() as { prf?: { results?: { first?: ArrayBuffer } } };
+  const prf = ext.prf?.results?.first;
+  if (!prf) throw new PrfUnavailableError();
+  return toHex(new Uint8Array(prf));
 }
 
-// --- Minimal IndexedDB store for gate-mode secrets ---
+// --- IndexedDB: biometric-unlock wrapped blobs only ---
 //
-// The stored record is { cryptoKey, iv, ciphertext }: the cryptoKey is a
-// non-extractable AES-GCM key (structured-cloned by IndexedDB — its bytes are
-// never exposed to JS), and the hex secret is held only as AES-GCM ciphertext.
-// Reading the record back yields nothing usable without crypto.subtle.decrypt,
-// which can only run via the in-memory non-extractable key handle.
+// Nothing secret is stored here. A blob is the account's app key sealed under a key
+// HKDF-derived from the PRF secret (see biometricUnlock.ts), and the PRF secret exists
+// only for the duration of an assertion. Storage-scraping script reads ciphertext it
+// cannot unwrap without a fresh Touch ID.
 
 const DB_NAME = "ttc_passkey_store";
-const STORE = "gate_secrets";
-// Biometric-unlock wrapped-key blobs live in the SAME database (see
-// biometricUnlock.ts). Both stores are created by the shared opener below at
-// DB version 2, so the two modules never race to open the DB at different
-// versions (a mismatch would throw IndexedDB VersionError on the lower open).
 const UNLOCK_STORE = "unlock_blobs";
 const DB_VERSION = 2;
 
-interface GateRecord {
-  cryptoKey: CryptoKey;
-  iv: Uint8Array<ArrayBuffer>;
-  ciphertext: ArrayBuffer;
-}
-
-/**
- * Open the shared "ttc_passkey_store" IndexedDB at the current version, creating
- * BOTH object stores ("gate_secrets" + "unlock_blobs") on upgrade. Exported so
- * biometricUnlock.ts reuses the exact same opener — there must be exactly one
- * source of truth for the DB version and its schema.
- */
+/** Open the shared "ttc_passkey_store" IndexedDB, creating the blob store on upgrade. */
 export function openPasskeyDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
-      // Create each store only if absent — handles both fresh installs and the
-      // v1 -> v2 upgrade (where gate_secrets already exists).
-      if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
       if (!db.objectStoreNames.contains(UNLOCK_STORE)) db.createObjectStore(UNLOCK_STORE);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
-  });
-}
-
-/** @deprecated internal alias retained for the gate helpers below. */
-const openDb = openPasskeyDb;
-
-// Wrap: generate a non-extractable AES-GCM key, encrypt the hex secret under it
-// with a random 12-byte IV, and persist only the opaque key + IV + ciphertext.
-async function gateStore(credentialId: string, secret: string): Promise<void> {
-  const cryptoKey = await crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    false, // non-extractable: raw key bytes can never be read back out
-    ["encrypt", "decrypt"],
-  );
-  const iv = randomBytes(12);
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, cryptoKey, fromHex(secret));
-  const record: GateRecord = { cryptoKey, iv, ciphertext };
-
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).put(record, credentialId);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-// Unwrap: load the record and decrypt the ciphertext with the non-extractable
-// key handle to recover the hex secret. Returns null if no record exists.
-async function gateLoad(credentialId: string): Promise<string | null> {
-  const db = await openDb();
-  const record = await new Promise<GateRecord | string | undefined>((resolve, reject) => {
-    const tx = db.transaction(STORE, "readonly");
-    const req = tx.objectStore(STORE).get(credentialId);
-    req.onsuccess = () => resolve(req.result as GateRecord | string | undefined);
-    req.onerror = () => reject(req.error);
-  });
-  if (!record) return null;
-
-  // Legacy record (pre-wrap format): the secret was stored as a plaintext hex
-  // string. Use it this once and rewrap it under a fresh non-extractable key —
-  // gateStore overwrites the record, so the readable copy is gone after this.
-  if (typeof record === "string") {
-    await gateStore(credentialId, record);
-    return record;
-  }
-
-  const plain = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: record.iv },
-    record.cryptoKey,
-    record.ciphertext,
-  );
-  return toHex(new Uint8Array(plain));
-}
-
-/**
- * Delete the gate secret for a credential. Used by disableBiometricUnlock /
- * logout purge so a removed credential leaves no recoverable secret behind.
- * No-op for PRF credentials (which never stored a gate secret).
- */
-export async function gateDelete(credentialId: string): Promise<void> {
-  const db = await openDb();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
-    tx.objectStore(STORE).delete(credentialId);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
   });
 }
 

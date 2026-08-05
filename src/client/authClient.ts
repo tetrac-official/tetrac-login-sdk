@@ -384,10 +384,13 @@ export class AuthClient {
 
   // --- Biometric ---
 
-  /** Register a biometric (passkey) account; PRF/gate secret becomes the app key. */
+  /** Register a biometric (passkey) account; PRF secret becomes the app key. */
   async registerWithBiometric(params: {
     userName: string;
   }): Promise<{ result: AuthResult; registration: PasskeyRegistration }> {
+    // Throws PrfUnavailableError on an authenticator without PRF — the derived secret IS
+    // this account's app key, so there is no passkey to retype and no wallet to re-sign.
+    // Callers should catch it and offer email or wallet registration instead.
     const registration = await registerPasskey(this.config.webauthn, params.userName);
     const appKey = await derivePasskeySecret(registration);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
@@ -401,7 +404,7 @@ export class AuthClient {
       publicKey: identity.publicKey,
       email: internalEmail,
       authMethod: "biometric",
-      // Auth keypair derived from the PRF/gate secret; server stores only its public key.
+      // Auth keypair derived from the PRF secret; server stores only its public key.
       authPublicKey: deriveAuthPublicKey(appKey),
       wallets: flattenBundle(bundle),
     });
@@ -412,7 +415,7 @@ export class AuthClient {
   /** Biometric re-login: unlock the passkey secret and authenticate. */
   async loginWithBiometric(params: { registration: PasskeyRegistration }): Promise<AuthResult> {
     // Resolve the internal identity, fetch a challenge, then prove control by signing it
-    // with the auth keypair derived from the PRF/gate secret (released by Touch ID).
+    // with the auth keypair derived from the PRF secret (released by Touch ID).
     const email = biometricEmail(params.registration);
     const { challenge } = await this.post<{ challenge: string }>("challenge", { email });
     const appKey = await derivePasskeySecret(params.registration);

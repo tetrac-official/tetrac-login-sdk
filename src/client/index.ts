@@ -28,6 +28,7 @@ export {
   isBiometricAvailable,
   registerPasskey,
   derivePasskeySecret,
+  PrfUnavailableError,
   type PasskeyRegistration,
 } from "./webauthn.js";
 export {

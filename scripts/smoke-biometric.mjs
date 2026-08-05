@@ -3,7 +3,7 @@
 // BUILT dist/ (the published artifact), with NO jest, NO browser, NO real
 // authenticator. It installs the minimal browser globals the SDK touches
 // (IndexedDB v2 multi-store, localStorage/sessionStorage, navigator.credentials
-// with a STUBBED PRF/gate secret, window/document), then exercises the real
+// with a STUBBED PRF secret, window/document), then exercises the real
 // HKDF-SHA-256 + AES-256-GCM wrap/unwrap and the enable -> lock -> unlock flow.
 //
 // Run:  npm run smoke:biometric        (builds dist/ first, then runs this)
@@ -97,8 +97,8 @@ const makeIdbShim = () => {
 };
 const idb = makeIdbShim();
 
-// ---------- WebAuthn mock: switchable PRF/gate + decline; deterministic PRF secret ----------
-let credMode = "prf"; // "prf" | "gate"
+// ---------- WebAuthn mock: PRF supported or not + decline; deterministic PRF secret ----------
+let prfSupported = true;
 let declineAssertion = false;
 let nextPrfHex = "11".repeat(32);
 const hexToArrayBuffer = (hex) => {
@@ -116,13 +116,13 @@ const makeNavigator = () => ({
   credentials: {
     create: async () => ({
       rawId: pendingRawId,
-      getClientExtensionResults: () => (credMode === "prf" ? { prf: { enabled: true } } : {}),
+      getClientExtensionResults: () => (prfSupported ? { prf: { enabled: true } } : {}),
     }),
     get: async () => {
       if (declineAssertion) return null; // user declined / cancelled
       return {
         getClientExtensionResults: () =>
-          credMode === "prf" ? { prf: { results: { first: hexToArrayBuffer(nextPrfHex) } } } : {},
+          prfSupported ? { prf: { results: { first: hexToArrayBuffer(nextPrfHex) } } } : {},
       };
     },
   },
@@ -158,7 +158,7 @@ const {
   AuthClient,
 } = mod;
 
-const cfg = { rpId: "localhost", rpName: "TTC smoke", preferPrf: true };
+const cfg = { rpId: "localhost", rpName: "TTC smoke" };
 const EMAIL_KEY = "ab".repeat(32); // opaque stand-in app key (email/PBKDF2-shaped, 64 hex)
 const WEB3_KEY = "cd".repeat(32); //  opaque stand-in app key (web3/SHA256-shaped, 64 hex)
 
@@ -166,7 +166,7 @@ console.log("\nunlockViaBiometric smoke test — against dist/, real Web Crypto 
 
 // 1) PRF mode — wrap/unwrap round-trips the EXACT app key
 console.log("PRF mode — round-trip (email-shaped key):");
-credMode = "prf";
+prfSupported = true;
 declineAssertion = false;
 nextPrfHex = "11".repeat(32);
 pendingRawId = randomRawId();
@@ -192,7 +192,7 @@ await disableBiometricUnlock(reg1);
 
 // 3) Declined biometric fails closed
 console.log("\nDeclined assertion:");
-credMode = "prf";
+prfSupported = true;
 nextPrfHex = "22".repeat(32);
 pendingRawId = randomRawId();
 armAppKey(EMAIL_KEY);
@@ -203,15 +203,27 @@ await expectThrows("declined/cancelled assertion -> unlock throws", () => unlock
 declineAssertion = false;
 await disableBiometricUnlock(reg2);
 
-// 4) Gate mode — round-trips the EXACT app key (web3-shaped)
-console.log("\nGate mode — round-trip (web3-shaped key):");
-credMode = "gate";
+// 4) An authenticator WITHOUT PRF is refused outright — never downgraded to
+// on-device secret storage (the deleted gate mode).
+console.log("\nNo-PRF authenticator is refused:");
+prfSupported = false;
 pendingRawId = randomRawId();
 armAppKey(WEB3_KEY);
-const reg3 = await enableBiometricUnlock(cfg, "smoke@gate");
+await expectThrows("enable on a non-PRF authenticator throws PrfUnavailableError", () =>
+  enableBiometricUnlock(cfg, "smoke@noprf"),
+);
+check("no marker was left behind", hasBiometricUnlock() === false);
+prfSupported = true;
+
+// 5) Web3-shaped key — round-trips exactly
+console.log("\nRound-trip (web3-shaped key):");
+prfSupported = true;
+pendingRawId = randomRawId();
+armAppKey(WEB3_KEY);
+const reg3 = await enableBiometricUnlock(cfg, "smoke@web3");
 lockVault();
 await unlockViaBiometric(reg3);
-check("gate-mode unlock re-arms the EXACT app key", getAppKey() === WEB3_KEY);
+check("unlock re-arms the EXACT app key", getAppKey() === WEB3_KEY);
 
 // 5) ReauthCredentials { biometricUnlock } via AuthClient.deriveAppKey (no network)
 console.log("\nReauthCredentials { biometricUnlock } via AuthClient.deriveAppKey:");
@@ -229,7 +241,7 @@ await expectThrows("unlock after disable throws (no blob)", () => unlockViaBiome
 // 7) enable requires an unlocked vault
 console.log("\nEnable requires an unlocked vault:");
 lockVault();
-credMode = "prf";
+prfSupported = true;
 pendingRawId = randomRawId();
 await expectThrows("enable while locked throws (VaultLockedError)", () =>
   enableBiometricUnlock(cfg, "smoke@locked"),
