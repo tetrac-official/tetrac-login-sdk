@@ -36,9 +36,27 @@ export function clientIp(req: Request, trustProxyHeaders = false, trustedProxyHo
   return req.headers.get("x-real-ip") ?? "unknown";
 }
 
-export async function readJson<T>(req: Request): Promise<T | null> {
+/**
+ * Largest request body any route accepts. The biggest legitimate payload is a
+ * registration carrying four wallet slots at the 8 KB ciphertext bound — ~33 KB — so
+ * 128 KB is generous headroom.
+ */
+export const MAX_BODY_BYTES = 128 * 1024;
+
+/**
+ * Parse a JSON body, bounded.
+ *
+ * Unbounded `req.json()` buffers and parses whatever arrives BEFORE any validator or rate
+ * limiter runs, on routes that are all unauthenticated. `content-length` is a hint an
+ * attacker controls, so it is only a cheap early out — the decoded text is measured too.
+ */
+export async function readJson<T>(req: Request, maxBytes = MAX_BODY_BYTES): Promise<T | null> {
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
   try {
-    return (await req.json()) as T;
+    const text = await req.text();
+    if (text.length > maxBytes) return null;
+    return JSON.parse(text) as T;
   } catch {
     return null;
   }

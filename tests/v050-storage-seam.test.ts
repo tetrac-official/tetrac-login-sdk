@@ -184,18 +184,34 @@ describe("§4.1 MemoryAdapter.del clears BOTH keyspaces, like real Redis DEL", (
 });
 
 describe("§4.2 /login validates the email BEFORE it reaches a storage key", () => {
-  it("🚨 rejects an over-length email instead of turning it into a 400 KB key", async () => {
+  it("🚨 rejects an over-length email instead of turning it into a storage key", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
-    const huge = `${"a".repeat(400_000)}@example.com`;
-    const res = await h.login(jreq({ email: huge, signature: "ab", challenge: "cd" }));
+    // Comfortably past the documented 320-byte bound, but small enough to get past the
+    // body cap — so this exercises the EMAIL validator, not the transport bound.
+    const long = `${"a".repeat(1_000)}@example.com`;
+    const res = await h.login(jreq({ email: long, signature: "ab", challenge: "cd" }));
 
     // Inert on Redis; on Postgres this is an unauthenticated 500, and on non-strict MySQL
     // a SILENT key truncation. Either way it invalidates the ≤320-byte bound every
     // backend's column sizing is derived from.
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Invalid email format");
+  });
+
+  it("🚨 a body past MAX_BODY_BYTES is rejected before it is even parsed", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
+
+    // 400 KB of email. Unbounded `req.json()` buffered and parsed this on an
+    // unauthenticated route before any validator or rate limiter ran.
+    const huge = `${"a".repeat(400_000)}@example.com`;
+    const res = await h.login(jreq({ email: huge, signature: "ab", challenge: "cd" }));
+    expect(res.status).toBe(400);
+    // readJson returns null, so the handler reports the missing-fields error rather than
+    // a format error — the body never became an object at all.
+    expect((await res.json()).error).toBe("email, signature and challenge required");
   });
 
   it("rejects a malformed email on /login, matching /register", async () => {

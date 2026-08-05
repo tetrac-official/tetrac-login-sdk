@@ -190,25 +190,40 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
   // WALLET_SLOTS). That bound is what keeps the encrypted blob a fixed-size object instead
   // of an append-only list, and it is enforced here rather than by a numeric cap: a request
   // carrying two entries for the same slot is malformed, not merely large.
-  function validateWallets(wallets: unknown): Response | null {
-    if (!Array.isArray(wallets)) return error("wallets must be an array");
-    if (wallets.length > WALLET_SLOTS.length) return error("too many wallets");
+  function readWallets(wallets: unknown): { error: Response } | { wallets: EncryptedWallet[] } {
+    if (!Array.isArray(wallets)) return { error: error("wallets must be an array") };
+    if (wallets.length > WALLET_SLOTS.length) return { error: error("too many wallets") };
     const seen = new Set<string>();
+    const clean: EncryptedWallet[] = [];
     for (const w of wallets) {
-      if (!w || typeof w !== "object") return error("invalid wallet entry");
+      if (!w || typeof w !== "object") return { error: error("invalid wallet entry") };
       const e = w as Record<string, unknown>;
       if (typeof e.publicKey !== "string" || typeof e.encryptedSecret !== "string") {
-        return error("invalid wallet entry");
+        return { error: error("invalid wallet entry") };
       }
-      if (e.publicKey.length > 128) return error("wallet publicKey too long");
-      if (e.role !== "funds" && e.role !== "signing") return error("invalid wallet entry");
-      if (e.chain !== "solana" && e.chain !== "evm") return error("invalid wallet entry");
-      if (e.encryptedSecret.length > 8192) return error("encryptedSecret too large");
+      if (e.publicKey.length > 128) return { error: error("wallet publicKey too long") };
+      if (e.role !== "funds" && e.role !== "signing") return { error: error("invalid wallet entry") };
+      if (e.chain !== "solana" && e.chain !== "evm") return { error: error("invalid wallet entry") };
+      if (e.encryptedSecret.length > 8192) return { error: error("encryptedSecret too large") };
       const slot = `${e.chain}:${e.role}`;
-      if (seen.has(slot)) return error("duplicate wallet slot");
+      if (seen.has(slot)) return { error: error("duplicate wallet slot") };
       seen.add(slot);
+      // REBUILD from an allowlist — never persist the caller's object.
+      //
+      // Validating the known fields and then storing what arrived is not the same thing.
+      // Unknown properties were carried through verbatim into JSON.stringify(user), so a
+      // single anonymous /register carrying `{chain, role, publicKey, encryptedSecret,
+      // junk: "x".repeat(5_000_000)}` persisted 5 MB — every bound above satisfied. The
+      // four fields below are the entire wire contract; anything else is dropped here,
+      // which makes the stored size a function of the bounds rather than of the caller.
+      clean.push({
+        chain: e.chain,
+        role: e.role,
+        publicKey: e.publicKey,
+        encryptedSecret: e.encryptedSecret,
+      });
     }
-    return null;
+    return { wallets: clean };
   }
 
   return {
@@ -279,9 +294,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         const apErr = validateAuthPublicKey(body.authPublicKey);
         if (apErr) return error(apErr);
       }
+      let wallets: EncryptedWallet[] = [];
       if (body.wallets !== undefined) {
-        const invalid = validateWallets(body.wallets);
-        if (invalid) return invalid;
+        const r = readWallets(body.wallets);
+        if ("error" in r) return r.error;
+        wallets = r.wallets;
       }
       // Reject a client-supplied PBKDF2 count outside the allowed band (audit F3).
       // Absent is fine — legacy/wallet accounts don't pin one.
@@ -335,7 +352,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         email: body.email,
         authPublicKey: body.authPublicKey,
         authMethod: body.authMethod ?? "email",
-        wallets: body.wallets ?? [],
+        wallets,
         // PBKDF2 iteration count the client derived the app key with (email users);
         // pinned so the same count is used on every future login/unlock. Undefined for
         // wallet/biometric (they don't use PBKDF2).
@@ -454,9 +471,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (appErr) return error(appErr);
       const pkErr = validatePublicKey(body.publicKey);
       if (pkErr) return error(pkErr);
+      let wallets: EncryptedWallet[] = [];
       if (body.wallets !== undefined) {
-        const invalid = validateWallets(body.wallets);
-        if (invalid) return invalid;
+        const r = readWallets(body.wallets);
+        if ("error" in r) return r.error;
+        wallets = r.wallets;
       }
 
       // Verify-first, penalize-on-failure (see login): a junk signature can't burn
@@ -483,17 +502,17 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
           appId,
           publicKey: body.publicKey,
           authMethod: "wallet",
-          wallets: body.wallets ?? [],
+          wallets,
           createdAt: Date.now(),
         };
         await persistUser(store, user);
-      } else if (!user.wallets?.length && body.wallets?.length) {
+      } else if (!user.wallets?.length && wallets.length) {
         // Self-heal: an existing wallet with no stored keys yet (legacy/empty
         // record) gets backfilled from the client bundle. Safe — nothing to
         // overwrite. Wallets that already have keys are never touched.
         // Slot-scoped, for the same reason as import: never rewrite the whole record.
-        for (const w of body.wallets) await store.putWalletSlot(user.appId, user.publicKey, w);
-        user.wallets = body.wallets;
+        for (const w of wallets) await store.putWalletSlot(user.appId, user.publicKey, w);
+        user.wallets = wallets;
       }
       const token = await issueSession(store, user, config, issueFingerprint(req));
       return json(asResult(user, token), isNew ? 201 : 200);
@@ -545,8 +564,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
 
       const body = await readJson<{ wallets?: EncryptedWallet[] }>(req);
       if (!body?.wallets?.length) return error("wallets required");
-      const invalid = validateWallets(body.wallets);
-      if (invalid) return invalid;
+      const parsed = readWallets(body.wallets);
+      if ("error" in parsed) return parsed.error;
 
       // REPLACE the (chain, role) slot — never append. Appending was a fund-misdirection
       // bug, not just bloat: `useActiveWallet` resolves a wallet with `.find()`, which
@@ -558,7 +577,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // back wholesale is what destroyed keys: a concurrent login (which also rewrote it)
       // or a second import would resolve last-write-wins and drop the other's ciphertext,
       // silently, with both requests returning 200.
-      for (const incoming of body.wallets) {
+      for (const incoming of parsed.wallets) {
         await store.putWalletSlot(user.appId, user.publicKey, incoming);
       }
       const updated = (await getUserByPublicKey(store, user.appId, user.publicKey)) ?? user;
