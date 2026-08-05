@@ -197,7 +197,10 @@ describe("concurrent connect-wallet upsert", () => {
     const chRes = await h.challenge(req({ publicKey: pubKey }));
     const { challenge } = await chRes.json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
 
     // Both send the same challenge (only one should succeed)

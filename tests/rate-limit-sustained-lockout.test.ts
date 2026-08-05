@@ -69,9 +69,7 @@ describe("rate limiter — sustained targeted lockout", () => {
       await store.hitRateLimit(victimBucket, WINDOW_SECONDS, MAX_ATTEMPTS);
       advance(1_000);
     }
-    expect((await store.hitRateLimit(victimBucket, WINDOW_SECONDS, MAX_ATTEMPTS)).allowed).toBe(
-      false,
-    );
+    expect((await store.hitRateLimit(victimBucket, WINDOW_SECONDS, MAX_ATTEMPTS)).allowed).toBe(false);
 
     // Attacker stops. One full window of silence.
     advance(WINDOW_SECONDS * 1_000 + 1_000);

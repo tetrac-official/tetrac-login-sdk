@@ -19,7 +19,7 @@
 // a REAL engine in Docker, not a mock — atomicity, collation and expiry are properties
 // of the engine, and a mock only asserts you mocked it the way you imagined.
 import type { AuthStore } from "./store.js";
-import type { UserData, EncryptedWallet } from "../core/types.js";
+import { WALLET_SLOTS, type UserData, type EncryptedWallet } from "../core/types.js";
 
 export interface ConformanceCase {
   name: string;
@@ -68,14 +68,20 @@ function makeUser(over: Partial<UserData> = {}): UserData {
   } as UserData;
 }
 
-/** A UserData at the documented cap: maxWalletsPerUser = 64 encrypted wallets (~15 KB). */
+/**
+ * The LARGEST UserData the server will ever persist: all four (chain, role) slots filled,
+ * each carrying a max-length encryptedSecret (8192 chars) — roughly 33 KB.
+ *
+ * The record is slot-bounded, not count-bounded: `validateWallets` rejects a fifth entry
+ * and any duplicate slot, and import REPLACES a slot rather than appending. So this is a
+ * real worst case a backend must round-trip byte-identically, not an arbitrary number.
+ */
 function makeMaxWalletUser(): UserData {
-  const wallets: EncryptedWallet[] = Array.from({ length: 64 }, (_, i) => ({
+  const wallets: EncryptedWallet[] = WALLET_SLOTS.map((slot, i) => ({
+    ...slot,
     publicKey: `${PK_A}${i}`,
-    encryptedSecret: `${"a1b2c3d4".repeat(20)}:${String(i).padStart(4, "0")}`,
-    role: "trading",
-    chain: i % 2 === 0 ? "solana" : "evm",
-  })) as EncryptedWallet[];
+    encryptedSecret: `${"a1b2c3d4".repeat(1024)}:${String(i).padStart(4, "0")}`,
+  }));
   return makeUser({ wallets, email: "max@example.com" });
 }
 
@@ -259,12 +265,12 @@ export function authStoreConformanceCases(
     assertEqual(await store.getUser("app1", PK_B), null, "absent user is null");
   });
 
-  add("🚨 user: a 64-wallet UserData round-trips BYTE-IDENTICAL (no silent truncation)", async (store) => {
+  add("🚨 user: a max-size UserData round-trips BYTE-IDENTICAL (no silent truncation)", async (store) => {
     const u = makeMaxWalletUser();
     await store.putUser(u);
     const got = await store.getUser("app1", PK_A);
     assert(got, "the max-size record must be readable");
-    assertEqual(got.wallets.length, 64, "all 64 wallets must survive");
+    assertEqual(got.wallets.length, WALLET_SLOTS.length, "every wallet slot must survive");
     assertEqual(
       JSON.stringify(got.wallets),
       JSON.stringify(u.wallets),

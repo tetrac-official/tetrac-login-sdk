@@ -80,7 +80,7 @@ export interface AuthConfig {
    * (+ port), no path, no trailing slash.
    *
    * REQUIRED for every Web3 wallet route;
- */
+   */
   origin: string;
   /**
    * Optional allowlist of accepted `appId` values (v0.4.0). When set, a request
@@ -157,8 +157,6 @@ export interface AuthConfig {
    * never the ambient session key. Default true. (Reserved — v1 always re-auths.)
    */
   revealRequiresReauth: boolean;
-  /** Max total wallets a single user record may hold — import-wallet cap (record-bloat DoS guard). */
-  maxWalletsPerUser: number;
 }
 
 /**
@@ -195,7 +193,6 @@ export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
   autoLockMs: 15_000,
   lockOnHide: true,
   revealRequiresReauth: true,
-  maxWalletsPerUser: 64,
 };
 
 /**

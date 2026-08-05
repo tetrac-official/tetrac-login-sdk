@@ -79,7 +79,10 @@ const W = kp.publicKey.toBase58();
 async function connect(appId, ct) {
   const { challenge } = await (await h.challenge(req({ appId, publicKey: W }))).json();
   const sig = bytesToHex(
-    nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
+    nacl.sign.detached(
+      new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+      kp.secretKey,
+    ),
   );
   const wallets = [{ chain: "solana", role: "funds", publicKey: W, encryptedSecret: ct }];
   return h.connectWallet(req({ appId, publicKey: W, signature: sig, challenge, wallets }));
@@ -98,7 +101,9 @@ check(
 // 3) A challenge issued for one app does not satisfy another.
 console.log("\nChallenge scoping:");
 const { challenge: chA } = await (await h.challenge(req({ appId: APP_A, publicKey: W }))).json();
-const sigA = bytesToHex(nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(chA, "https://test.example")), kp.secretKey));
+const sigA = bytesToHex(
+  nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(chA, "https://test.example")), kp.secretKey),
+);
 const cross = await h.loginWallet(req({ appId: APP_B, publicKey: W, signature: sigA, challenge: chA }));
 check("app-A challenge spent under app B → 401", cross.status === 401);
 
@@ -138,7 +143,10 @@ const colon = await h.register(
   }),
 );
 check("appId containing ':' (namespace separator) → 400", colon.status === 400);
-const allow = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example", allowedAppIds: [APP_A] } });
+const allow = createAuthHandlers({
+  storage: new MemoryAdapter(),
+  config: { origin: "https://test.example", allowedAppIds: [APP_A] },
+});
 const undeclared = await allow.register(
   req({
     appId: APP_B,

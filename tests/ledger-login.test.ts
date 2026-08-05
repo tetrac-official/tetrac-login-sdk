@@ -45,7 +45,9 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
     const kp = Keypair.generate();
     const challenge = generateChallenge();
     const sig = softwareSign(kp, enc(walletLoginMessage(challenge, "https://test.example")));
-    expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example")).toBe(true);
+    expect(
+      verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
+    ).toBe(true);
   });
 
   it("accepts a Ledger LEGACY off-chain signature (fixes the 401 on deployed firmware)", () => {
@@ -53,20 +55,26 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
     const challenge = generateChallenge();
     const sig = ledgerSign(kp, enc(walletLoginMessage(challenge, "https://test.example")));
     // Before the fix this returned false → 401 Invalid credentials.
-    expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example")).toBe(true);
+    expect(
+      verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
+    ).toBe(true);
   });
 
   it("accepts a Ledger V0 off-chain signature (newer firmware)", () => {
     const kp = Keypair.generate();
     const challenge = generateChallenge();
     const sig = ledgerSignV0(kp, enc(walletLoginMessage(challenge, "https://test.example")));
-    expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example")).toBe(true);
+    expect(
+      verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
+    ).toBe(true);
   });
 
   it("rejects a signature bound to a DIFFERENT challenge (replay protection intact)", () => {
     const kp = Keypair.generate();
     const sig = ledgerSign(kp, enc(walletLoginMessage(generateChallenge(), "https://test.example")));
-    expect(verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), generateChallenge(), "https://test.example")).toBe(false);
+    expect(
+      verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), generateChallenge(), "https://test.example"),
+    ).toBe(false);
   });
 
   it("rejects a valid envelope signature presented under a DIFFERENT public key", () => {
@@ -75,13 +83,24 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
     const challenge = generateChallenge();
     const sig = ledgerSign(signer, enc(walletLoginMessage(challenge, "https://test.example")));
     // The envelope embeds the signer pubkey; verifying under the impostor's key fails.
-    expect(verifySolanaSignature(impostor.publicKey.toBase58(), toHex(sig), challenge, "https://test.example")).toBe(false);
+    expect(
+      verifySolanaSignature(impostor.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
+    ).toBe(false);
   });
 
   it("rejects garbage signatures", () => {
     const kp = Keypair.generate();
-    expect(verifySolanaSignature(kp.publicKey.toBase58(), "00".repeat(64), generateChallenge(), "https://test.example")).toBe(false);
-    expect(verifySolanaSignature(kp.publicKey.toBase58(), "nothex", generateChallenge(), "https://test.example")).toBe(false);
+    expect(
+      verifySolanaSignature(
+        kp.publicKey.toBase58(),
+        "00".repeat(64),
+        generateChallenge(),
+        "https://test.example",
+      ),
+    ).toBe(false);
+    expect(
+      verifySolanaSignature(kp.publicKey.toBase58(), "nothex", generateChallenge(), "https://test.example"),
+    ).toBe(false);
   });
 });
 
@@ -93,14 +112,20 @@ describe("Ledger app-key derivation is stable (fixes the encrypted-blob failure)
       toHex(ledgerSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))),
     );
     // Login (later, separate signing ceremony): same wallet, same message, same envelope.
-    const appKeyAtLogin = deriveAppKeyFromSignature(toHex(ledgerSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))));
+    const appKeyAtLogin = deriveAppKeyFromSignature(
+      toHex(ledgerSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))),
+    );
     expect(appKeyAtLogin).toBe(appKeyAtRegister);
   });
 
   it("derives a DIFFERENT app key per appId (domain separation preserved for hardware)", () => {
     const kp = Keypair.generate();
-    const a = deriveAppKeyFromSignature(toHex(ledgerSign(kp, enc(walletAppKeyMessage("app-a", "https://test.example")))));
-    const b = deriveAppKeyFromSignature(toHex(ledgerSign(kp, enc(walletAppKeyMessage("app-b", "https://test.example")))));
+    const a = deriveAppKeyFromSignature(
+      toHex(ledgerSign(kp, enc(walletAppKeyMessage("app-a", "https://test.example")))),
+    );
+    const b = deriveAppKeyFromSignature(
+      toHex(ledgerSign(kp, enc(walletAppKeyMessage("app-b", "https://test.example")))),
+    );
     expect(a).not.toBe(b);
   });
 
@@ -109,8 +134,12 @@ describe("Ledger app-key derivation is stable (fixes the encrypted-blob failure)
     // the two sign different preimages, so the app keys differ. Register and log in
     // through the SAME path and the blob round-trips.
     const kp = Keypair.generate();
-    const sw = deriveAppKeyFromSignature(toHex(softwareSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))));
-    const hw = deriveAppKeyFromSignature(toHex(ledgerSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))));
+    const sw = deriveAppKeyFromSignature(
+      toHex(softwareSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))),
+    );
+    const hw = deriveAppKeyFromSignature(
+      toHex(ledgerSign(kp, enc(walletAppKeyMessage("demo", "https://test.example")))),
+    );
     expect(hw).not.toBe(sw);
   });
 });

@@ -26,7 +26,16 @@ function req(body: unknown, headers: Record<string, string> = {}): Request {
 }
 const SOL_PUB = "SoLPubKey1111111111111111111111111111111111";
 const APP_KEY = "ab".repeat(32); // fixed 64-hex app key for the signature-auth flow
-const wallet = (i = 0) => ({ chain: "solana", role: `r${i}`, publicKey: `p${i}`, encryptedSecret: "c" });
+// A wallet in one of the four (chain, role) slots a record may hold. Roles are closed
+// ("funds" | "signing") and a record holds at most one wallet per slot, so `i` indexes
+// the slot space rather than growing a list.
+const SLOTS = [
+  { chain: "solana", role: "funds" },
+  { chain: "solana", role: "signing" },
+  { chain: "evm", role: "funds" },
+  { chain: "evm", role: "signing" },
+] as const;
+const wallet = (i = 0) => ({ ...SLOTS[i % SLOTS.length], publicKey: `p${i}`, encryptedSecret: "c" });
 
 async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: string, publicKey = SOL_PUB) {
   const res = await registerEmail(h, { publicKey, email, appKey: APP_KEY, wallets: [wallet()] });
@@ -82,7 +91,11 @@ describe("challenge UNKNOWN-email rate limiting (WI-4 enumeration hardening)", (
   it("trusted proxy: unknown-email probes from one source IP are IP-throttled across DIFFERENT emails", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { origin: "https://test.example", trustProxyHeaders: true, rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+      config: {
+        origin: "https://test.example",
+        trustProxyHeaders: true,
+        rateLimit: { maxAttempts: 2, windowSeconds: 60 },
+      },
     });
     const probe = (email: string) => h.challenge(req({ email }, { "x-forwarded-for": "1.2.3.4" }));
     expect((await probe("a@ghost.com")).status).toBe(400);
@@ -102,9 +115,14 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
   });
 
   it("a 0x EVM address fails closed on the wallet-auth path — rejected at publicKey validation (400)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const evm = "0x" + "ef".repeat(20);
-    expect(signature.verifySolanaSignature(evm, "00".repeat(64), "challenge", "https://test.example")).toBe(false);
+    expect(signature.verifySolanaSignature(evm, "00".repeat(64), "challenge", "https://test.example")).toBe(
+      false,
+    );
     const res = await h.loginWallet(
       req({ publicKey: evm, signature: "00".repeat(64), challenge: "x".repeat(64) }),
     );
@@ -118,7 +136,10 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
 // a *well-formed* identity still registers without proving control of the email.
 describe("SERVERSIDE-11 RESOLVED (publicKey format) / SERVERSIDE-5 residual (email ownership)", () => {
   it("rejects an arbitrary non-Solana publicKey (e.g. an EVM 0x address) with 400", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const arbitrary = "0x" + "cd".repeat(20); // not a Solana ed25519 key
     const res = await registerEmail(h, {
       publicKey: arbitrary,
@@ -130,7 +151,10 @@ describe("SERVERSIDE-11 RESOLVED (publicKey format) / SERVERSIDE-5 residual (ema
   });
 
   it("still registers a well-formed Solana identity with NO email-ownership proof (SERVERSIDE-5 residual)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await registerEmail(h, {
       publicKey: "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
       email: "noproof@x.com",
@@ -201,27 +225,50 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
   });
 });
 
-describe("SERVERSIDE-4 RESOLVED — import-wallet enforces a per-user total cap", () => {
-  it("import beyond maxWalletsPerUser (default 64) is rejected (400); the total stops growing", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+describe("SERVERSIDE-4 RESOLVED — the record is slot-bounded, so import cannot grow it", () => {
+  it("🚨 repeated imports never grow the record past its four (chain, role) slots", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const { body } = await registerUser(h, "user@example.com"); // starts with 1 wallet
     const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
-    const batch = Array.from({ length: 16 }, (_, i) => wallet(i)); // max per-batch is enforced (16)
+    const full = SLOTS.map((_, i) => wallet(i)); // one wallet per slot
 
-    // 1 → 17 → 33 → 49 all fit under the 64 cap; the next (would be 65) is rejected.
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(400); // 49 + 16 > 64
+    // The old cap was a COUNT (64) over an append. That let a session holder add 63
+    // entries of ~8 KB ciphertext. The bound is now structural: there are four slots and
+    // an import replaces one, so the record cannot grow no matter how often this runs.
+    for (let i = 0; i < 5; i++) {
+      expect((await h.importWallet(req({ wallets: full }, auth))).status).toBe(200);
+    }
 
     const ud = await (await h.userData(req({}, auth))).json();
-    expect(ud.user.wallets.length).toBe(49); // capped — the rejected batch did not persist
+    expect(ud.user.wallets.length).toBe(SLOTS.length);
+
+    // …and every slot is unique.
+    const slots = ud.user.wallets.map((w: { chain: string; role: string }) => `${w.chain}:${w.role}`);
+    expect(new Set(slots).size).toBe(SLOTS.length);
+  });
+
+  it("a payload with more entries than there are slots is rejected", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
+    const { body } = await registerUser(h, "toomany@example.com");
+    const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
+    const tooMany = [...SLOTS.map((_, i) => wallet(i)), { ...wallet(0), publicKey: "extra" }];
+
+    expect((await h.importWallet(req({ wallets: tooMany }, auth))).status).toBe(400);
   });
 });
 
 describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKey / email (400)", () => {
   it("rejects a whitespace-padded publicKey", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: "   ",
@@ -235,7 +282,10 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   });
 
   it("rejects a 100k-character publicKey (length bound)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: "x".repeat(100_000),
@@ -249,7 +299,10 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   });
 
   it("rejects a malformed email", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: SOL_PUB,
@@ -265,7 +318,10 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
 
 describe("WEBAUTHN-1 RESOLVED — login requires a challenge signature, not a bearer hash", () => {
   it("a login without a signature is rejected; a valid challenge signature succeeds", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const appKey = "deadbeef".repeat(8); // a 256-bit PRF/gate secret (biometric appKey)
     const bioEmail = "bio_FAKECREDENTIALID@passkey.local";
 

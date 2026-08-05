@@ -143,9 +143,7 @@ export class AuthClient {
   private clientOrigin(): string {
     const origin = typeof window !== "undefined" ? window.location?.origin : undefined;
     if (!origin) {
-      throw new Error(
-        "[tetrac] Web3 wallet flows require a browser origin (window.location.origin).",
-      );
+      throw new Error("[tetrac] Web3 wallet flows require a browser origin (window.location.origin).");
     }
     return origin;
   }

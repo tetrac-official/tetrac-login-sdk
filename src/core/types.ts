@@ -4,17 +4,29 @@
 export type Chain = "solana" | "evm";
 
 /**
- * Standard wallet roles. `funds` holds assets; `signing` is the agent wallet
- * used for delegated signing (so the funds key is never exposed to sign flows).
- * Consumers may also use arbitrary custom role strings.
+ * Wallet roles. `funds` holds assets; `signing` is the agent wallet used for delegated
+ * signing (so the funds key is never exposed to sign flows).
+ *
+ * CLOSED on purpose. A record holds at most one wallet per (chain, role) — four slots
+ * total — and that is what makes the encrypted blob a fixed-size thing rather than an
+ * append-only list. An open role string would make the slot space unbounded, so
+ * "import replaces a wallet" could not be enforced and a record could grow forever.
  */
-export type WalletRole = "funds" | "signing" | (string & {});
+export type WalletRole = "funds" | "signing";
 
 /** Authentication method used to establish the session. */
 export type AuthMethod = "email" | "wallet" | "biometric";
 
 /** Client-facing auth status, mirroring next-ttc's getAuthStatus(). */
 export type AuthStatus = "authenticated" | "session_expired" | "unauthenticated";
+
+/** Every (chain, role) slot a user record may hold — the record's fixed upper bound. */
+export const WALLET_SLOTS: ReadonlyArray<{ chain: Chain; role: WalletRole }> = [
+  { chain: "solana", role: "funds" },
+  { chain: "solana", role: "signing" },
+  { chain: "evm", role: "funds" },
+  { chain: "evm", role: "signing" },
+];
 
 /** A single generated keypair after client-side encryption. */
 export interface EncryptedWallet {

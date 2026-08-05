@@ -30,11 +30,16 @@ describe("verifySolanaSignature — malformed input fails closed", () => {
   });
 
   it("rejects an invalid base58 public key (PublicKey ctor throws → caught)", () => {
-    expect(verifySolanaSignature("not valid base58 !!!", "00".repeat(64), CHALLENGE, "https://test.example")).toBe(false);
+    expect(
+      verifySolanaSignature("not valid base58 !!!", "00".repeat(64), CHALLENGE, "https://test.example"),
+    ).toBe(false);
   });
 
   it("tolerates a 0x-prefixed signature and still verifies a real one", () => {
-    const sig = nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(CHALLENGE, "https://test.example")), kp.secretKey);
+    const sig = nacl.sign.detached(
+      new TextEncoder().encode(walletLoginMessage(CHALLENGE, "https://test.example")),
+      kp.secretKey,
+    );
     expect(verifySolanaSignature(pub, "0x" + bytesToHex(sig), CHALLENGE, "https://test.example")).toBe(true); // 0x strip branch
     expect(verifySolanaSignature(pub, bytesToHex(sig), CHALLENGE, "https://test.example")).toBe(true); // plain hex
   });

@@ -164,7 +164,10 @@ describe("§2 close?() and sweepExpired?() are optional and truthfully advertise
 // =====================================================================================
 describe("§3 the AuthStore seam is additive — no existing deployment changes a line", () => {
   it("createAuthHandlers({ storage }) still works, exactly as before", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const { authToken, publicKey } = await registerFresh(h, "kv@example.com");
     const res = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(res.status).toBe(200);
@@ -179,7 +182,9 @@ describe("§3 the AuthStore seam is additive — no existing deployment changes 
   });
 
   it("supplying neither is a loud, immediate error", () => {
-    expect(() => createAuthHandlers({ config: { origin: "https://test.example" } })).toThrow(/requires either `store`.*or `storage`/);
+    expect(() => createAuthHandlers({ config: { origin: "https://test.example" } })).toThrow(
+      /requires either `store`.*or `storage`/,
+    );
   });
 });
 
@@ -214,13 +219,19 @@ describe("§4.2 /login validates the email BEFORE it reaches a storage key", () 
   });
 
   it("rejects a malformed email on /login, matching /register", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.login(jreq({ email: "not-an-email", signature: "ab", challenge: "cd" }));
     expect(res.status).toBe(400);
   });
 
   it("a valid-but-unknown email still reaches the normal 401 (no behavior change)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.login(jreq({ email: "nobody@example.com", signature: "ab", challenge: "cd" }));
     expect(res.status).toBe(401);
   });

@@ -65,7 +65,11 @@ describe("rate limiting becomes per-SOURCE when trustProxyHeaders is true", () =
   it("one source IP shares a bucket across different target publicKeys (per-source throttle)", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { origin: "https://test.example", trustProxyHeaders: true, rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+      config: {
+        origin: "https://test.example",
+        trustProxyHeaders: true,
+        rateLimit: { maxAttempts: 2, windowSeconds: 60 },
+      },
     });
     const fromIp = (pk: string) =>
       h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": "1.2.3.4" }));
@@ -78,7 +82,11 @@ describe("rate limiting becomes per-SOURCE when trustProxyHeaders is true", () =
   it("different source IPs get independent buckets", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { origin: "https://test.example", trustProxyHeaders: true, rateLimit: { maxAttempts: 1, windowSeconds: 60 } },
+      config: {
+        origin: "https://test.example",
+        trustProxyHeaders: true,
+        rateLimit: { maxAttempts: 1, windowSeconds: 60 },
+      },
     });
     const ch = (pk: string, ip: string) =>
       h.challenge(challengeReq({ publicKey: pk }, { "x-forwarded-for": ip }));

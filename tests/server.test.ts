@@ -22,7 +22,10 @@ function bytesToHex(b: Uint8Array): string {
 
 describe("email auth flow", () => {
   it("registers then logs in via challenge + auth-keypair signature", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
 
     const reg = await registerEmail(h, {
       publicKey: "SoLPubKey1111111111111111111111111111111111",
@@ -69,14 +72,20 @@ describe("wallet auth flow", () => {
     // 4. fresh challenge + login
     const ch2 = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig2 = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(ch2.challenge, "https://test.example")), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(ch2.challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
     const login = await h.loginWallet(req({ publicKey: pubKey, signature: sig2, challenge: ch2.challenge }));
     expect(login.status).toBe(200);
   });
 
   it("rejects a forged signature", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const kp = Keypair.generate();
     const pubKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
@@ -90,7 +99,10 @@ describe("wallet auth flow", () => {
     // Griefing guard: register() verifies the signature before consuming the single-use
     // challenge, so an attacker who knows the (public) wallet key + a pending challenge
     // can't delete it by submitting a forged signature.
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const kp = Keypair.generate();
     const pubKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
@@ -103,7 +115,10 @@ describe("wallet auth flow", () => {
 
     // …and the challenge survives, so the real owner can still register with it.
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
     const real = await h.register(
       req({ publicKey: pubKey, authMethod: "wallet", wallets: [], signature: sig, challenge }),
@@ -117,13 +132,19 @@ describe("connect-wallet (upsert)", () => {
     const pubKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
     return h.connectWallet(req({ publicKey: pubKey, signature: sig, challenge, wallets }));
   }
 
   it("creates a new wallet (201) then logs the same wallet in (200) without overwriting keys", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const kp = Keypair.generate();
     const original = [{ chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "ORIGINAL" }];
 
@@ -140,7 +161,10 @@ describe("connect-wallet (upsert)", () => {
   });
 
   it("backfills wallets for an existing record that has none (self-heal)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const kp = Keypair.generate();
 
     const first = await connect(h, kp, []); // created with no wallets
@@ -157,7 +181,10 @@ describe("connect-wallet (upsert)", () => {
 describe("rate limiting", () => {
   it("blocks after maxAttempts within the window", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { origin: "https://test.example", rateLimit: { maxAttempts: 3, windowSeconds: 60 } } });
+    const h = createAuthHandlers({
+      storage,
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
+    });
     const make = () =>
       h.challenge(
         req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }, { "x-forwarded-for": "1.2.3.4" }),
@@ -252,7 +279,10 @@ describe("atomic challenge consume (H3)", () => {
     // Register the wallet so login-wallet has a record to resolve.
     const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
     const reg = await h.register(
       req({ publicKey: pubKey, authMethod: "wallet", wallets: [], signature: sig, challenge }),
@@ -262,7 +292,10 @@ describe("atomic challenge consume (H3)", () => {
     // New challenge, log in once (consumes it), then replay the SAME challenge.
     const ch2 = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig2 = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(ch2.challenge, "https://test.example")), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(ch2.challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
     const first = await h.loginWallet(req({ publicKey: pubKey, signature: sig2, challenge: ch2.challenge }));
     expect(first.status).toBe(200);
@@ -294,7 +327,10 @@ describe("response sanitization (H4)", () => {
 describe("search-wallet hardening (M2)", () => {
   it("returns 429 after maxAttempts (IP rate limited)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } } });
+    const h = createAuthHandlers({
+      storage,
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+    });
     const search = () =>
       h.searchWallet(
         new Request(
@@ -311,7 +347,10 @@ describe("wallet payload validation (M3)", () => {
   const valid = { chain: "solana", role: "funds", publicKey: "p", encryptedSecret: "c" };
 
   it("rejects register with more than 16 wallets (400)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const wallets = Array.from({ length: 17 }, () => valid);
     const res = await h.register(
       req({
@@ -326,7 +365,10 @@ describe("wallet payload validation (M3)", () => {
   });
 
   it("rejects a malformed wallet entry (bad chain) (400)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
@@ -340,7 +382,10 @@ describe("wallet payload validation (M3)", () => {
   });
 
   it("rejects a wallet entry missing required fields (400)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
@@ -357,7 +402,10 @@ describe("wallet payload validation (M3)", () => {
 describe("proxy-header trust (M4)", () => {
   it("with trustProxyHeaders default false, x-forwarded-for does not change the rate-limit identity", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } } });
+    const h = createAuthHandlers({
+      storage,
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+    });
     // Different spoofed IPs each request, but untrusted x-forwarded-for is ignored
     // entirely, so spoofing it buys nothing: the same publicKey "k" keeps hitting its
     // own per-target bucket and the limit still trips.
@@ -375,7 +423,10 @@ describe("proxy-header trust (M4)", () => {
 
 describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
   it("register stores pbkdf2Iterations; challenge + login return it (pinned per-user)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const reg = await registerEmail(h, {
       publicKey: "EdmxWPmx2WH6WgFfTdu9xfkYf3k1g5wD1zccTVySEEh1",
       email: "iter@example.com",
@@ -395,7 +446,10 @@ describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
   });
 
   it("legacy account (no count) stores none — client falls back to 100k", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const reg = await registerEmail(h, {
       publicKey: "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
       email: "legacy@example.com",

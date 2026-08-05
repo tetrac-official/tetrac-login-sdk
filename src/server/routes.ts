@@ -3,7 +3,7 @@
 import type { StorageAdapter } from "../storage/adapter.js";
 import { KvAuthStore, type AuthStore, type RateLimitBucket } from "../storage/store.js";
 import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
-import type { AuthResult, EncryptedWallet, UserData } from "../core/types.js";
+import { WALLET_SLOTS, type AuthResult, type EncryptedWallet, type UserData } from "../core/types.js";
 import { PublicKey } from "@solana/web3.js";
 import { json, error, clientIp, readJson } from "./http.js";
 import { hashUserAgent } from "../core/crypto.js";
@@ -140,25 +140,11 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return null;
   }
 
-  // The canonical origin every wallet signature is verified against. Read from
-  // SERVER config only — echoing a client-supplied origin back into the message would
-  // reinstate exactly the relay attack the binding exists to prevent.
-  //
-  // Throwing (rather than defaulting) is deliberate: a wallet route that cannot name
-  // its own site cannot tell "signed for us" from "signed for someone else", and
-  // silently verifying an unbound signature is the failure mode, not the fallback.
-  // Email/biometric routes are unaffected — they never reach here.
-  function requireOrigin(): string {
-    const origin = config.origin;
-    if (!origin) {
-      throw new Error(
-        "[tetrac] config.origin is required for Web3 wallet routes. Set it to this " +
-          "deployment's canonical origin (e.g. 'https://myapp.example') so wallet " +
-          "signatures are bound to your site and cannot be relayed from another.",
-      );
-    }
-    return origin;
-  }
+  // Every wallet signature is verified against config.origin — SERVER config, never the
+  // request. Echoing a client-supplied origin back into the message would reinstate
+  // exactly the relay attack the binding exists to prevent. resolveConfig guarantees the
+  // value is present (it throws otherwise), so there is no unbound-verification path to
+  // fall back to.
 
   // Optional coarse session→User-Agent binding (config.bindSessionToUserAgent,
   // default off). At ISSUE time we fingerprint only when the flag is on; at VERIFY
@@ -197,11 +183,17 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return { publicKey: user.publicKey, authToken: token, user: publicUser(user) };
   }
 
-  // Validate a client-supplied wallets[] payload. Returns an error Response (400)
-  // or null when the array is acceptable. Bounds the count and each entry's shape.
+  // Validate a client-supplied wallets[] payload. Returns an error Response (400) or null
+  // when the array is acceptable.
+  //
+  // A user record holds AT MOST ONE wallet per (chain, role) — four slots, no more (see
+  // WALLET_SLOTS). That bound is what keeps the encrypted blob a fixed-size object instead
+  // of an append-only list, and it is enforced here rather than by a numeric cap: a request
+  // carrying two entries for the same slot is malformed, not merely large.
   function validateWallets(wallets: unknown): Response | null {
     if (!Array.isArray(wallets)) return error("wallets must be an array");
-    if (wallets.length > 16) return error("too many wallets");
+    if (wallets.length > WALLET_SLOTS.length) return error("too many wallets");
+    const seen = new Set<string>();
     for (const w of wallets) {
       if (!w || typeof w !== "object") return error("invalid wallet entry");
       const e = w as Record<string, unknown>;
@@ -209,9 +201,12 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         return error("invalid wallet entry");
       }
       if (e.publicKey.length > 128) return error("wallet publicKey too long");
-      if (typeof e.role !== "string" || !e.role) return error("invalid wallet entry");
+      if (e.role !== "funds" && e.role !== "signing") return error("invalid wallet entry");
       if (e.chain !== "solana" && e.chain !== "evm") return error("invalid wallet entry");
       if (e.encryptedSecret.length > 8192) return error("encryptedSecret too large");
+      const slot = `${e.chain}:${e.role}`;
+      if (seen.has(slot)) return error("duplicate wallet slot");
+      seen.add(slot);
     }
     return null;
   }
@@ -325,7 +320,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // victim's pending challenge (matches login/loginWallet/connectWallet — WI-5).
       if (body.authMethod === "wallet") {
         if (!body.signature || !body.challenge) return error("signature and challenge required");
-        if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge, requireOrigin())) {
+        if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge, config.origin)) {
           return error("Signature verification failed", 401);
         }
         const ok = await consumeChallenge(store, appId, body.publicKey, body.challenge);
@@ -418,7 +413,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // Verify-first, penalize-on-failure (see login). A junk signature never
       // reaches consumeChallenge, so it can't burn a pending challenge, and a valid
       // wallet login is never throttled by an attacker's failed attempts.
-      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge, requireOrigin());
+      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge, config.origin);
       const consumed = sigValid
         ? await consumeChallenge(store, appId, body.publicKey, body.challenge)
         : false;
@@ -467,7 +462,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // Verify-first, penalize-on-failure (see login): a junk signature can't burn
       // the challenge, and a returning wallet's valid connect isn't throttled by an
       // attacker's failed attempts.
-      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge, requireOrigin());
+      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge, config.origin);
       const consumed = sigValid
         ? await consumeChallenge(store, appId, body.publicKey, body.challenge)
         : false;
@@ -551,10 +546,20 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (!body?.wallets?.length) return error("wallets required");
       const invalid = validateWallets(body.wallets);
       if (invalid) return invalid;
-      if (user.wallets.length + body.wallets.length > config.maxWalletsPerUser) {
-        return error("wallet limit reached", 400);
+
+      // REPLACE the (chain, role) slot — never append. Appending was a fund-misdirection
+      // bug, not just bloat: `useActiveWallet` resolves a wallet with `.find()`, which
+      // returns the FIRST match, while an appended import lands LAST. Importing an EVM
+      // funds wallet therefore left the OLD address active, so the app kept displaying it
+      // as the deposit address and kept signing with it — the user's replacement silently
+      // did nothing. Replacing in place makes the record's four slots authoritative.
+      const next = [...user.wallets];
+      for (const incoming of body.wallets) {
+        const at = next.findIndex((w) => w.chain === incoming.chain && w.role === incoming.role);
+        if (at === -1) next.push(incoming);
+        else next[at] = incoming;
       }
-      user.wallets = [...user.wallets, ...body.wallets];
+      user.wallets = next;
       await persistUser(store, user);
       return json({ user: publicUser(user) });
     },
