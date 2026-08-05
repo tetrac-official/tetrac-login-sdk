@@ -6,7 +6,7 @@ import { createNextAuthRoutes } from "../src/next/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 
 function routes() {
-  return createNextAuthRoutes({ storage: new MemoryAdapter() });
+  return createNextAuthRoutes({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
 }
 
 function ctx(action: string[], asPromise = false) {

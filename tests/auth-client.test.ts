@@ -42,7 +42,7 @@ function installBrowserGlobals() {
     addEventListener: noop,
     removeEventListener: noop,
     dispatchEvent: () => true,
-    location: { hostname: "localhost" },
+    location: { hostname: "localhost", origin: "https://test.example" },
   };
   g.document = { addEventListener: noop, removeEventListener: noop, visibilityState: "visible" };
   return localStorage;
@@ -103,7 +103,7 @@ beforeAll(() => installBrowserGlobals());
 beforeEach(() => {
   (global as unknown as { localStorage: ReturnType<typeof makeStore> }).localStorage.clear();
   lockVault(); // reset the shared vault singleton between tests
-  wireFetch(createAuthHandlers({ storage: new MemoryAdapter() }));
+  wireFetch(createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } }));
   client = newClient();
 });
 afterEach(() => lockVault()); // clears the pending auto-lock timer

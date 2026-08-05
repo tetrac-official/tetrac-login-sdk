@@ -31,7 +31,7 @@ async function registerFresh(h: ReturnType<typeof createAuthHandlers>, email: st
 describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer token", () => {
   it("🚨 the raw token appears in NEITHER the session key NOR the UserData blob", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "atrest@example.com");
 
     // (a) The session is keyed by the DIGEST. The raw token is not a key.
@@ -53,7 +53,7 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
 
   it("the digest is never echoed to the client", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const publicKey = freshKeypair();
     const res = await registerEmail(h, { email: "echo@example.com", appKey: APP_KEY, publicKey });
     const body = await res.json();
@@ -65,7 +65,7 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
 
   it("the session still verifies, and a new login still revokes the previous session", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "revoke@example.com");
 
     // The round trip works end-to-end through the hashed key.
@@ -83,7 +83,7 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
 
   it("a legacy raw `authToken` field is scrubbed from the record on the next write", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const { publicKey } = await registerFresh(h, "legacy@example.com");
 
     // Simulate a record written by a pre-v0.5.0 version: it carries a raw bearer token.
@@ -164,7 +164,7 @@ describe("§2 close?() and sweepExpired?() are optional and truthfully advertise
 // =====================================================================================
 describe("§3 the AuthStore seam is additive — no existing deployment changes a line", () => {
   it("createAuthHandlers({ storage }) still works, exactly as before", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "kv@example.com");
     const res = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(res.status).toBe(200);
@@ -172,14 +172,14 @@ describe("§3 the AuthStore seam is additive — no existing deployment changes 
 
   it("createAuthHandlers({ store }) accepts a native AuthStore", async () => {
     const store = new KvAuthStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes);
-    const h = createAuthHandlers({ store });
+    const h = createAuthHandlers({ store, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "native@example.com");
     const res = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(res.status).toBe(200);
   });
 
   it("supplying neither is a loud, immediate error", () => {
-    expect(() => createAuthHandlers({})).toThrow(/requires either `store`.*or `storage`/);
+    expect(() => createAuthHandlers({ config: { origin: "https://test.example" } })).toThrow(/requires either `store`.*or `storage`/);
   });
 });
 
@@ -201,7 +201,7 @@ describe("§4.1 MemoryAdapter.del clears BOTH keyspaces, like real Redis DEL", (
 describe("§4.2 /login validates the email BEFORE it reaches a storage key", () => {
   it("🚨 rejects an over-length email instead of turning it into a 400 KB key", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const huge = `${"a".repeat(400_000)}@example.com`;
     const res = await h.login(jreq({ email: huge, signature: "ab", challenge: "cd" }));
@@ -214,13 +214,13 @@ describe("§4.2 /login validates the email BEFORE it reaches a storage key", () 
   });
 
   it("rejects a malformed email on /login, matching /register", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const res = await h.login(jreq({ email: "not-an-email", signature: "ab", challenge: "cd" }));
     expect(res.status).toBe(400);
   });
 
   it("a valid-but-unknown email still reaches the normal 401 (no behavior change)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const res = await h.login(jreq({ email: "nobody@example.com", signature: "ab", challenge: "cd" }));
     expect(res.status).toBe(401);
   });
@@ -237,6 +237,7 @@ describe("§4.3 storage failures FAIL CLOSED — a broken backend never grants p
   it("🚨 a throwing hitRateLimit propagates — it does NOT resolve to `allowed`", async () => {
     const h = createAuthHandlers({
       store: new BrokenRateLimitStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes),
+      config: { origin: "https://test.example" },
     });
 
     const url = `http://localhost/api/auth?publicKey=${freshKeypair()}`;

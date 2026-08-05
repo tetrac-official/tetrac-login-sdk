@@ -46,7 +46,7 @@ async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: str
 describe("F3 — register REJECTS an out-of-band pbkdf2Iterations (RESOLVED)", () => {
   it("rejects pbkdf2Iterations: 1 with 400 and creates no account (server floor)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     // An attacker (or misconfigured client) tries to kneecap this account's offline
     // brute-force resistance. The server now enforces a 100k–1M band and rejects it.
     const res = await registerEmail(h, {
@@ -71,7 +71,7 @@ describe("F3 — register REJECTS an out-of-band pbkdf2Iterations (RESOLVED)", (
     // JSON-surviving bad values (NaN/Infinity serialize to null → treated as absent →
     // the legacy/wallet fallback, which is allowed). Everything else is rejected.
     for (const bad of [0, -5, 1e15, 600_000.5, "600000"]) {
-      const h = createAuthHandlers({ storage: new MemoryAdapter() });
+      const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
       const res = await registerEmail(h, {
         publicKey: SOL_PUB,
         email: `bad-${bad}@example.com`,
@@ -90,7 +90,7 @@ describe("F3 — register REJECTS an out-of-band pbkdf2Iterations (RESOLVED)", (
 // ============================================================
 describe("F2 — email/biometric register needs NO signature/challenge (HIGH, currently insecure)", () => {
   it("registers a well-formed identity with NO signature/challenge proof of control (201)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     // A VALID Solana identity registers with NO ceremony — unlike the wallet path, which
     // requires verifySolanaSignature + consumeChallenge. (The arbitrary-string variant is
     // now rejected by strict publicKey validation — see audit-server.test.ts; the residual
@@ -106,7 +106,7 @@ describe("F2 — email/biometric register needs NO signature/challenge (HIGH, cu
 
   it("register does not consume a challenge (no single-use ceremony on the email path)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     // Seed a challenge for the would-be identity; if register consumed it (as it
     // should), the key would be gone afterward. It is NOT consumed on email/bio.
     await storage.set(`${DEFAULT_CONFIG.keyPrefixes.challenge}${SOL_PUB}`, "deadbeef".repeat(8), {
@@ -128,7 +128,7 @@ describe("F2 — email/biometric register needs NO signature/challenge (HIGH, cu
 // ============================================================
 describe("F4 — importWallet appends arbitrary ciphertext under a valid session (MED, currently insecure)", () => {
   it("appends attacker-chosen wallet entries that the owner cannot decrypt", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const { body } = await registerUser(h, "victim@example.com");
     const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
 
@@ -157,7 +157,7 @@ describe("F4 — importWallet appends arbitrary ciphertext under a valid session
   });
 
   it("a duplicate publicKey is appended (no dedup → an attacker can shadow an entry)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const { body } = await registerUser(h, "shadow@example.com");
     const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
     const dup = wallet(0).publicKey; // same publicKey as the registered funds wallet
@@ -216,7 +216,7 @@ describe("F8 — timingSafeEqual never false-accepts on length mismatch (correct
 describe("P1 — challenges are single-use via atomic getdel (replay-safe)", () => {
   it("consuming a challenge once removes it; a second consume fails", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const ch = await h.challenge(req({ publicKey: SOL_PUB }));
     const { challenge } = (await ch.json()) as { challenge: string };
 
@@ -251,7 +251,7 @@ describe("P3 — rate limiting is per-target and skips the spoofable IP when unt
   it("an attacker-supplied x-forwarded-for is IGNORED by default (trustProxyHeaders=false)", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { trustProxyHeaders: false, rateLimit: { maxAttempts: 1, windowSeconds: 60 } },
+      config: { origin: "https://test.example", trustProxyHeaders: false, rateLimit: { maxAttempts: 1, windowSeconds: 60 } },
     });
     // Spoofed XFF must not create per-IP buckets that an attacker could rotate to evade limits.
     const spoofed = { "x-forwarded-for": "9.9.9.9" };

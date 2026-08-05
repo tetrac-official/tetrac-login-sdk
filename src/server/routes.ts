@@ -140,6 +140,26 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return null;
   }
 
+  // The canonical origin every wallet signature is verified against. Read from
+  // SERVER config only — echoing a client-supplied origin back into the message would
+  // reinstate exactly the relay attack the binding exists to prevent.
+  //
+  // Throwing (rather than defaulting) is deliberate: a wallet route that cannot name
+  // its own site cannot tell "signed for us" from "signed for someone else", and
+  // silently verifying an unbound signature is the failure mode, not the fallback.
+  // Email/biometric routes are unaffected — they never reach here.
+  function requireOrigin(): string {
+    const origin = config.origin;
+    if (!origin) {
+      throw new Error(
+        "[tetrac] config.origin is required for Web3 wallet routes. Set it to this " +
+          "deployment's canonical origin (e.g. 'https://myapp.example') so wallet " +
+          "signatures are bound to your site and cannot be relayed from another.",
+      );
+    }
+    return origin;
+  }
+
   // Optional coarse session→User-Agent binding (config.bindSessionToUserAgent,
   // default off). At ISSUE time we fingerprint only when the flag is on; at VERIFY
   // time we always compute the request fingerprint and let verifySession enforce it
@@ -305,7 +325,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // victim's pending challenge (matches login/loginWallet/connectWallet — WI-5).
       if (body.authMethod === "wallet") {
         if (!body.signature || !body.challenge) return error("signature and challenge required");
-        if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge)) {
+        if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge, requireOrigin())) {
           return error("Signature verification failed", 401);
         }
         const ok = await consumeChallenge(store, appId, body.publicKey, body.challenge);
@@ -398,7 +418,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // Verify-first, penalize-on-failure (see login). A junk signature never
       // reaches consumeChallenge, so it can't burn a pending challenge, and a valid
       // wallet login is never throttled by an attacker's failed attempts.
-      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge);
+      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge, requireOrigin());
       const consumed = sigValid
         ? await consumeChallenge(store, appId, body.publicKey, body.challenge)
         : false;
@@ -447,7 +467,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // Verify-first, penalize-on-failure (see login): a junk signature can't burn
       // the challenge, and a returning wallet's valid connect isn't throttled by an
       // attacker's failed attempts.
-      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge);
+      const sigValid = verifySolanaSignature(body.publicKey, body.signature, body.challenge, requireOrigin());
       const consumed = sigValid
         ? await consumeChallenge(store, appId, body.publicKey, body.challenge)
         : false;

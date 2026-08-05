@@ -31,7 +31,7 @@ function bytesToHex(b: Uint8Array): string {
 describe("email accounts: same email isolated per app", () => {
   it("registers the same email independently on two apps (no false 409)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const email = "shared@example.com";
 
     const a = await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
@@ -45,7 +45,7 @@ describe("email accounts: same email isolated per app", () => {
 
   it("the email index is a {appId -> publicKey} map (the requested shape)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const email = "map@example.com";
     await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
     await registerEmail(h, { appId: APP_B, email, appKey: APP_KEY, publicKey: PK_B });
@@ -55,7 +55,7 @@ describe("email accounts: same email isolated per app", () => {
 
   it("re-registering the same email on the SAME app still 409s", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const email = "dupe@example.com";
     expect((await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A })).status).toBe(
       201,
@@ -66,7 +66,7 @@ describe("email accounts: same email isolated per app", () => {
 
   it("login resolves the per-app identity; the wrong app cannot log in", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const email = "login@example.com";
     await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
 
@@ -85,7 +85,7 @@ describe("email accounts: same email isolated per app", () => {
 
   it("pubKey records are stored under disjoint app-scoped keys", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const email = "scoped@example.com";
     await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
 
@@ -105,14 +105,14 @@ describe("wallet accounts: same wallet, independent per-app records", () => {
     const pubKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(req({ appId, publicKey: pubKey }))).json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge)), kp.secretKey),
+      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
     );
     return h.connectWallet(req({ appId, publicKey: pubKey, signature: sig, challenge, wallets }));
   }
 
   it("the same wallet on two apps keeps each app's own encrypted bundle", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const kp = Keypair.generate();
     const pubKey = kp.publicKey.toBase58();
 
@@ -132,7 +132,7 @@ describe("wallet accounts: same wallet, independent per-app records", () => {
 
   it("a challenge issued for one app does not satisfy another", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const kp = Keypair.generate();
     const pubKey = kp.publicKey.toBase58();
 
@@ -142,7 +142,7 @@ describe("wallet accounts: same wallet, independent per-app records", () => {
     // Get a challenge under app A, but try to spend it under app B.
     const { challenge } = await (await h.challenge(req({ appId: APP_A, publicKey: pubKey }))).json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge)), kp.secretKey),
+      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
     );
     const crossApp = await h.loginWallet(req({ appId: APP_B, publicKey: pubKey, signature: sig, challenge }));
     expect(crossApp.status).toBe(401); // app-B challenge keyspace never held it
@@ -152,7 +152,7 @@ describe("wallet accounts: same wallet, independent per-app records", () => {
 describe("session scoping across apps", () => {
   it("a token minted by one app is rejected by another", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const email = "sess@example.com";
     const reg = await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
     const { authToken, publicKey } = await reg.json();
@@ -169,13 +169,13 @@ describe("session scoping across apps", () => {
 
 describe("appId validation", () => {
   it("rejects an appId containing the ':' key separator", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const res = await registerEmail(h, { appId: "a:b", email: "x@y.com", appKey: APP_KEY, publicKey: PK_A });
     expect(res.status).toBe(400);
   });
 
   it("rejects an overlong appId", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({ storage: new MemoryAdapter(), config: { origin: "https://test.example" } });
     const res = await registerEmail(h, {
       appId: "a".repeat(65),
       email: "x@y.com",
@@ -188,7 +188,7 @@ describe("appId validation", () => {
   it("with allowedAppIds set, an undeclared appId is rejected", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { allowedAppIds: [APP_A] },
+      config: { origin: "https://test.example", allowedAppIds: [APP_A] },
     });
     const ok = await registerEmail(h, { appId: APP_A, email: "ok@y.com", appKey: APP_KEY, publicKey: PK_A });
     expect(ok.status).toBe(201);
@@ -200,7 +200,7 @@ describe("appId validation", () => {
 describe("single-app backward compatibility (no appId supplied)", () => {
   it("omitting appId falls back to config.appId (default 'ttc') and round-trips", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const reg = await registerEmail(h, { email: "legacy@example.com", appKey: APP_KEY, publicKey: PK_A });
     expect(reg.status).toBe(201);
     // Stored under the default app namespace.

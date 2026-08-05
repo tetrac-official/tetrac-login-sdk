@@ -88,13 +88,13 @@ describe("H1 RESOLVED — wallet secrets use authenticated AES-256-GCM (tamperin
 
 describe("H4 RESOLVED — the wallet-app-key message is domain-bound by appId", () => {
   it("the signed message embeds appId, so different apps sign DIFFERENT messages", () => {
-    expect(walletAppKeyMessage("appA")).not.toBe(walletAppKeyMessage("appB"));
-    expect(walletAppKeyMessage("myapp")).toContain("myapp");
-    expect(walletAppKeyMessage("appA").startsWith(WALLET_APP_KEY_MESSAGE)).toBe(true); // built on the base text
+    expect(walletAppKeyMessage("appA", "https://test.example")).not.toBe(walletAppKeyMessage("appB", "https://test.example"));
+    expect(walletAppKeyMessage("myapp", "https://test.example")).toContain("myapp");
+    expect(walletAppKeyMessage("appA", "https://test.example").startsWith(WALLET_APP_KEY_MESSAGE)).toBe(true); // built on the base text
   });
 
   it("same appId ⇒ same message (deterministic — recovery/login stays stable)", () => {
-    expect(walletAppKeyMessage("appA")).toBe(walletAppKeyMessage("appA"));
+    expect(walletAppKeyMessage("appA", "https://test.example")).toBe(walletAppKeyMessage("appA", "https://test.example"));
   });
 
   it("isolation comes from the MESSAGE, not the hash: deriveAppKeyFromSignature stays pure", () => {
@@ -103,7 +103,7 @@ describe("H4 RESOLVED — the wallet-app-key message is domain-bound by appId", 
     // is intentionally origin-free, so identical signatures still map to one key.
     const sig = "deadbeef".repeat(16);
     expect(deriveAppKeyFromSignature(sig)).toBe(deriveAppKeyFromSignature(sig));
-    expect(walletAppKeyMessage("appA")).not.toBe(walletAppKeyMessage("appB"));
+    expect(walletAppKeyMessage("appA", "https://test.example")).not.toBe(walletAppKeyMessage("appB", "https://test.example"));
   });
 });
 

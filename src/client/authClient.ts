@@ -129,6 +129,27 @@ export class AuthClient {
     }
   }
 
+  /**
+   * The origin every wallet message is built from — read from `window.location`, NOT
+   * from config.
+   *
+   * That distinction is the fix, not a detail. If this came from config, a hostile page
+   * could set `{ appId: "victim.app", origin: "https://victim.app" }` and reproduce the
+   * victim deployment's exact app-key message, harvesting a signature whose SHA-256
+   * decrypts that user's whole wallet bundle. `window.location.origin` is the one value
+   * the page cannot lie about, and it is what the user sees in the address bar while
+   * the signing prompt names the same site.
+   */
+  private clientOrigin(): string {
+    const origin = typeof window !== "undefined" ? window.location?.origin : undefined;
+    if (!origin) {
+      throw new Error(
+        "[tetrac] Web3 wallet flows require a browser origin (window.location.origin).",
+      );
+    }
+    return origin;
+  }
+
   // --- Re-authentication (unlock + reveal) ---
 
   /**
@@ -146,8 +167,8 @@ export class AuthClient {
     }
     if ("signMessage" in creds) {
       const keyMessage = creds.hardwareWallet
-        ? walletAppKeyMessageHw(this.config.appId)
-        : walletAppKeyMessage(this.config.appId);
+        ? walletAppKeyMessageHw(this.config.appId, this.clientOrigin())
+        : walletAppKeyMessage(this.config.appId, this.clientOrigin());
       const sig = await creds.signMessage(new TextEncoder().encode(keyMessage));
       return deriveAppKeyFromSignature(bytesToHex(sig));
     }
@@ -292,12 +313,12 @@ export class AuthClient {
   ): Promise<{ appKey: string; signatureHex: string; challenge: string }> {
     const { challenge } = await this.post<{ challenge: string }>("challenge", { publicKey });
     const enc = new TextEncoder();
-    const authSig = await signMessage(enc.encode(walletLoginMessage(challenge)));
+    const authSig = await signMessage(enc.encode(walletLoginMessage(challenge, this.clientOrigin())));
     // Hardware wallets derive the key from the newline-free message so the device
     // can clear-sign it (a Ledger rejects newline content / forces blind signing).
     const keyMessage = hardwareWallet
-      ? walletAppKeyMessageHw(this.config.appId)
-      : walletAppKeyMessage(this.config.appId);
+      ? walletAppKeyMessageHw(this.config.appId, this.clientOrigin())
+      : walletAppKeyMessage(this.config.appId, this.clientOrigin());
     const keySig = await signMessage(enc.encode(keyMessage));
     return {
       appKey: deriveAppKeyFromSignature(bytesToHex(keySig)),

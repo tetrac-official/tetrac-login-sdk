@@ -76,6 +76,13 @@ export interface AuthConfig {
    */
   appId: string;
   /**
+   * The deployment's canonical origin, e.g. `"https://myapp.example"` — scheme + host
+   * (+ port), no path, no trailing slash.
+   *
+   * REQUIRED for every Web3 wallet route;
+ */
+  origin: string;
+  /**
    * Optional allowlist of accepted `appId` values (v0.4.0). When set, a request
    * carrying any other appId is rejected (`Unknown appId`). Leave undefined to
    * accept any well-formed appId (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`). STRONGLY
@@ -154,7 +161,13 @@ export interface AuthConfig {
   maxWalletsPerUser: number;
 }
 
-export const DEFAULT_CONFIG: AuthConfig = {
+/**
+ * Defaults for everything EXCEPT `origin`, which has no safe default: on a server there
+ * is nothing to infer it from, and inventing one (localhost, the request's Host header)
+ * would silently un-bind every wallet signature. resolveConfig supplies it from
+ * `window.location.origin` in a browser and demands it explicitly everywhere else.
+ */
+export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
   appId: "ttc", // override per-deployment for cross-app key isolation (see AuthConfig.appId)
   securityLevel: 2,
   challengeTtlSeconds: 300,
@@ -185,15 +198,45 @@ export const DEFAULT_CONFIG: AuthConfig = {
   maxWalletsPerUser: 64,
 };
 
-/** Merge a partial override onto the defaults (shallow per top-level group). */
+/**
+ * Normalize an origin for message building and comparison: lowercase, no trailing
+ * slash. `window.location.origin` and a hand-written config value must produce the
+ * same bytes or every wallet login fails, so both sides route through this.
+ */
+export function normalizeOrigin(origin: string): string {
+  return origin.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/** `window.location.origin` when running in a browser, else undefined. */
+function browserOrigin(): string | undefined {
+  return typeof window !== "undefined" ? window.location?.origin : undefined;
+}
+
+/**
+ * Merge a partial override onto the defaults (shallow per top-level group).
+ *
+ * `origin` is mandatory in the resolved config. In a browser it defaults to the page's
+ * REAL `window.location.origin`; on a server it must be given explicitly, and resolving
+ * without it throws rather than producing a config whose wallet signatures verify
+ * against nothing in particular.
+ */
 export function resolveConfig(override?: DeepPartial<AuthConfig>): AuthConfig {
-  if (!override) return DEFAULT_CONFIG;
+  const origin = override?.origin ?? browserOrigin();
+  if (!origin) {
+    throw new Error(
+      "[tetrac] config.origin is required. Set it to this deployment's canonical origin " +
+        "(e.g. 'https://myapp.example'). It binds wallet signatures to your site so they " +
+        "cannot be relayed from another, and it is app-key derivation input — set it once " +
+        "and never change it, or existing encrypted wallets will not decrypt.",
+    );
+  }
   return {
     ...DEFAULT_CONFIG,
     ...override,
-    keyPrefixes: { ...DEFAULT_CONFIG.keyPrefixes, ...override.keyPrefixes },
-    rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...override.rateLimit },
-    webauthn: { ...DEFAULT_CONFIG.webauthn, ...override.webauthn },
+    origin: normalizeOrigin(origin),
+    keyPrefixes: { ...DEFAULT_CONFIG.keyPrefixes, ...override?.keyPrefixes },
+    rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...override?.rateLimit },
+    webauthn: { ...DEFAULT_CONFIG.webauthn, ...override?.webauthn },
   } as AuthConfig;
 }
 

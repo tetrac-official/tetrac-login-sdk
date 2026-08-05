@@ -121,7 +121,7 @@ describe("atomic challenge consumption (C9)", () => {
 describe("session issuance revocation", () => {
   it("sequential logins: second login revokes the first token", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const appKey = "ab".repeat(32);
     const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
@@ -155,7 +155,7 @@ describe("session issuance revocation", () => {
 describe("concurrent registration race", () => {
   it("two concurrent registrations with same email — only one succeeds", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const makeReg = (pk: string) =>
       registerEmail(h, { publicKey: pk, email: "duplicate@test.com", appKey: "ab".repeat(32) });
@@ -189,7 +189,7 @@ describe("concurrent registration race", () => {
 describe("concurrent connect-wallet upsert", () => {
   it("two concurrent connect-wallet calls for same new wallet — only one creates", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const kp = Keypair.generate();
     const pubKey = kp.publicKey.toBase58();
 
@@ -197,7 +197,7 @@ describe("concurrent connect-wallet upsert", () => {
     const chRes = await h.challenge(req({ publicKey: pubKey }));
     const { challenge } = await chRes.json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge)), kp.secretKey),
+      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")), kp.secretKey),
     );
 
     // Both send the same challenge (only one should succeed)

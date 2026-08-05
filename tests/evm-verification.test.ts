@@ -38,7 +38,7 @@ describe("EVM wallet — design intent (C2)", () => {
     // EVM addresses are NOT valid identities. Strict Solana validation rejects the
     // 0x identity up front (400) — earlier than the old 401 signature-failure.
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const reg = await h.register(
       req({
@@ -55,7 +55,7 @@ describe("EVM wallet — design intent (C2)", () => {
 
   it("connect-wallet with EVM address is also rejected at validation (400)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const cw = await h.connectWallet(
       req({
@@ -73,7 +73,7 @@ describe("EVM wallet — design intent (C2)", () => {
     // The identity publicKey must be a Solana ed25519 key on EVERY path, including
     // email. The correct pattern is a Solana identity with EVM wallets in the bundle.
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const rejected = await registerEmail(h, {
       publicKey: evmAddress, // EVM as the identity → rejected

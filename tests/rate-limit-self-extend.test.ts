@@ -154,7 +154,7 @@ describe("rate limit integration in route handlers", () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({
       storage,
-      config: { rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
     });
     const make = () => h.challenge(req({ publicKey: "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse" }));
     expect((await make()).status).toBe(200);
@@ -167,7 +167,7 @@ describe("rate limit integration in route handlers", () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({
       storage,
-      config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
 
     // Register with email — this triggers TWO rate limit checks:

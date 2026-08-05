@@ -50,7 +50,7 @@ function userData(h: ReturnType<typeof createAuthHandlers>, token: string, publi
 describe("session→User-Agent binding (WI-23)", () => {
   it("default (off): the stored value is the bare publicKey and the UA is ignored", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await (await register(h, UA_A)).json();
 
     expect(await storage.get(`session:ttc:${hashSessionToken(authToken)}`)).toBe(publicKey); // no "|fingerprint"
@@ -60,7 +60,7 @@ describe("session→User-Agent binding (WI-23)", () => {
 
   it("on: pins the session to SHA-256(UA) and accepts the matching UA", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { bindSessionToUserAgent: true } });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example", bindSessionToUserAgent: true } });
     const { authToken, publicKey } = await (await register(h, UA_A)).json();
 
     expect(await storage.get(`session:ttc:${hashSessionToken(authToken)}`)).toBe(
@@ -71,7 +71,7 @@ describe("session→User-Agent binding (WI-23)", () => {
 
   it("on: rejects a different User-Agent (401)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { bindSessionToUserAgent: true } });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example", bindSessionToUserAgent: true } });
     const { authToken, publicKey } = await (await register(h, UA_A)).json();
 
     expect((await userData(h, authToken, publicKey, UA_B)).status).toBe(401);
@@ -79,7 +79,7 @@ describe("session→User-Agent binding (WI-23)", () => {
 
   it("on: rejects a request with no User-Agent (401)", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { bindSessionToUserAgent: true } });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example", bindSessionToUserAgent: true } });
     const { authToken, publicKey } = await (await register(h, UA_A)).json();
 
     expect((await userData(h, authToken, publicKey)).status).toBe(401); // no UA header
@@ -87,12 +87,12 @@ describe("session→User-Agent binding (WI-23)", () => {
 
   it("a session bound while the flag was on stays enforced after the flag is disabled", async () => {
     const storage = new MemoryAdapter();
-    const bound = createAuthHandlers({ storage, config: { bindSessionToUserAgent: true } });
+    const bound = createAuthHandlers({ storage, config: { origin: "https://test.example", bindSessionToUserAgent: true } });
     const { authToken, publicKey } = await (await register(bound, UA_A)).json();
 
     // New handler over the SAME storage with binding now OFF — the stored fingerprint
     // must still be enforced (disabling the flag never un-binds live sessions).
-    const unbound = createAuthHandlers({ storage, config: { bindSessionToUserAgent: false } });
+    const unbound = createAuthHandlers({ storage, config: { origin: "https://test.example", bindSessionToUserAgent: false } });
     expect((await userData(unbound, authToken, publicKey, UA_A)).status).toBe(200);
     expect((await userData(unbound, authToken, publicKey, UA_B)).status).toBe(401);
   });
