@@ -28,6 +28,21 @@ export const WALLET_SLOTS: ReadonlyArray<{ chain: Chain; role: WalletRole }> = [
   { chain: "evm", role: "signing" },
 ];
 
+/**
+ * Order wallets by their slot, so a record reads back the same way every time.
+ *
+ * Wallets are stored one per slot (a hash field on KV, a row on SQL), and neither backend
+ * promises an order when reading them back. Consumers iterate this array — `useWallets`
+ * renders it — so an unstable order would reshuffle the UI between requests for no reason.
+ */
+export function sortWalletsBySlot(wallets: EncryptedWallet[]): EncryptedWallet[] {
+  const rank = (w: EncryptedWallet): number => {
+    const i = WALLET_SLOTS.findIndex((s) => s.chain === w.chain && s.role === w.role);
+    return i === -1 ? WALLET_SLOTS.length : i;
+  };
+  return [...wallets].sort((a, b) => rank(a) - rank(b));
+}
+
 /** A single generated keypair after client-side encryption. */
 export interface EncryptedWallet {
   chain: Chain;

@@ -102,6 +102,8 @@ export interface SqlDialect {
 /** Fully-qualified table names, so a dialect can put them in a non-`public` schema. */
 export interface SqlTables {
   users: string;
+  /** One row per (app_id, public_key, chain, role) — see AuthStore.putWalletSlot. */
+  userWallets: string;
   emailIndex: string;
   sessions: string;
   challenges: string;

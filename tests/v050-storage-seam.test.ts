@@ -42,13 +42,15 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
     // token is not inside the UserData record either. Before v0.5.0, issueSession wrote
     // `user.authToken = token`, so a read of the store yielded a live, replayable
     // credential for every logged-in user even if the KEY had been hashed.
-    const blob = await storage.get(`pubKey:ttc:${publicKey}`);
-    expect(blob).not.toBeNull();
-    expect(blob!).not.toContain(authToken);
+    // The record is a HASH (profile / session pointer / one field per wallet slot), so
+    // check EVERY field: the raw token must appear in none of them.
+    const rec = await storage.hgetall(`pubKey:ttc:${publicKey}`);
+    expect(Object.keys(rec).length).toBeGreaterThan(0);
+    for (const v of Object.values(rec)) expect(v).not.toContain(authToken);
 
-    const user = JSON.parse(blob!);
-    expect(user.authToken).toBeUndefined();
-    expect(user.authTokenHash).toBe(hashSessionToken(authToken));
+    const profile = JSON.parse(rec.p!);
+    expect(profile.authToken).toBeUndefined();
+    expect(rec.t).toBe(hashSessionToken(authToken)); // the pointer field holds the DIGEST
   });
 
   it("the digest is never echoed to the client", async () => {
@@ -79,28 +81,6 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
 
     const after = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(after.status).toBe(401);
-  });
-
-  it("a legacy raw `authToken` field is scrubbed from the record on the next write", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
-    const { publicKey } = await registerFresh(h, "legacy@example.com");
-
-    // Simulate a record written by a pre-v0.5.0 version: it carries a raw bearer token.
-    const blob = JSON.parse((await storage.get(`pubKey:ttc:${publicKey}`))!);
-    blob.authToken = "stale-raw-token-from-v0.4.x";
-    delete blob.authTokenHash;
-    await storage.set(`pubKey:ttc:${publicKey}`, JSON.stringify(blob));
-
-    // Any subsequent session issuance rewrites the record and drops the legacy field.
-    const store = new KvAuthStore(storage, DEFAULT_CONFIG.keyPrefixes);
-    const { issueSession } = await import("../src/server/session");
-    const user = await store.getUser("ttc", publicKey);
-    await issueSession(store, user!, DEFAULT_CONFIG);
-
-    const after = JSON.parse((await storage.get(`pubKey:ttc:${publicKey}`))!);
-    expect(after.authToken).toBeUndefined();
-    expect(after.authTokenHash).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 

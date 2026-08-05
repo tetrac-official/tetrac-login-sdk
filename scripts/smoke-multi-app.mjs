@@ -69,7 +69,10 @@ check(
 );
 check(
   "records live under disjoint app-scoped keys",
-  (await db.get(`pubKey:${APP_A}:${PK_A}`)) !== null && (await db.get(`pubKey:${APP_B}:${PK_A}`)) === null,
+  // The record is a HASH (profile / session pointer / one field per wallet slot), so
+  // presence is "has any field", not "get() returned a string".
+  Object.keys(await db.hgetall(`pubKey:${APP_A}:${PK_A}`)).length > 0 &&
+    Object.keys(await db.hgetall(`pubKey:${APP_B}:${PK_A}`)).length === 0,
 );
 
 // 2) Same wallet on two apps → independent records, each its own encrypted bundle.

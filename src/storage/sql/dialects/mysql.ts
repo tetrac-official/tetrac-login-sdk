@@ -23,6 +23,7 @@ import type { PreflightIssue, SqlDialect, SqlDriver, SqlTables } from "../types.
 
 const tables: SqlTables = {
   users: "ttc_users",
+  userWallets: "ttc_user_wallets",
   emailIndex: "ttc_email_index",
   sessions: "ttc_sessions",
   challenges: "ttc_challenges",
@@ -61,11 +62,26 @@ export function mysqlDialect(): SqlDialect {
 -- back as null ⇒ the user is permanently locked out of every wallet in it.
 -- (Preflight refuses to boot if strict mode is off.)
 
+-- The data column is the PROFILE only; wallets are one row per slot below and the session pointer
+-- is its own column, so no ordinary write rewrites this row wholesale.
 CREATE TABLE IF NOT EXISTS ${tables.users} (
+  app_id          VARBINARY(64)  NOT NULL,
+  public_key      VARBINARY(128) NOT NULL,
+  data            MEDIUMTEXT     NOT NULL,
+  auth_token_hash VARBINARY(64)  NULL,
+  PRIMARY KEY (app_id, public_key)
+) ENGINE=InnoDB;
+
+-- One row per (chain, role) slot — a slot write cannot disturb another slot.
+-- Key columns are VARBINARY for the same reason as everywhere else here: MySQL default
+-- collation is case-INSENSITIVE, which would collapse distinct values into one row.
+CREATE TABLE IF NOT EXISTS ${tables.userWallets} (
   app_id      VARBINARY(64)  NOT NULL,
   public_key  VARBINARY(128) NOT NULL,
+  chain       VARBINARY(16)  NOT NULL,
+  role        VARBINARY(32)  NOT NULL,
   data        MEDIUMTEXT     NOT NULL,
-  PRIMARY KEY (app_id, public_key)
+  PRIMARY KEY (app_id, public_key, chain, role)
 ) ENGINE=InnoDB;
 
 -- One ROW per (email, app) ⇒ concurrent registrations cannot lose a write.

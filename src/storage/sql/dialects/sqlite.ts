@@ -13,6 +13,7 @@ export interface SqliteDialectOptions {
 
 const tables: SqlTables = {
   users: "ttc_users",
+  userWallets: "ttc_user_wallets",
   emailIndex: "ttc_email_index",
   sessions: "ttc_sessions",
   challenges: "ttc_challenges",
@@ -48,11 +49,24 @@ export function sqliteDialect(opts: SqliteDialectOptions = {}): SqlDialect {
 -- NEVER declare these columns COLLATE NOCASE: it would merge distinct public keys and
 -- distinct tenants into one row.
 
+-- The data column is the PROFILE only; wallets are one row per slot below and the session pointer
+-- is its own column, so no ordinary write rewrites this row wholesale.
 CREATE TABLE IF NOT EXISTS ${tables.users} (
+  app_id          TEXT NOT NULL,
+  public_key      TEXT NOT NULL,
+  data            TEXT NOT NULL,
+  auth_token_hash TEXT,
+  PRIMARY KEY (app_id, public_key)
+);
+
+-- One row per (chain, role) slot — a slot write cannot disturb another slot.
+CREATE TABLE IF NOT EXISTS ${tables.userWallets} (
   app_id      TEXT NOT NULL,
   public_key  TEXT NOT NULL,
+  chain       TEXT NOT NULL,
+  role        TEXT NOT NULL,
   data        TEXT NOT NULL,
-  PRIMARY KEY (app_id, public_key)
+  PRIMARY KEY (app_id, public_key, chain, role)
 );
 
 -- One ROW per (email, app) ⇒ concurrent registrations cannot lose a write.

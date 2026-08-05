@@ -307,6 +307,65 @@ export function authStoreConformanceCases(
   });
 
   add(
+    "🚨 user record: a wallet-slot write and a session-pointer write do NOT clobber each other",
+    async (store) => {
+      // The user record must NOT be a single blob that every write rewrites wholesale.
+      // When it was, an import overlapping a login resolved last-write-wins and silently
+      // destroyed one of them — and `encryptedSecret` is the ONLY copy of that private
+      // key, so the funds at that address became permanently unreachable.
+      const u = makeUser({ publicKey: PK_A, email: "slots@example.com", wallets: [] });
+      await store.putUser(u);
+
+      const wallet = {
+        chain: "evm" as const,
+        role: "funds" as const,
+        publicKey: "0xabc",
+        encryptedSecret: "IMPORTED",
+      };
+      await Promise.all([
+        store.putWalletSlot(u.appId, PK_A, wallet),
+        store.setSessionPointer(u.appId, PK_A, "d".repeat(64)),
+      ]);
+
+      const got = await store.getUser(u.appId, PK_A);
+      assertEqual(
+        got?.wallets.find((w) => w.chain === "evm" && w.role === "funds")?.encryptedSecret,
+        "IMPORTED",
+        "LOST WRITE: the session-pointer write destroyed a wallet. These are different " +
+          "fields of the record and must be writable independently — a whole-record " +
+          "read-modify-write here loses an unrecoverable private key.",
+      );
+      assertEqual(got?.authTokenHash, "d".repeat(64), "the session pointer was lost");
+    },
+  );
+
+  add("🚨 user record: writing one wallet slot leaves the other slots untouched", async (store) => {
+    const solana = {
+      chain: "solana" as const,
+      role: "funds" as const,
+      publicKey: PK_A,
+      encryptedSecret: "KEEP-ME",
+    };
+    const u = makeUser({ publicKey: PK_B, email: "twoslots@example.com", wallets: [solana] });
+    await store.putUser(u);
+
+    await store.putWalletSlot(u.appId, PK_B, {
+      chain: "evm",
+      role: "signing",
+      publicKey: "0xdef",
+      encryptedSecret: "NEW",
+    });
+
+    const got = await store.getUser(u.appId, PK_B);
+    assertEqual(got?.wallets.length, 2, "writing one slot must not drop another");
+    assertEqual(
+      got?.wallets.find((w) => w.chain === "solana")?.encryptedSecret,
+      "KEEP-ME",
+      "LOST WRITE: an unrelated slot was destroyed by a slot-scoped write",
+    );
+  });
+
+  add(
     "🚨 email index: concurrent putUser for one email under two apps — NEITHER write is lost",
     async (store) => {
       const a = makeUser({ appId: "app1", publicKey: PK_A, email: "shared@example.com" });

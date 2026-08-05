@@ -131,6 +131,8 @@ const makeNavigator = () => ({
 // ---------- install globals BEFORE importing the built module ----------
 const def = (name, value) => Object.defineProperty(globalThis, name, { value, configurable: true });
 def("window", globalThis);
+// window === globalThis here, so this is what window.location.origin resolves to.
+def("location", { origin: "https://smoke.example", hostname: "localhost" });
 def("indexedDB", idb);
 def("localStorage", storageShim());
 def("sessionStorage", storageShim());

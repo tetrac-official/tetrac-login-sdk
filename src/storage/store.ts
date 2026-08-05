@@ -19,7 +19,7 @@
 // stores keep their `StorageAdapter` and are wrapped by `KvAuthStore` below — nothing
 // existing breaks.
 import type { StorageAdapter } from "./adapter.js";
-import type { UserData } from "../core/types.js";
+import { sortWalletsBySlot, type UserData, type EncryptedWallet } from "../core/types.js";
 import { DEFAULT_CONFIG, type KeyPrefixes } from "../core/config.js";
 import { appScoped } from "../server/keys.js";
 
@@ -92,10 +92,44 @@ export function normalizeEmail(email: string): string {
 export interface AuthStore {
   // --- users -------------------------------------------------------------------
   getUser(appId: string, publicKey: string): Promise<UserData | null>;
-  /** Upsert the record AND maintain the email index. Both, or neither — one transaction
-   *  where the backend supports it. Concurrent putUser for the same email under two
-   *  different appIds must not lose either write. */
+  /**
+   * Create or replace the record AND maintain the email index. Both, or neither — one
+   * transaction where the backend supports it. Concurrent putUser for the same email
+   * under two different appIds must not lose either write.
+   *
+   * This is the WHOLE-RECORD write, and it belongs to registration only. Every other
+   * mutation must use the field-scoped writes below, because a whole-record write is a
+   * read-modify-write and two of them racing lose data — see {@link putWalletSlot}.
+   */
   putUser(user: UserData): Promise<void>;
+  /**
+   * Write ONE wallet slot, leaving every other field of the record untouched.
+   *
+   * 🚨 This exists because the alternative destroys wallet keys. A record used to be a
+   * single JSON blob that every write rewrote wholesale, so an import that overlapped a
+   * login — an ordinary occurrence, since issuing a session also rewrote the record —
+   * resolved last-write-wins and silently dropped one of them. `encryptedSecret` is the
+   * ONLY copy of a client-generated private key: there is no backup, no escrow, and no
+   * re-derivation, so losing it strands any assets at that address permanently. Both
+   * requests returned 200.
+   *
+   * A record holds at most one wallet per (chain, role) — four slots (see WALLET_SLOTS) —
+   * so this addresses a slot rather than an array index, and writing one slot cannot
+   * disturb another. Two writers targeting the SAME slot resolve last-write-wins, which
+   * is what "replace this wallet" means.
+   *
+   * The write must be atomic with respect to other fields. On a KV backend that is one
+   * hash-field write; on SQL it is one row in the wallets table.
+   */
+  putWalletSlot(appId: string, publicKey: string, wallet: EncryptedWallet): Promise<void>;
+  /**
+   * Point the record at the session it currently owns, touching nothing else.
+   *
+   * Issuing a session used to rewrite the entire user record just to store this digest,
+   * which made every login collide with any concurrent wallet write. It is one field, so
+   * it gets one field write.
+   */
+  setSessionPointer(appId: string, publicKey: string, tokenHash: string): Promise<void>;
   /** Resolve an email to its publicKey for ONE app. Matched via {@link normalizeEmail}. */
   getPublicKeyByEmail(appId: string, email: string): Promise<string | null>;
 
@@ -187,21 +221,66 @@ export class KvAuthStore implements AuthStore {
     return `${this.prefixes.rateLimit}${scope}:${b.identifier}`;
   }
 
+  // The user record is a HASH, not a JSON string, and that is a correctness decision
+  // rather than an encoding preference. Fields:
+  //
+  //   p            the profile — every UserData field except `wallets`/`authTokenHash`
+  //   t            authTokenHash (the session pointer)
+  //   w:{chain}:{role}   one encrypted wallet, one per slot
+  //
+  // Splitting it this way is what makes a per-field write possible. `hset` is required to
+  // be atomic per field (see StorageAdapter), so an import writing `w:evm:funds` and a
+  // login writing `t` cannot clobber each other — which as one JSON blob they did, losing
+  // an unrecoverable wallet key.
+  private static readonly F_PROFILE = "p";
+  private static readonly F_TOKEN = "t";
+  private static walletField(chain: string, role: string): string {
+    return `w:${chain}:${role}`;
+  }
+
   async getUser(appId: string, publicKey: string): Promise<UserData | null> {
-    const raw = await this.kv.get(appScoped(this.prefixes.pubKey, appId, publicKey));
-    if (!raw) return null;
+    const h = await this.kv.hgetall(appScoped(this.prefixes.pubKey, appId, publicKey));
+    const profile = h[KvAuthStore.F_PROFILE];
+    if (!profile) return null;
     try {
-      return JSON.parse(raw) as UserData;
+      const user = JSON.parse(profile) as UserData;
+      const wallets: EncryptedWallet[] = [];
+      for (const [field, raw] of Object.entries(h)) {
+        if (!field.startsWith("w:")) continue;
+        wallets.push(JSON.parse(raw) as EncryptedWallet);
+      }
+      user.wallets = sortWalletsBySlot(wallets);
+      const token = h[KvAuthStore.F_TOKEN];
+      if (token) user.authTokenHash = token;
+      return user;
     } catch {
       return null; // malformed/non-JSON value — fail safe instead of throwing
     }
   }
 
   async putUser(user: UserData): Promise<void> {
-    await this.kv.set(appScoped(this.prefixes.pubKey, user.appId, user.publicKey), JSON.stringify(user));
+    const key = appScoped(this.prefixes.pubKey, user.appId, user.publicKey);
+    const { wallets, authTokenHash, ...profile } = user;
+    await this.kv.hset(key, KvAuthStore.F_PROFILE, JSON.stringify(profile));
+    if (authTokenHash) await this.kv.hset(key, KvAuthStore.F_TOKEN, authTokenHash);
+    for (const w of wallets ?? []) {
+      await this.kv.hset(key, KvAuthStore.walletField(w.chain, w.role), JSON.stringify(w));
+    }
     if (user.email) {
       await this.kv.hset(this.emailKey(user.email), user.appId, user.publicKey);
     }
+  }
+
+  async putWalletSlot(appId: string, publicKey: string, wallet: EncryptedWallet): Promise<void> {
+    await this.kv.hset(
+      appScoped(this.prefixes.pubKey, appId, publicKey),
+      KvAuthStore.walletField(wallet.chain, wallet.role),
+      JSON.stringify(wallet),
+    );
+  }
+
+  async setSessionPointer(appId: string, publicKey: string, tokenHash: string): Promise<void> {
+    await this.kv.hset(appScoped(this.prefixes.pubKey, appId, publicKey), KvAuthStore.F_TOKEN, tokenHash);
   }
 
   async getPublicKeyByEmail(appId: string, email: string): Promise<string | null> {

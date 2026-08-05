@@ -15,7 +15,7 @@
 // A dialect author reads none of this. They declare `supportsReturning` and emit DDL.
 import type { AuthStore, SessionValue, RateLimitBucket, RateLimitResult } from "../store.js";
 import { normalizeEmail } from "../store.js";
-import type { UserData } from "../../core/types.js";
+import { sortWalletsBySlot, type UserData, type EncryptedWallet } from "../../core/types.js";
 import type { SqlDialect, SqlDriver } from "./types.js";
 
 export interface SqlAuthStoreOptions {
@@ -65,15 +65,25 @@ export class SqlAuthStore implements AuthStore {
 
   async getUser(appId: string, publicKey: string): Promise<UserData | null> {
     const t = this.dialect.tables;
-    const rows = await this.run<{ data: string }>(
+    const rows = await this.run<{ data: string; auth_token_hash: string | null }>(
       this.driver,
-      `SELECT data FROM ${t.users} WHERE app_id = ? AND public_key = ?`,
+      `SELECT data, auth_token_hash FROM ${t.users} WHERE app_id = ? AND public_key = ?`,
       [appId, publicKey],
     );
-    const raw = rows[0]?.data;
-    if (raw == null) return null;
+    const row = rows[0];
+    if (row?.data == null) return null;
     try {
-      return JSON.parse(String(raw)) as UserData;
+      const user = JSON.parse(String(row.data)) as UserData;
+      // Wallets live one-row-per-slot, so a slot write never rewrites the profile and two
+      // concurrent writes to DIFFERENT slots cannot lose each other.
+      const ws = await this.run<{ data: string }>(
+        this.driver,
+        `SELECT data FROM ${t.userWallets} WHERE app_id = ? AND public_key = ?`,
+        [appId, publicKey],
+      );
+      user.wallets = sortWalletsBySlot(ws.map((w) => JSON.parse(String(w.data)) as EncryptedWallet));
+      if (row.auth_token_hash != null) user.authTokenHash = String(row.auth_token_hash);
+      return user;
     } catch {
       return null; // malformed value — fail safe rather than throwing
     }
@@ -92,15 +102,26 @@ export class SqlAuthStore implements AuthStore {
    */
   async putUser(user: UserData): Promise<void> {
     const t = this.dialect.tables;
-    const data = JSON.stringify(user);
+    const { wallets, authTokenHash, ...profile } = user;
+    const data = JSON.stringify(profile);
+    const tok = authTokenHash ?? null;
 
     await this.driver.transaction(async (tx) => {
       await this.run(
         tx,
-        `INSERT INTO ${t.users} (app_id, public_key, data) VALUES (?, ?, ?) ` +
-          this.dialect.upsert(["app_id", "public_key"], ["data = ?"]),
-        [user.appId, user.publicKey, data, data],
+        `INSERT INTO ${t.users} (app_id, public_key, data, auth_token_hash) VALUES (?, ?, ?, ?) ` +
+          this.dialect.upsert(["app_id", "public_key"], ["data = ?", "auth_token_hash = ?"]),
+        [user.appId, user.publicKey, data, tok, data, tok],
       );
+
+      for (const w of wallets ?? []) {
+        await this.run(
+          tx,
+          `INSERT INTO ${t.userWallets} (app_id, public_key, chain, role, data) VALUES (?, ?, ?, ?, ?) ` +
+            this.dialect.upsert(["app_id", "public_key", "chain", "role"], ["data = ?"]),
+          [user.appId, user.publicKey, w.chain, w.role, JSON.stringify(w), JSON.stringify(w)],
+        );
+      }
 
       if (user.email) {
         await this.run(
@@ -111,6 +132,28 @@ export class SqlAuthStore implements AuthStore {
         );
       }
     });
+  }
+
+  /** One row, one slot — see AuthStore.putWalletSlot for why this is not a record rewrite. */
+  async putWalletSlot(appId: string, publicKey: string, wallet: EncryptedWallet): Promise<void> {
+    const t = this.dialect.tables;
+    const data = JSON.stringify(wallet);
+    await this.run(
+      this.driver,
+      `INSERT INTO ${t.userWallets} (app_id, public_key, chain, role, data) VALUES (?, ?, ?, ?, ?) ` +
+        this.dialect.upsert(["app_id", "public_key", "chain", "role"], ["data = ?"]),
+      [appId, publicKey, wallet.chain, wallet.role, data, data],
+    );
+  }
+
+  /** One column. A login no longer rewrites the record, so it cannot race a wallet write. */
+  async setSessionPointer(appId: string, publicKey: string, tokenHash: string): Promise<void> {
+    const t = this.dialect.tables;
+    await this.run(
+      this.driver,
+      `UPDATE ${t.users} SET auth_token_hash = ? WHERE app_id = ? AND public_key = ?`,
+      [tokenHash, appId, publicKey],
+    );
   }
 
   async getPublicKeyByEmail(appId: string, email: string): Promise<string | null> {

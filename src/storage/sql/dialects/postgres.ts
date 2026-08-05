@@ -22,6 +22,7 @@ export function postgresDialect(opts: PostgresDialectOptions = {}): SqlDialect {
 
   const tables: SqlTables = {
     users: q("ttc_users"),
+    userWallets: q("ttc_user_wallets"),
     emailIndex: q("ttc_email_index"),
     sessions: q("ttc_sessions"),
     challenges: q("ttc_challenges"),
@@ -55,11 +56,25 @@ CREATE SCHEMA IF NOT EXISTS ${schema};
 
 -- Postgres's default collation is deterministic, so text keys compare byte-exactly and
 -- 'Acme' ≠ 'acme'. (That is NOT true of MySQL — see the MySQL dialect.)
+-- The data column is the PROFILE only. Wallets live one row per slot below, and the session
+-- pointer is its own column, so no ordinary write rewrites this row wholesale.
 CREATE TABLE IF NOT EXISTS ${tables.users} (
+  app_id          text NOT NULL,
+  public_key      text NOT NULL,
+  data            text NOT NULL,       -- UserData minus wallets/authTokenHash
+  auth_token_hash text,                -- SHA-256 of the current session token
+  PRIMARY KEY (app_id, public_key)
+);
+
+-- One row per (chain, role) slot. This is what makes an import a single-row write that
+-- cannot lose a concurrent wallet write or be lost by a concurrent login.
+CREATE TABLE IF NOT EXISTS ${tables.userWallets} (
   app_id      text NOT NULL,
   public_key  text NOT NULL,
-  data        text NOT NULL,           -- UserData JSON (~15 KB at the 64-wallet cap)
-  PRIMARY KEY (app_id, public_key)
+  chain       text NOT NULL,
+  role        text NOT NULL,
+  data        text NOT NULL,           -- one EncryptedWallet as JSON
+  PRIMARY KEY (app_id, public_key, chain, role)
 );
 
 -- One ROW per (email, app) — NOT one row with a field per tenant. This is what makes two

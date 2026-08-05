@@ -491,8 +491,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         // Self-heal: an existing wallet with no stored keys yet (legacy/empty
         // record) gets backfilled from the client bundle. Safe — nothing to
         // overwrite. Wallets that already have keys are never touched.
+        // Slot-scoped, for the same reason as import: never rewrite the whole record.
+        for (const w of body.wallets) await store.putWalletSlot(user.appId, user.publicKey, w);
         user.wallets = body.wallets;
-        await persistUser(store, user);
       }
       const token = await issueSession(store, user, config, issueFingerprint(req));
       return json(asResult(user, token), isNew ? 201 : 200);
@@ -553,15 +554,15 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // funds wallet therefore left the OLD address active, so the app kept displaying it
       // as the deposit address and kept signing with it — the user's replacement silently
       // did nothing. Replacing in place makes the record's four slots authoritative.
-      const next = [...user.wallets];
+      // One slot-scoped write per wallet — NOT a whole-record rewrite. Writing the record
+      // back wholesale is what destroyed keys: a concurrent login (which also rewrote it)
+      // or a second import would resolve last-write-wins and drop the other's ciphertext,
+      // silently, with both requests returning 200.
       for (const incoming of body.wallets) {
-        const at = next.findIndex((w) => w.chain === incoming.chain && w.role === incoming.role);
-        if (at === -1) next.push(incoming);
-        else next[at] = incoming;
+        await store.putWalletSlot(user.appId, user.publicKey, incoming);
       }
-      user.wallets = next;
-      await persistUser(store, user);
-      return json({ user: publicUser(user) });
+      const updated = (await getUserByPublicKey(store, user.appId, user.publicKey)) ?? user;
+      return json({ user: publicUser(updated) });
     },
   };
 }

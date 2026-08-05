@@ -62,12 +62,11 @@ export async function issueSession(
   await store.putSession(user.appId, tokenHash, value, config.sessionTtlSeconds);
 
   user.authTokenHash = tokenHash;
-  // Scrub the pre-v0.5.0 raw bearer token from records written by an older version. Any
-  // user who logs in again is cleaned automatically; a stale one is inert anyway (no
-  // session exists under it), so this is hygiene, not a security dependency.
-  delete (user as { authToken?: unknown }).authToken;
-
-  await persistUser(store, user);
+  // ONE FIELD, not the whole record. Rewriting the entire UserData blob here — which is
+  // what persistUser does — made every login race any concurrent wallet write, and the
+  // loser's `encryptedSecret` was gone for good: it is the only copy of that private key.
+  // A session pointer is a single field, so it gets a single-field write.
+  await store.setSessionPointer(user.appId, user.publicKey, tokenHash);
   return token;
 }
 

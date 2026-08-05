@@ -89,9 +89,9 @@ describe("email accounts: same email isolated per app", () => {
     const email = "scoped@example.com";
     await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
 
-    expect(await storage.get(`pubKey:${APP_A}:${PK_A}`)).not.toBeNull();
-    expect(await storage.get(`pubKey:${APP_B}:${PK_A}`)).toBeNull(); // not visible to app B
-    expect(await storage.get(`pubKey:${PK_A}`)).toBeNull(); // never the legacy flat key
+    expect(await storage.hgetall(`pubKey:${APP_A}:${PK_A}`)).not.toEqual({});
+    expect(await storage.hgetall(`pubKey:${APP_B}:${PK_A}`)).toEqual({}); // not visible to app B
+    expect(await storage.hgetall(`pubKey:${PK_A}`)).toEqual({}); // never the legacy flat key
   });
 });
 
@@ -216,7 +216,7 @@ describe("single-app backward compatibility (no appId supplied)", () => {
     const reg = await registerEmail(h, { email: "legacy@example.com", appKey: APP_KEY, publicKey: PK_A });
     expect(reg.status).toBe(201);
     // Stored under the default app namespace.
-    expect(await storage.get(`pubKey:ttc:${PK_A}`)).not.toBeNull();
+    expect(await storage.hgetall(`pubKey:ttc:${PK_A}`)).not.toEqual({});
     const login = await loginEmail(h, { email: "legacy@example.com", appKey: APP_KEY });
     expect(login.status).toBe(200);
   });
