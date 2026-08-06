@@ -448,7 +448,11 @@ describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
     expect((await login.json()).user.pbkdf2Iterations).toBe(600_000);
   });
 
-  it("legacy account (no count) stores none — client falls back to 100k", async () => {
+  // `pbkdf2Iterations` is OPTIONAL on the wire — wallet and biometric accounts pin no count
+  // (they derive from a signature or a PRF, not PBKDF2), so register must accept its absence.
+  // `pbkdf2Iterations: null` is the helper's opt-out; its default now matches the real client,
+  // which always pins one for an email account.
+  it("register accepts an omitted count and stores none", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
       config: { origin: "https://test.example" },
@@ -457,7 +461,26 @@ describe("PBKDF2 per-user iteration count (Change 2 / Option A)", () => {
       publicKey: "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
       email: "legacy@example.com",
       appKey: APP_KEY,
+      pbkdf2Iterations: null,
     });
     expect((await reg.json()).user.pbkdf2Iterations).toBeUndefined();
+  });
+
+  // ...but /challenge must NOT expose that absence. The client no longer guesses a count
+  // locally, and an omitted field would distinguish a real record from the dummy issued for
+  // an unknown email — the enumeration oracle one key over from the one that was closed.
+  it("🚨 /challenge still returns a count for a record that pinned none", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example", securityLevel: 3 },
+    });
+    await registerEmail(h, {
+      publicKey: "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe",
+      email: "nocount@example.com",
+      appKey: APP_KEY,
+      pbkdf2Iterations: null,
+    });
+    const ch = await (await h.challenge(req({ email: "nocount@example.com" }))).json();
+    expect(ch.pbkdf2Iterations).toBe(1_000_000); // the deployment's configured level
   });
 });

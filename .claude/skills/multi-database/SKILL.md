@@ -1,6 +1,6 @@
 ---
 name: multi-database
-description: Back `@tetrac/login-sdk` with a database, or debug one. Postgres/Supabase, MySQL, and SQLite are SHIPPED (v0.6.0, `@tetrac/login-sdk/storage/sql`) — do NOT hand-write those; use `createPostgresAuthStore` / `createMysqlAuthStore` / `createSqliteAuthStore` and the generated schema. Redis/Upstash ship as `StorageAdapter`. Only a NEW engine class (Mongo, DynamoDB, Convex, Durable Objects) needs a hand-written `AuthStore`, and this skill encodes the correctness contract it must honor: expiry-on-read, the permanent-rate-limit-lockout bug, atomic get-and-delete (challenge replay), no-lost-write on the email index, normalizeEmail (never a case-insensitive collation), injection safety, fail-closed errors — plus how to run the shipped conformance suite against a real engine. Use when — choosing a database for the SDK; wiring Postgres/Supabase/MySQL/SQLite/Mongo/DynamoDB/Convex behind it; adding a SQL dialect; running the conformance suite or the Docker engine tests; or debugging "user permanently rate-limited", "session accepted after it expired", "challenge replayed", "email index lost a write", "two accounts collided", "locked out of their wallets", "Supabase table is world-readable", "preflight refuses to boot", "Convex write conflict / OCC". Triggers — "add a database", "Postgres adapter", "Supabase auth store", "MySQL backend", "SQL dialect", "Convex backend", "custom AuthStore", "hitRateLimit", "bring my own database", "multi-db", "storage conformance", "test:docker".
+description: Back `@tetrac/login-sdk` with a database, or debug one. Postgres/Supabase, MySQL, and SQLite are SHIPPED (`@tetrac/login-sdk/storage/sql`) — do NOT hand-write those; use `createPostgresAuthStore` / `createMysqlAuthStore` / `createSqliteAuthStore` and the generated schema. Redis/Upstash ship as `StorageAdapter`. Only a NEW engine class (Mongo, DynamoDB, Convex, Durable Objects) needs a hand-written `AuthStore`, and this skill encodes the correctness contract it must honor: per-field writes via `putWalletSlot`/`setSessionPointer` (a whole-record rewrite DESTROYS wallet private keys), challenges keyed per-value so issuing one cannot invalidate another, expiry-on-read, the permanent-rate-limit-lockout bug, atomic get-and-delete (challenge replay), no-lost-write on the email index, normalizeEmail (never a case-insensitive collation), injection safety, fail-closed errors — plus how to run the shipped conformance suite against a real engine. Use when — choosing a database for the SDK; wiring Postgres/Supabase/MySQL/SQLite/Mongo/DynamoDB/Convex behind it; adding a SQL dialect; running the conformance suite or the Docker engine tests; or debugging "user permanently rate-limited", "session accepted after it expired", "challenge replayed", "imported wallet disappeared", "wallet key lost after concurrent login", "email index lost a write", "two accounts collided", "locked out of their wallets", "Supabase table is world-readable", "preflight refuses to boot", "Convex write conflict / OCC". Triggers — "add a database", "Postgres adapter", "Supabase auth store", "MySQL backend", "SQL dialect", "Convex backend", "custom AuthStore", "hitRateLimit", "putWalletSlot", "setSessionPointer", "takeChallenge", "bring my own database", "multi-db", "storage conformance", "test:docker".
 ---
 
 # Backing `@tetrac/login-sdk` with a database
@@ -23,11 +23,10 @@ export const { GET, POST } = createNextAuthRoutes({ store });
 CockroachDB** — one Postgres wire protocol. `createMysqlAuthStore` and `createSqliteAuthStore` are
 the same shape. Redis/Upstash stay on `{ storage }` and are unchanged.
 
-**Why the hard stop:** every hazard in this document *used to be* the integrator's problem. Under
-[ADR-002](../../../PRD/ADR-002-uniform-backend-architecture.md) the SDK owns them — one engine
-(`SqlAuthStore`) plus a ~30-line dialect per database. Hand-writing a Postgres backend today means
-re-deriving eight correctness rules that are already written, tested against real engines, and
-fixed. **You would be reintroducing solved bugs.**
+**Why the hard stop:** every hazard in this document *used to be* the integrator's problem. The SDK
+owns them now — one engine (`SqlAuthStore`) plus a ~30-line dialect per database. Hand-writing a
+Postgres backend today means re-deriving nine correctness rules that are already written, tested
+against real engines, and fixed. **You would be reintroducing solved bugs.**
 
 ## So when do I actually implement something?
 
@@ -40,22 +39,32 @@ fixed. **You would be reintroducing solved bugs.**
 | **Another SQL engine** (e.g. Oracle, MSSQL) | A **`SqlDialect`** — ~30 lines. See *Adding a SQL dialect*. |
 | **A non-SQL engine** (Mongo, DynamoDB, Firestore, Convex, Durable Objects) | A hand-written **`AuthStore`**. This is the only case where the eight hazards below are yours. |
 
-**Companion docs:** [`docs/DATABASES.md`](../../../docs/DATABASES.md) (which database, and why —
-including the ones that **cannot** work); [`PRD/ADR-002`](../../../PRD/ADR-002-uniform-backend-architecture.md)
-(why the SDK owns the correctness); [`docs/STORAGE_ADAPTERS.md`](../../../docs/STORAGE_ADAPTERS.md)
-(the `AuthStore` contract). The invariants also live in the interfaces themselves —
-`src/storage/store.ts`, `src/storage/adapter.ts`, `src/storage/sql/types.ts`.
+**The contract lives in the source, not in prose.** Every invariant below is written as a doc comment
+on the interface it constrains — read these first, and trust them over this skill if they ever
+disagree:
+
+| File | What it defines |
+|---|---|
+| `src/storage/store.ts` | The `AuthStore` port + every per-method invariant. **Start here.** |
+| `src/storage/adapter.ts` | The `StorageAdapter` (KV) port. |
+| `src/storage/sql/types.ts` | `SqlDialect` / `SqlDriver` / `PreflightIssue` — what a new SQL engine must supply. |
+| `src/storage/conformance.ts` | The executable acceptance bar. If it passes, the backend is correct. |
+| `src/storage/memory.ts` | The **normative reference implementation** of the KV port. |
 
 ## The two ports (only relevant if the table above sent you here)
 
 | Port | What it is | Implement it when |
 |---|---|---|
-| **`AuthStore`** (`src/storage/store.ts`) | The **domain** port: `getUser`, `putUser`, `getPublicKeyByEmail`, `putChallenge`, `takeChallenge`, `putSession`, `getSession`, `deleteSession`, **`hitRateLimit`**, + optional `sweepExpired`/`close`. | A **non-SQL** engine the SDK doesn't ship. |
+| **`AuthStore`** (`src/storage/store.ts`) | The **domain** port: `getUser`, `putUser`, **`putWalletSlot`**, **`setSessionPointer`**, `getPublicKeyByEmail`, `putChallenge`, `takeChallenge`, `putSession`, `getSession`, `deleteSession`, **`hitRateLimit`**, + optional `sweepExpired`/`close`. | A **non-SQL** engine the SDK doesn't ship. |
 | **`StorageAdapter`** (`src/storage/adapter.ts`) | The **KV** port: 10 Redis-shaped primitives. `KvAuthStore` wraps any of these into an `AuthStore`. | Only a genuine Redis-style store with native atomic `INCR`, TTL, and `GETDEL`. |
 
-**Why `AuthStore` and not the KV port** ([ADR-001](../../../PRD/ADR-001-storage-seam.md)):
-`StorageAdapter` is named for what it *is* (a key-value store), not what it is *for* (auth state),
-so every backend must **emulate Redis**. The clearest proof is `incr`:
+> **`putWalletSlot` and `setSessionPointer` are not conveniences.** They exist because rewriting the
+> whole `UserData` blob on every login and every wallet import made those two operations race, and
+> the loser's `encryptedSecret` — the *only* copy of a private key — was gone for good. See hazard 9.
+
+**Why `AuthStore` and not the KV port:** `StorageAdapter` is named for what it *is* (a key-value
+store), not what it is *for* (auth state), so every backend must **emulate Redis**. The clearest
+proof is `incr`:
 
 > A rate-limit counter is *many writes to one row*. On **Convex** that is the *documented
 > anti-pattern* — OCC write conflicts, and the mutation eventually **throws** under exactly the burst
@@ -65,9 +74,9 @@ so every backend must **emulate Redis**. The clearest proof is `incr`:
 
 **Consequence: several hazards below are artifacts of the KV port, not of the problem.** Hazards
 **1, 5, 6** (permanent lockout, collation, key sizing) largely evaporate under `AuthStore` — you
-store typed fields instead of emulating Redis over concatenated strings. Hazards **2, 3, 7, 8**
-(expiry-on-read, atomic get-and-delete, injection, email normalization) **survive both ports**.
-Those are the real ones.
+store typed fields instead of emulating Redis over concatenated strings. Hazards **2, 3, 7, 8, 9**
+(expiry-on-read, atomic get-and-delete, injection, email normalization, lost updates on the user
+record) **survive both ports**. Those are the real ones.
 
 ## The one rule for the KV port
 
@@ -146,16 +155,34 @@ automatically; SQL does not. Implement the optional `sweepExpired?(limit?)` for 
 `pg_cron` / a cron route, and remember those dead rows contain **PII** (rate-limit keys embed emails
 and IPs) — it is a data-retention obligation, not just disk.
 
-### 3. `getdel` must be atomic → or challenges become replayable 🚨
+### 3. `takeChallenge` must be atomic → or challenges become replayable 🚨
 
-`getdel` is the **sole** mechanism closing the challenge-replay race (`src/server/challenge.ts`).
-Two concurrent consumes must never both observe the value.
+`takeChallenge` is the **sole** mechanism closing the challenge-replay race
+(`src/server/challenge.ts`). Two concurrent consumes must never both observe the value.
 
-- **Postgres / SQLite ≥3.35:** `DELETE … WHERE key = $1 AND (expires_at IS NULL OR expires_at > $2) RETURNING value` — one statement.
+- **Postgres / SQLite ≥3.35:** `DELETE … WHERE … AND expires_at > $2 RETURNING 1` — one statement.
 - **MySQL: has no `DELETE … RETURNING`.** It needs an explicit transaction (`SELECT … FOR UPDATE`,
-  then `DELETE`). Getting this wrong turns a single-use challenge into a replayable one. This is why
-  MySQL is the *last* backend to ship, not the first.
-- Conformance case: fire N concurrent `getdel`s; **exactly one** observes the value.
+  then `DELETE`). Getting this wrong turns a single-use challenge into a replayable one.
+- Conformance case: fire N concurrent `takeChallenge`s; **exactly one** returns `true`.
+
+🚨 **Challenges ACCUMULATE — one row per challenge VALUE, never one per identity.** The signature is
+`takeChallenge(appId, publicKey, presented): Promise<boolean>`: it consumes **the presented value**,
+matched on an exact `(appId, publicKey, challenge)` key, not "whatever is stored for this identity".
+
+A single slot per `(appId, publicKey)` was a **targeted denial of login**. `/challenge` is
+unauthenticated, so anyone who could name an account — an email or a public key — issued a fresh
+challenge that silently overwrote the one its owner was mid-signature on. The victim's login then
+failed with `401` forever, at whatever rate the attacker chose.
+
+Consequences for your schema:
+
+- Primary key is `(app_id, public_key, challenge)`, **not** `(app_id, public_key)`.
+- `putChallenge` INSERTs; it must never overwrite a different value for the same identity.
+- Burning one challenge must leave the identity's others usable.
+- Each row expires independently. The set drains on its own — bounded by the TTL and the issuance
+  rate limit, so no cap is needed in storage.
+- The presented value is validated to exactly 64 hex chars *before* it reaches you
+  (`consumeChallenge`), so it can never carry the `:` namespace separator.
 
 ### 4. `hset` must be per-field atomic → or registrations lose writes
 
@@ -250,6 +277,65 @@ one namespace, and two distinct Solana addresses differing only in case merge in
 
 > **Case-insensitivity is a property of the EMAIL, not of the keyspace.** Normalize the value in code;
 > keep the storage byte-exact.
+
+### 9. The user record must support **per-field writes** → or you destroy wallet keys 🚨
+
+> **Survives BOTH ports.** This is the highest-severity storage bug the SDK has shipped, and the one
+> whose damage is genuinely unrecoverable.
+
+The obvious `AuthStore` reads a `UserData`, mutates it, and writes the whole thing back. Every write
+path does it, so two overlapping requests each write their own stale snapshot and the later one wins
+wholesale. Two ordinary, concurrent, *successful* requests:
+
+```
+concurrent import-wallet + login   →  the imported wallet is GONE
+two concurrent import-wallet       →  one of them is GONE
+```
+
+**Why this is not "just a lost update".** `encryptedSecret` is the **only** copy of a
+client-generated private key. The plaintext existed in the browser for the duration of
+`generateWalletBundle()` and was never persisted anywhere. Losing the ciphertext is unrecoverable by
+design — no backup, no escrow, no re-derivation — and any assets already sent to that address are
+permanently stranded. Both requests return `200`. Nothing logs an error. The user finds out later.
+
+The blast radius used to be widened by login itself: `issueSession` rewrote the entire record just to
+record one session pointer, so *an ordinary sign-in* raced any concurrent wallet write.
+
+**The contract:** these three must be independently writable without read-modify-write of the whole
+record.
+
+| Method | Writes | Must not touch |
+|---|---|---|
+| `putWalletSlot(appId, publicKey, wallet)` | one `(chain, role)` slot | the other three slots, the profile, the session pointer |
+| `setSessionPointer(appId, publicKey, tokenHash)` | the session pointer | any wallet, the profile |
+| `putUser(user)` | the whole record + email index | — (registration only) |
+
+The property to hold, straight from the conformance suite:
+
+```ts
+await Promise.all([
+  store.putWalletSlot(appId, pk, evmFunds),
+  store.setSessionPointer(appId, pk, tokenHash),
+]);
+// BOTH survive. These are different fields; neither may clobber the other.
+```
+
+**How the shipped backends do it** — model yours on whichever matches your engine:
+
+- **KV:** the record is a **HASH, not a JSON string**. Fields: `p` (profile), `t` (session pointer),
+  `w:{chain}:{role}` (one wallet each). `hset` is per-field atomic, so an import writing
+  `w:evm:funds` and a login writing `t` cannot collide.
+- **SQL:** one `UPDATE` touching one column/row inside the existing transaction.
+- **Mongo:** `$set` on the specific subdocument path — but see hazard 4's `.`-in-path trap before you
+  build a path out of a `chain`/`role` pair.
+- **Document stores with no partial update:** you need optimistic concurrency — a `version` column
+  and `UPDATE … WHERE version = ?`, with the caller retrying on mismatch. A full-blob write with no
+  CAS is **not an acceptable implementation of these two methods.**
+
+Wallet slots are also **bounded and replace-in-place**: at most one wallet per `(chain, role)`, four
+slots total (`WALLET_SLOTS`). `putWalletSlot` REPLACES. Appending was itself a fund-misdirection bug —
+`useActiveWallet` resolves with `.find()`, which returns the first match, while an appended import
+lands last, so the old address stayed active and kept receiving deposits.
 
 ---
 
@@ -501,7 +587,8 @@ Three things to hold yourself to:
 
 1. Does **every read** filter on expiry — `getSession`, `takeChallenge` — with **no reaper** required
    for correctness?
-2. Is `takeChallenge` **atomic** (one statement, or an explicit transaction)?
+2. Is `takeChallenge` **atomic** (one statement, or an explicit transaction), and keyed on the
+   **presented challenge value** so issuing one never invalidates another in flight?
 3. Can two concurrent `putUser` calls for one email under different `appId`s **both** survive?
 4. Is the email indexed and looked up via **`normalizeEmail()`**, not a case-insensitive collation?
 5. Does `hitRateLimit` let a limited identifier through **after its window elapses**?
@@ -509,6 +596,8 @@ Three things to hold yourself to:
    or update paths?
 7. Do storage errors **propagate** rather than resolve to `{allowed: true}` / `null`?
 8. Is `tokenHash` stored **as given** (already a digest) and `SessionValue` stored as typed fields?
+9. 🚨 Do `putWalletSlot` and `setSessionPointer` write **one field** — not the whole record? Run them
+   concurrently: if either loses, the backend destroys private keys and is not shippable.
 
 **KV adapters, additionally:** does `incr` on an **expired** key return `1` and drop the stale TTL, in
 one statement? Does `incr` on a **live** key leave its TTL alone? Does `del` clear both keyspaces?

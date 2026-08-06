@@ -309,11 +309,14 @@ export class AuthClient {
     // 2) Re-derive the appKey with the count the SERVER pinned, and sign the challenge with
     //    the derived auth keypair — the server stores only the matching public key.
     //
-    //    No local fallback. /challenge always returns a count now (it has to: an omitted
-    //    field distinguished a real account from the dummy issued for an unknown email, so
-    //    the omission was an enumeration oracle). Guessing a count here would silently
-    //    derive the wrong app key and leave the wallets undecryptable, which is worse than
-    //    failing, and the server is the only side that knows what the account was pinned to.
+    //    No guess is made HERE. /challenge always returns a count now — it has to, since an
+    //    omitted field distinguished a real account from the dummy issued for an unknown
+    //    email, and that omission was an enumeration oracle. The server is the only side
+    //    that knows what an account was pinned to, so it is the only side that should say.
+    //
+    //    If the field is ever absent anyway (an older server), deriveAppKeyFromPasskey's own
+    //    `iterations = 100_000` default applies — the same value this line used to guess, so
+    //    that pairing still derives the key it always did.
     const iterations = pbkdf2Iterations;
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const signature = signAuthChallenge(appKey, challenge);

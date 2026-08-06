@@ -1,8 +1,13 @@
-// v0.5.0 — the release's four behavioral guarantees:
-//   §1  session tokens are stored as SHA-256 digests, in BOTH storage locations
-//   §2  close?() / sweepExpired?() exist, are optional, and are honestly feature-detected
-//   §3  the AuthStore seam is additive — `storage` still works, `store` also works
-//   §4  the prerequisite fixes (MemoryAdapter.del, /login email validation, fail-closed)
+// The storage seam's four standing guarantees. Not a changelog — each of these is a live
+// contract that both ports must keep holding:
+//   §1  session tokens are stored as SHA-256 digests, in BOTH storage locations, so a
+//       database read yields no replayable credential
+//   §2  close?() / sweepExpired?() are OPTIONAL and honestly feature-detected — a backend
+//       that omits them must still work, and callers must not assume they exist
+//   §3  the seam is ADDITIVE — `{ storage }` (KV) and `{ store }` (domain) both work, and
+//       neither is a migration away from the other
+//   §4  the supporting invariants: MemoryAdapter.del, /login email validation before the
+//       value reaches a key, and fail-closed rate limiting
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { RedisAdapter } from "../src/storage/redis";
