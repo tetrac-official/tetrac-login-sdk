@@ -44,6 +44,81 @@ export interface AuthHandlerOptions {
   /** A native domain backend. Takes precedence over `storage` when both are given. */
   store?: AuthStore;
   config?: DeepPartial<AuthConfig>;
+  /**
+   * Called with any boot-time configuration finding. Defaults to `console.warn`, matching
+   * `createSqlAuthStore`. Pass a no-op to silence, or route them into your logger.
+   */
+  onWarning?: (issue: ConfigWarning) => void;
+}
+
+/** A boot-time configuration finding. Mirrors the SQL layer's `PreflightIssue`. */
+export interface ConfigWarning {
+  /** Stable machine-readable code, e.g. `unrestricted_app_id`. */
+  code: string;
+  message: string;
+}
+
+// Warn ONCE per process per (code, appId).
+//
+// These are boot findings, but `createAuthHandlers` is not guaranteed to run once: a
+// serverless runtime re-evaluates the module per cold start, and a multi-tenant host may
+// build one handler set per app. A warning repeated on every construction is a warning
+// people filter out, which is the same as not emitting it. Keying on appId as well as code
+// means a host serving several apps still hears about each one.
+const warned = new Set<string>();
+
+function warnOnce(appId: string, issue: ConfigWarning, sink?: (issue: ConfigWarning) => void): void {
+  const key = `${issue.code}:${appId}`;
+  if (warned.has(key)) return;
+  warned.add(key);
+  if (sink) sink(issue);
+  // eslint-disable-next-line no-console
+  else console.warn(`[tetrac] ${issue.code}: ${issue.message}`);
+}
+
+/**
+ * Boot-time configuration findings. These WARN rather than throw: both conditions are
+ * legitimate in development, and a hard failure would break every single-app deployment
+ * that correctly relies on the `config.appId` fallback and never sends one.
+ *
+ * `appId` is not a label. It is (a) the storage namespace prefixing every key and (b)
+ * app-key DERIVATION INPUT on both paths — the PBKDF2 salt is `SHA-256(appId : email)`
+ * and the wallet app-key message embeds `App: {appId}`. Those two facts together are why
+ * an unchecked appId is a data-loss hazard rather than a tidiness one.
+ */
+function checkConfig(config: AuthConfig, sink?: (issue: ConfigWarning) => void): void {
+  if (!config.allowedAppIds) {
+    warnOnce(
+      config.appId,
+      {
+        code: "unrestricted_app_id",
+        message:
+          `config.allowedAppIds is unset — every route accepts ANY well-formed appId from the ` +
+          `request body, the '${APP_ID_HEADER}' header, or the ?appId query param, and silently ` +
+          `creates that namespace. A client sending 'myapp' against a deployment configured as ` +
+          `'myapp.example' therefore registers successfully into a SEPARATE tenant under a ` +
+          `DIFFERENT app key, and the wallets it encrypts there can never be decrypted by the ` +
+          `real one. Set allowedAppIds to the exact ids this deployment serves ` +
+          `(e.g. ['${config.appId}']).`,
+      },
+      sink,
+    );
+  }
+  if (config.appId === "ttc") {
+    warnOnce(
+      config.appId,
+      {
+        code: "default_app_id",
+        message:
+          `config.appId is the default 'ttc' — it provides NO cross-app key isolation, since ` +
+          `any other deployment on the default derives the same app keys from the same email. ` +
+          `Set a unique, stable id per deployment (your domain works well). Set it ONCE: it is ` +
+          `app-key derivation input, so changing it later re-derives every key and existing ` +
+          `encrypted wallets stop decrypting.`,
+      },
+      sink,
+    );
+  }
 }
 
 export interface AuthHandlers {
@@ -119,6 +194,7 @@ function validIterations(n: unknown): boolean {
 
 export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
   const config = resolveConfig(opts.config);
+  checkConfig(config, opts.onWarning);
   // A native AuthStore wins; otherwise wrap the KV adapter. One of the two is required.
   const store: AuthStore =
     opts.store ??

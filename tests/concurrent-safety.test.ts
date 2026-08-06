@@ -181,8 +181,8 @@ describe("session issuance revocation", () => {
     expect(tokenA).not.toBe(tokenB);
 
     const used = await Promise.all(
-      [tokenA, tokenB].map(async (t) =>
-        (await h.userData(req({}, { "ttc-auth-token": t, "ttc-public-key": pk }))).status,
+      [tokenA, tokenB].map(
+        async (t) => (await h.userData(req({}, { "ttc-auth-token": t, "ttc-public-key": pk }))).status,
       ),
     );
 
