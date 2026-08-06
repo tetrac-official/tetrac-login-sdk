@@ -10,6 +10,7 @@
 //  - To survive a reload WITHOUT re-running a passkey ceremony, use the
 //    biometric-unlock feature: it re-arms the key from a Touch/Face-ID-gated
 //    wrapped blob, not from a raw key sitting in web storage.
+import { AUTH_TOKEN_HEADER, PUBLIC_KEY_HEADER } from "../core/config.js";
 import type { AuthStatus } from "../core/types.js";
 
 const TOKEN_KEY = "ttc-auth-token";
@@ -355,7 +356,10 @@ export function authHeaders(): Record<string, string> {
   const token = getAuthToken();
   const pubKey = getPublicKey();
   const headers: Record<string, string> = {};
-  if (token) headers["ttc-auth-token"] = token;
-  if (pubKey) headers["ttc-public-key"] = pubKey;
+  // The SAME constants the server reads. These were once two independent strings — a
+  // config field on the server and a literal here — which meant renaming the header broke
+  // authentication silently.
+  if (token) headers[AUTH_TOKEN_HEADER] = token;
+  if (pubKey) headers[PUBLIC_KEY_HEADER] = pubKey;
   return headers;
 }

@@ -2,7 +2,14 @@
 // Next.js App Router consumes these directly via src/next.
 import type { StorageAdapter } from "../storage/adapter.js";
 import { KvAuthStore, type AuthStore, type RateLimitBucket } from "../storage/store.js";
-import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
+import {
+  resolveConfig,
+  APP_ID_HEADER,
+  AUTH_TOKEN_HEADER,
+  PUBLIC_KEY_HEADER,
+  type AuthConfig,
+  type DeepPartial,
+} from "../core/config.js";
 import {
   WALLET_SLOTS,
   type AuthResult,
@@ -191,12 +198,12 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return hashUserAgent(req.headers.get("user-agent"));
   }
 
-  // Resolve the request's appId on authenticated routes from `appIdHeader`, falling
+  // Resolve the request's appId on authenticated routes from APP_ID_HEADER, falling
   // back to config.appId for single-app deployments. Returns null when the supplied
   // value is malformed (e.g. contains the ':' key separator) so the caller can fail
   // closed (401) rather than build a key from attacker-controlled input (v0.4.0).
   function headerAppId(req: Request): string | null {
-    const appId = req.headers.get(config.appIdHeader) ?? config.appId;
+    const appId = req.headers.get(APP_ID_HEADER) ?? config.appId;
     return validateAppId(appId, config) ? null : appId;
   }
 
@@ -584,8 +591,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     // whether the presented token was valid.
     async logout(req) {
       const appId = headerAppId(req);
-      const token = req.headers.get(config.sessionHeader);
-      const publicKey = req.headers.get(config.publicKeyHeader);
+      const token = req.headers.get(AUTH_TOKEN_HEADER);
+      const publicKey = req.headers.get(PUBLIC_KEY_HEADER);
       const user = appId ? await verifySession(store, appId, token, publicKey, reqFingerprint(req)) : null;
       if (appId && user && token) await revokeSession(store, appId, token);
       return json({ ok: true });
@@ -593,8 +600,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
 
     async userData(req) {
       const appId = headerAppId(req);
-      const token = req.headers.get(config.sessionHeader);
-      const publicKey = req.headers.get(config.publicKeyHeader);
+      const token = req.headers.get(AUTH_TOKEN_HEADER);
+      const publicKey = req.headers.get(PUBLIC_KEY_HEADER);
       const user = appId ? await verifySession(store, appId, token, publicKey, reqFingerprint(req)) : null;
       if (!user) return error("Unauthorized", 401);
       return json({ user: publicUser(user) });
@@ -619,8 +626,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
 
     async importWallet(req) {
       const appId = headerAppId(req);
-      const token = req.headers.get(config.sessionHeader);
-      const publicKey = req.headers.get(config.publicKeyHeader);
+      const token = req.headers.get(AUTH_TOKEN_HEADER);
+      const publicKey = req.headers.get(PUBLIC_KEY_HEADER);
       const user = appId ? await verifySession(store, appId, token, publicKey, reqFingerprint(req)) : null;
       if (!user) return error("Unauthorized", 401);
 

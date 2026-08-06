@@ -1,6 +1,12 @@
 // High-level browser auth client. Orchestrates key derivation, client-side wallet
 // generation, the API round-trips, and session storage for all three methods.
-import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } from "../core/config.js";
+import {
+  resolveConfig,
+  APP_ID_HEADER,
+  PBKDF2_ITERATIONS,
+  type AuthConfig,
+  type DeepPartial,
+} from "../core/config.js";
 import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
 import { walletLoginMessage, walletAppKeyMessage, walletAppKeyMessageHw } from "../core/index.js";
@@ -252,7 +258,7 @@ export class AuthClient {
 
   /** Session + public-key + appId headers for authenticated requests. */
   private authHeaders(): Record<string, string> {
-    return { ...authHeaders(), [this.config.appIdHeader]: this.config.appId };
+    return { ...authHeaders(), [APP_ID_HEADER]: this.config.appId };
   }
 
   /** Fetch the authenticated user's full record (identity + encrypted wallets). */

@@ -17,6 +17,25 @@ export interface KeyPrefixes {
   rateLimit: string;
 }
 
+/**
+ * The wire header names, as CONSTANTS rather than config.
+ *
+ * They were once configurable — `AuthConfig.sessionHeader` / `publicKeyHeader` /
+ * `appIdHeader` — and the server honoured them while the client hardcoded the same three
+ * strings. Setting one therefore broke authentication silently: the server looked for the
+ * configured name, the client sent the literal, and every authenticated request returned
+ * 401 with nothing to indicate why. Two sources of truth for one wire contract.
+ *
+ * A single exported constant cannot drift. It is also the better documentation — importable
+ * by a wrapper route, a proxy allowlist, or a test, instead of a re-typed string literal.
+ */
+/** Carries the opaque session token. */
+export const AUTH_TOKEN_HEADER = "ttc-auth-token";
+/** Carries the user's public key. */
+export const PUBLIC_KEY_HEADER = "ttc-public-key";
+/** Carries the request's appId on authenticated routes; falls back to config.appId. */
+export const APP_ID_HEADER = "ttc-app-id";
+
 export interface RateLimitConfig {
   windowSeconds: number;
   maxAttempts: number;
@@ -100,17 +119,6 @@ export interface AuthConfig {
   securityLevel: SecurityLevel;
   /** TTL for wallet-login challenges, in seconds. */
   challengeTtlSeconds: number;
-  /** Header carrying the opaque session token. */
-  sessionHeader: string;
-  /** Header carrying the user's public key. */
-  publicKeyHeader: string;
-  /**
-   * Header carrying the request's `appId` on authenticated routes (logout,
-   * user-data, import-wallet) so session lookups are scoped to the right app
-   * (v0.4.0). Default "ttc-app-id". When absent, the server falls back to
-   * config.appId (single-app deployments need not send it).
-   */
-  appIdHeader: string;
   /** TTL applied to issued session tokens, in seconds. Default 14400 (4h) — a leaked
    *  bearer token dies sooner. Each new login also revokes the prior token. */
   sessionTtlSeconds: number;
@@ -188,9 +196,6 @@ export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
   appId: "ttc", // override per-deployment for cross-app key isolation (see AuthConfig.appId)
   securityLevel: 2,
   challengeTtlSeconds: 300,
-  sessionHeader: "ttc-auth-token",
-  publicKeyHeader: "ttc-public-key",
-  appIdHeader: "ttc-app-id",
   sessionTtlSeconds: 14_400,
   bindSessionToUserAgent: false,
   trustProxyHeaders: false,
