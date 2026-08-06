@@ -1,7 +1,7 @@
 // Framework-agnostic auth route handlers built on the Web Request/Response API.
 // Next.js App Router consumes these directly via src/next.
 import type { StorageAdapter } from "../storage/adapter.js";
-import { KvAuthStore, type AuthStore, type RateLimitBucket } from "../storage/store.js";
+import { KvAuthStore, normalizeEmail, type AuthStore, type RateLimitBucket } from "../storage/store.js";
 import {
   resolveConfig,
   APP_ID_HEADER,
@@ -226,32 +226,54 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
           );
         })());
 
-  // Apply rate limiting; returns a 429 Response or null. We only gate on the
-  // client IP when we actually have a trustworthy one (trustProxyHeaders behind a
-  // real proxy); otherwise clientIp() is the constant "unknown" and gating on it
-  // would be a GLOBAL lockout vector — one abuser would lock out everyone — so we
-  // skip it and rely on the per-target bucket below (H5). Every rate-limited endpoint
-  // passes a per-target bucket, so nothing is left unprotected when the IP leg is
-  // skipped. Buckets are ENDPOINT-SCOPED so one endpoint's limit can never bleed into
-  // and lock a victim out of a DIFFERENT endpoint they need — e.g. failed logins must
-  // not exhaust the bucket the victim's /challenge uses.
+  // Apply rate limiting; returns a 429 Response or null.
+  //
+  // The IP leg runs only when we have a TRUSTWORTHY IP — which means both that the
+  // deployment trusts its proxy AND that this particular request actually carried the
+  // header. Either condition failing yields null, never a shared sentinel, because a
+  // shared sentinel is a global lockout: every caller lands in one bucket and normal
+  // traffic locks out the whole deployment at 10/60s.
+  //
+  // Buckets are ENDPOINT-SCOPED so one endpoint's limit can never bleed into and lock a
+  // victim out of a DIFFERENT endpoint they need — e.g. failed logins must not exhaust the
+  // bucket the victim's /challenge uses.
   //
   // The IP bucket carries no appId on purpose: it is global across endpoints and apps,
   // so one abusive IP is throttled everywhere at once.
   async function rateLimited(req: Request, bucket?: RateLimitBucket): Promise<Response | null> {
-    if (config.trustProxyHeaders) {
-      const ip = await checkRateLimit(
-        store,
-        { endpoint: "ip", identifier: clientIp(req, true, config.trustedProxyHops) },
-        config.rateLimit,
-      );
-      if (!ip.allowed) return error("Rate limit exceeded", 429);
+    // Gate on the IP only when clientIp() actually produced one. Keying on a "no IP"
+    // sentinel would put every caller in ONE bucket — one abuser, or merely normal traffic,
+    // then locks out the whole deployment at 10/60s. That happens whenever
+    // trustProxyHeaders is true but a request arrives without the proxy headers: direct
+    // origin access, a health check, a bypassed CDN, local dev.
+    const ip = requesterIp(req);
+    if (ip) {
+      const r = await checkRateLimit(store, { endpoint: "ip", identifier: ip }, config.rateLimit);
+      if (!r.allowed) return error("Rate limit exceeded", 429);
     }
     if (bucket) {
       const id = await checkRateLimit(store, bucket, config.rateLimit);
       if (!id.allowed) return error("Rate limit exceeded", 429);
     }
     return null;
+  }
+
+  /** The requester's IP, or null when this deployment cannot trust one. */
+  function requesterIp(req: Request): string | null {
+    return config.trustProxyHeaders ? clientIp(req, true, config.trustedProxyHops) : null;
+  }
+
+  /**
+   * Bucket key for a caller-supplied identifier.
+   *
+   * An email MUST be normalized the same way the lookup normalizes it. `getPublicKeyByEmail`
+   * applies normalizeEmail, so `Victim@x.com`, `victim@x.com`, and ` victim@x.com ` are ONE
+   * account — but keying the bucket on the raw string gave each spelling its own counter,
+   * dividing the per-account throttle by however many case permutations an attacker cares
+   * to type. A public key is base58 and case-SENSITIVE, so it is passed through untouched.
+   */
+  function bucketId(value: string): string {
+    return value.includes("@") ? normalizeEmail(value) : value;
   }
 
   // The deployment-wide ceiling on NEW ACCOUNTS. One bucket: no appId, no identifier.
@@ -399,9 +421,13 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       //
       // `/login` already gets this right for the same reason — it charges only on FAILED
       // verification, so a valid login is never throttled by an attacker's attempts.
+      // Keyed on whether THIS REQUEST yielded an IP — not merely on config.trustProxyHeaders.
+      // A deployment can trust its proxy and still receive a request without the header
+      // (direct origin hit, health check, bypassed CDN); gating on the flag alone dropped
+      // the target bucket for those requests and left challenge issuance unbounded.
       const identifier = body?.publicKey ?? body?.email;
       const targetBucket: RateLimitBucket | undefined =
-        !config.trustProxyHeaders && identifier ? { endpoint: "challenge", appId, identifier } : undefined;
+        !requesterIp(req) && identifier ? { endpoint: "challenge", appId, identifier: bucketId(identifier) } : undefined;
       const limited = await rateLimited(req, targetBucket);
       if (limited) return limited;
 
@@ -513,7 +539,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const limited = await rateLimited(req, {
         endpoint: "register",
         appId,
-        identifier: body.email ?? body.publicKey,
+        identifier: bucketId(body.email ?? body.publicKey),
       });
       if (limited) return limited;
 
@@ -618,7 +644,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         const token = await issueSession(store, user, config, issueFingerprint(req));
         return json(asResult(user, token));
       }
-      const limited = await rateLimited(req, { endpoint: "login", appId, identifier: body.email });
+      const limited = await rateLimited(req, { endpoint: "login", appId, identifier: bucketId(body.email) });
       if (limited) return limited;
       return error("Invalid credentials", 401);
     },

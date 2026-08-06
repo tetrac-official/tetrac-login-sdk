@@ -166,41 +166,76 @@ export interface SqliteLike {
 
 export function sqliteDriver(db: SqliteLike): SqlDriver {
   // better-sqlite3 is SYNCHRONOUS, so `db.transaction()` refuses an async callback. We drive
-  // BEGIN/COMMIT/ROLLBACK by hand instead. Safe precisely because it is synchronous: nothing
-  // else can interleave between our statements.
-  let depth = 0;
+  // BEGIN/COMMIT/ROLLBACK by hand instead.
+  //
+  // Serializes overlapping transaction() calls — see the comment on transaction() below.
+  let tail: Promise<unknown> = Promise.resolve();
+
+  async function query<T>(sql: string, params: readonly unknown[]): Promise<T[]> {
+    const stmt = db.prepare(sql);
+    // A statement with no result columns (e.g. a plain DELETE) throws on .all() in
+    // better-sqlite3, so fall back to .run().
+    try {
+      return stmt.all(...params) as T[];
+    } catch {
+      const info = stmt.run(...params);
+      return [{ affected: info.changes }] as unknown as T[];
+    }
+  }
+
+  // The driver handed to a transaction callback. Its `transaction()` JOINS the open
+  // transaction instead of starting or queueing one — SQLite has no nested BEGIN.
+  //
+  // Nesting is distinguished by WHICH OBJECT you hold, not by a mutable depth counter. That
+  // is the whole fix: a counter cannot tell "re-entered from inside this transaction" from
+  // "a different caller arrived while this one was suspended at an await", and treating the
+  // second as the first is what let one caller's writes land inside another's transaction.
+  const txDriver: SqlDriver = {
+    query,
+    transaction: (fn) => fn(txDriver),
+    close: undefined,
+  };
 
   const driver: SqlDriver = {
-    async query<T>(sql: string, params: readonly unknown[]): Promise<T[]> {
-      const stmt = db.prepare(sql);
-      // A statement with no result columns (e.g. a plain DELETE) throws on .all() in
-      // better-sqlite3, so fall back to .run().
-      try {
-        return stmt.all(...params) as T[];
-      } catch {
-        const info = stmt.run(...params);
-        return [{ affected: info.changes }] as unknown as T[];
-      }
-    },
+    query,
 
     async transaction<T>(fn: (tx: SqlDriver) => Promise<T>): Promise<T> {
-      if (depth > 0) return fn(driver); // already inside one; SQLite has no nested BEGIN
-      depth++;
-      db.exec("BEGIN IMMEDIATE"); // IMMEDIATE: take the write lock up front, no upgrade deadlock
-      try {
-        const out = await fn(driver);
-        db.exec("COMMIT");
-        return out;
-      } catch (err) {
+      // SERIALIZE, don't collapse.
+      //
+      // The old guard was `if (depth > 0) return fn(driver)`, justified by "better-sqlite3
+      // is synchronous, so nothing can interleave". But `await fn(...)` YIELDS: a second
+      // caller could start while the first was suspended, see depth > 0, and run its
+      // statements inside the FIRST caller's transaction with no BEGIN of its own. It then
+      // reported success while its writes were owned by someone else's transaction — and
+      // vanished if that one rolled back. Queueing gives every caller its own real
+      // BEGIN/COMMIT, which is what takeChallenge's atomicity depends on.
+      const run = async (): Promise<T> => {
+        // BEGIN throwing (locked database) must leave NO residue. It previously sat after a
+        // `depth++` that was outside the try, so one failure pinned depth above zero for the
+        // life of the process and every later transaction silently ran with none at all.
+        db.exec("BEGIN IMMEDIATE"); // IMMEDIATE: take the write lock up front, no upgrade deadlock
         try {
-          db.exec("ROLLBACK");
-        } catch {
-          /* already rolled back */
+          const out = await fn(txDriver);
+          db.exec("COMMIT");
+          return out;
+        } catch (err) {
+          try {
+            db.exec("ROLLBACK");
+          } catch {
+            /* already rolled back */
+          }
+          throw err;
         }
-        throw err;
-      } finally {
-        depth--;
-      }
+      };
+
+      // Chain onto whatever is in flight. Failures must not break the chain, so the tail
+      // swallows the previous outcome — each caller still receives its own.
+      const queued = tail.then(run, run);
+      tail = queued.then(
+        () => undefined,
+        () => undefined,
+      );
+      return queued;
     },
 
     close: db.close ? async () => void db.close!() : undefined,

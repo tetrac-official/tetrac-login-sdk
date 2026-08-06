@@ -29,6 +29,13 @@ function recordingDriver(log: Recorded[]): SqlDriver {
   const driver: SqlDriver = {
     async query<T>(sql: string, params: readonly unknown[]): Promise<T[]> {
       log.push({ sql, params });
+      // A rate-limit upsert MUST answer with a count. Returning [] for it would be a
+      // driver that cannot count, which the engine now refuses to treat as "allowed" —
+      // it throws rather than failing open. This fake stands in for a working engine, so
+      // it has to honour that part of the contract; the suite is about SQL TEXT and
+      // parameter binding, not about exercising the fail-closed path (see
+      // tests/rate-limit-fail-closed.test.ts for that).
+      if (/count/i.test(sql)) return [{ count: 1 }] as unknown as T[];
       return [] as T[];
     },
     transaction: (fn) => fn(driver),

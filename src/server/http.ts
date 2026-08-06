@@ -21,18 +21,30 @@ export function error(message: string, status = 400): Response {
 }
 
 /**
- * Best-effort client IP for rate limiting. Proxy headers are only honored when
- * the deployment explicitly trusts them (trustProxyHeaders); otherwise they are
- * ignored so a client can't spoof x-forwarded-for to dodge per-IP limits. When
- * untrusted we fall back to a stable "unknown" bucket.
+ * Best-effort client IP for rate limiting, or `null` when there isn't a trustworthy one.
+ *
+ * 🚨 `null`, NOT a `"unknown"` sentinel. The sentinel was a global-lockout vector: a
+ * deployment that set `trustProxyHeaders: true` but received a request WITHOUT the proxy
+ * headers (direct origin access, a health check, a bypassed CDN, local dev) put every
+ * caller into one shared `"unknown"` bucket. At the default 10/60s, one client — or just
+ * ordinary traffic — locked out the entire deployment. Returning `null` makes "no usable
+ * IP" impossible to mistake for an identity, so callers must decide explicitly.
+ *
+ * Proxy headers are only honored when the deployment explicitly trusts them
+ * (`trustProxyHeaders`); otherwise they are ignored, because a client can set
+ * `x-forwarded-for` freely and would otherwise get a fresh bucket per request.
  *
  * When trusted, the client IP is the rightmost x-forwarded-for entry AFTER
  * skipping `trustedProxyHops` hops. Proxies append to XFF on the right, so the
  * rightmost entries are set by infrastructure we control and are not
  * client-spoofable; the leftmost entry is attacker-controlled and never trusted.
  */
-export function clientIp(req: Request, trustProxyHeaders = false, trustedProxyHops = 0): string {
-  if (!trustProxyHeaders) return "unknown";
+export function clientIp(
+  req: Request,
+  trustProxyHeaders = false,
+  trustedProxyHops = 0,
+): string | null {
+  if (!trustProxyHeaders) return null;
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) {
     const parts = fwd
@@ -42,7 +54,7 @@ export function clientIp(req: Request, trustProxyHeaders = false, trustedProxyHo
     const idx = parts.length - 1 - trustedProxyHops;
     if (idx >= 0 && parts[idx]) return parts[idx]!;
   }
-  return req.headers.get("x-real-ip") ?? "unknown";
+  return req.headers.get("x-real-ip") ?? null;
 }
 
 /**

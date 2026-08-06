@@ -16,10 +16,10 @@ function challengeReq(body: unknown, headers: Record<string, string> = {}): Requ
 }
 
 describe("clientIp() — untrusted (default)", () => {
-  it("ignores x-forwarded-for / x-real-ip entirely and returns 'unknown'", () => {
+  it("ignores x-forwarded-for / x-real-ip entirely and returns null", () => {
     const r = reqWith({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "9.9.9.9" });
-    expect(clientIp(r, false)).toBe("unknown");
-    expect(clientIp(r)).toBe("unknown"); // default arg
+    expect(clientIp(r, false)).toBeNull();
+    expect(clientIp(r)).toBeNull(); // default arg
   });
 });
 
@@ -49,15 +49,15 @@ describe("clientIp() — trusted, rightmost-after-hops", () => {
   });
 
   it("misconfigured hops past the start of the chain falls back (no crash, not a client value)", () => {
-    // idx goes negative → fall through to x-real-ip, else "unknown". Never throws.
-    expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4" }), true, 5)).toBe("unknown");
+    // idx goes negative → fall through to x-real-ip, else null. Never throws.
+    expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4" }), true, 5)).toBeNull();
     expect(clientIp(reqWith({ "x-forwarded-for": "1.2.3.4", "x-real-ip": "7.7.7.7" }), true, 5)).toBe(
       "7.7.7.7",
     );
   });
 
   it("all-empty XFF falls back without crashing", () => {
-    expect(clientIp(reqWith({ "x-forwarded-for": "  ,  , " }), true, 0)).toBe("unknown");
+    expect(clientIp(reqWith({ "x-forwarded-for": "  ,  , " }), true, 0)).toBeNull();
   });
 });
 

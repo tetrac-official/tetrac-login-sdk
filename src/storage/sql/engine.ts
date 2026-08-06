@@ -35,6 +35,27 @@ export interface SqlAuthStoreOptions {
  *  clause references the target row by its BARE table name on all three engines. */
 const bare = (table: string): string => table.split(".").pop() as string;
 
+/**
+ * Coerce a rate-limit count, FAILING CLOSED.
+ *
+ * `Number(row?.count ?? 1)` read "the upsert returned nothing" as "first hit of a new
+ * window" and let the request through — a rate limiter that cannot count was granting
+ * permission, under exactly the conditions that broke it. The store contract requires the
+ * opposite: no answer means throw, and the caller 500s.
+ *
+ * `checkRateLimit` has no try/catch, so throwing here is what fail-closed looks like.
+ */
+function countOrFailClosed(raw: unknown): number {
+  const n = Number(raw);
+  if (raw == null || !Number.isFinite(n)) {
+    throw new Error(
+      "[tetrac] rate-limit upsert returned no usable count — refusing to treat an " +
+        "un-countable request as allowed.",
+    );
+  }
+  return n;
+}
+
 export class SqlAuthStore implements AuthStore {
   private readonly now: () => number;
 
@@ -310,7 +331,7 @@ export class SqlAuthStore implements AuthStore {
         `${insert} RETURNING count`,
         params,
       );
-      count = Number(rows[0]?.count ?? 1);
+      count = countOrFailClosed(rows[0]?.count);
     } else {
       // MySQL: upsert, then read back inside the same transaction. The row is locked by the
       // upsert, so the SELECT cannot observe another writer's interleaved increment.
@@ -321,7 +342,7 @@ export class SqlAuthStore implements AuthStore {
           `SELECT count FROM ${t.rateLimits} WHERE endpoint = ? AND app_id = ? AND identifier = ?`,
           [bucket.endpoint, appId, bucket.identifier],
         );
-        return Number(rows[0]?.count ?? 1);
+        return countOrFailClosed(rows[0]?.count);
       });
     }
 

@@ -124,7 +124,10 @@ CREATE INDEX IF NOT EXISTS ttc_rate_limits_expires_idx ON ${tables.rateLimits}  
 
       // 🚨 The highest-severity misconfiguration available, and it is INVISIBLE from the
       // app side — everything works perfectly while the table is served to the internet.
-      if (schema === "public" && !opts.allowPublicSchema) {
+      // Case-FOLDED, not an exact match. Postgres lowercases unquoted identifiers, so
+      // `PUBLIC`, `Public`, and `pUbLiC` all resolve to the same world-readable schema an
+      // exact `=== "public"` waved straight through.
+      if (schema.trim().toLowerCase() === "public" && !opts.allowPublicSchema) {
         issues.push({
           level: "error",
           code: "public_schema",
