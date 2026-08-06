@@ -85,7 +85,8 @@ export async function verifySession(
 ): Promise<UserData | null> {
   if (!token || !publicKey) return null;
   // The store never sees the raw token; it is hashed here, on the way in.
-  const session = await store.getSession(appId, hashSessionToken(token));
+  const tokenHash = hashSessionToken(token);
+  const session = await store.getSession(appId, tokenHash);
   if (!session) return null;
   if (session.publicKey !== publicKey) return null;
   if (
@@ -94,7 +95,26 @@ export async function verifySession(
   ) {
     return null;
   }
-  return store.getUser(appId, publicKey);
+  const user = await store.getUser(appId, publicKey);
+  if (!user) return null;
+  // THE RECORD'S POINTER IS THE AUTHORITY, not the mere existence of a session key.
+  //
+  // "One active session" was enforced only by issueSession deleting the previous session
+  // key, which works when logins are sequential and fails when they overlap: two logins
+  // read the same `authTokenHash` off their own snapshots, both delete that same
+  // already-gone key, and neither deletes the other's. Both session keys stay live while
+  // the record names one of them — so the login that LOST the pointer race kept a fully
+  // working token that no later login and no logout could reach, because nothing pointed
+  // at it any more. It survived to TTL.
+  //
+  // Checking the pointer here closes it without a CAS: the race loser is rejected on its
+  // next request no matter what is left in the session store. It also fails closed if
+  // setSessionPointer ever fails after putSession — an orphaned key is dead, not live.
+  //
+  // Plain !== is correct: authTokenHash is a SHA-256 digest of a value the caller already
+  // presented, not a secret to be guessed, so there is nothing to leak by timing.
+  if (user.authTokenHash !== tokenHash) return null;
+  return user;
 }
 
 /** Revoke a session given its RAW token (as presented in the request header). */

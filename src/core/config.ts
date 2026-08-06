@@ -119,8 +119,9 @@ export interface AuthConfig {
   securityLevel: SecurityLevel;
   /** TTL for wallet-login challenges, in seconds. */
   challengeTtlSeconds: number;
-  /** TTL applied to issued session tokens, in seconds. Default 14400 (4h) — a leaked
-   *  bearer token dies sooner. Each new login also revokes the prior token. */
+  /** TTL applied to issued session tokens, in seconds. Default 86400 (24h). The TTL is the
+   *  backstop, not the primary revocation path: each new login revokes the prior token, so
+   *  a leaked bearer token dies at the owner's next sign-in rather than at expiry. */
   sessionTtlSeconds: number;
   /**
    * Optionally bind each session to a coarse fingerprint of the request `User-Agent`
@@ -196,7 +197,7 @@ export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
   appId: "ttc", // override per-deployment for cross-app key isolation (see AuthConfig.appId)
   securityLevel: 2,
   challengeTtlSeconds: 300,
-  sessionTtlSeconds: 14_400,
+  sessionTtlSeconds: 86_400,
   bindSessionToUserAgent: false,
   trustProxyHeaders: false,
   trustedProxyHops: 0,
