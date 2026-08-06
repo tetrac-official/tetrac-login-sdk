@@ -302,13 +302,19 @@ export class AuthClient {
   /** Log in with email + passkey. Re-derives the app key to unlock wallets. */
   async loginWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
     // 1) Fetch a single-use challenge + the account's pinned PBKDF2 iteration count.
-    const { challenge, pbkdf2Iterations } = await this.post<{ challenge: string; pbkdf2Iterations?: number }>(
+    const { challenge, pbkdf2Iterations } = await this.post<{ challenge: string; pbkdf2Iterations: number }>(
       "challenge",
       { email: params.email },
     );
-    // 2) Re-derive the appKey (legacy accounts: 100k fallback) and sign the challenge
-    //    with the derived auth keypair — the server stores only the matching public key.
-    const iterations = pbkdf2Iterations ?? 100_000;
+    // 2) Re-derive the appKey with the count the SERVER pinned, and sign the challenge with
+    //    the derived auth keypair — the server stores only the matching public key.
+    //
+    //    No local fallback. /challenge always returns a count now (it has to: an omitted
+    //    field distinguished a real account from the dummy issued for an unknown email, so
+    //    the omission was an enumeration oracle). Guessing a count here would silently
+    //    derive the wrong app key and leave the wallets undecryptable, which is worse than
+    //    failing, and the server is the only side that knows what the account was pinned to.
+    const iterations = pbkdf2Iterations;
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const signature = signAuthChallenge(appKey, challenge);
     const result = await this.post<AuthResult>("login", { email: params.email, signature, challenge });

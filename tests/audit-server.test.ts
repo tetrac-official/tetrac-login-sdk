@@ -80,11 +80,13 @@ describe("challenge UNKNOWN-email rate limiting (WI-4 enumeration hardening)", (
       storage: new MemoryAdapter(),
       config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
-    // Unknown email resolves to no publicKey ⇒ 400, but the request is now rate-limited
-    // (the limit moved BEFORE resolution, so unknown emails no longer escape it).
+    // An unknown email now answers 200 with an unstored DUMMY challenge rather than 400 —
+    // the 400 was an account-existence oracle (L-3). What this case pins is unchanged: the
+    // limit runs BEFORE resolution, so probes for unknown emails are charged rather than
+    // escaping the counter entirely.
     const probe = () => h.challenge(req({ email: "ghost@example.com" }));
-    expect((await probe()).status).toBe(400);
-    expect((await probe()).status).toBe(400);
+    expect((await probe()).status).toBe(200);
+    expect((await probe()).status).toBe(200);
     expect((await probe()).status).toBe(429); // 3rd same-email probe throttled
   });
 
@@ -97,9 +99,11 @@ describe("challenge UNKNOWN-email rate limiting (WI-4 enumeration hardening)", (
         rateLimit: { maxAttempts: 2, windowSeconds: 60 },
       },
     });
+    // This is the case requester-keying exists for: DIFFERENT emails, one source. Per-target
+    // keying gave each probed address its own counter and never saw the sweep at all.
     const probe = (email: string) => h.challenge(req({ email }, { "x-forwarded-for": "1.2.3.4" }));
-    expect((await probe("a@ghost.com")).status).toBe(400);
-    expect((await probe("b@ghost.com")).status).toBe(400);
+    expect((await probe("a@ghost.com")).status).toBe(200);
+    expect((await probe("b@ghost.com")).status).toBe(200);
     expect((await probe("c@ghost.com")).status).toBe(429); // IP bucket curbs enumeration
   });
 });

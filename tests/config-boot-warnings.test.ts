@@ -41,7 +41,11 @@ describe("H-2c — unrestricted appId is announced at boot", () => {
   });
 
   it("stays silent once allowedAppIds is set", () => {
-    const ws = boot({ appId: "quiet.example", allowedAppIds: ["quiet.example"] });
+    const ws = boot({
+      appId: "quiet.example",
+      allowedAppIds: ["quiet.example"],
+      trustProxyHeaders: true,
+    });
     expect(codes(ws)).not.toContain("unrestricted_app_id");
     expect(ws).toHaveLength(0);
   });
@@ -59,9 +63,9 @@ describe("H-2c — unrestricted appId is announced at boot", () => {
   // `default_app_id:ttc` — a second test booting on the default would be deduped and see
   // nothing. So both conditions are asserted from a single fully-default boot, which is
   // also the configuration a first-run integrator actually has.
-  it("🚨 a fully default config warns on BOTH counts", () => {
+  it("🚨 a fully default config warns on EVERY count", () => {
     const ws = boot({});
-    expect(codes(ws)).toEqual(["default_app_id", "unrestricted_app_id"]);
+    expect(codes(ws)).toEqual(["default_app_id", "no_requester_identity", "unrestricted_app_id"]);
     // The server counterpart to AuthClient's default-appId warning, which had no
     // server-side equivalent even though the server is where the namespace is created.
     expect(ws.find((w) => w.code === "default_app_id")!.message).toMatch(/NO cross-app key/);

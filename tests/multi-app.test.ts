@@ -75,12 +75,38 @@ describe("email accounts: same email isolated per app", () => {
     expect(ok.status).toBe(200);
     expect((await ok.json()).publicKey).toBe(PK_A);
 
-    // App B has no account for this email: it can't even resolve the identity to issue
-    // a challenge, so the flow never reaches a 200. (No cross-app record is visible.)
+    // App B has no account for this email. /challenge still answers 200 with a well-formed
+    // DUMMY (L-3: a 400 here was an account-existence oracle, and per-app keying made it a
+    // cross-tenant one — "is this address registered on app A?" asked from app B). What
+    // must hold is that the dummy is worthless: it was never stored, so login cannot
+    // complete, and no cross-app record is visible in the response.
     const bChallenge = await h.challenge(req({ appId: APP_B, email }));
-    expect(bChallenge.status).toBe(400); // unknown email under app B → no challenge
+    expect(bChallenge.status).toBe(200);
+    const bBody = await bChallenge.json();
+    expect(bBody.challenge).toMatch(/^[0-9a-f]{64}$/);
+    expect(bBody).not.toHaveProperty("publicKey");
+
     const bad = await loginEmail(h, { appId: APP_B, email, appKey: APP_KEY });
     expect(bad.status).not.toBe(200);
+  });
+
+  it("🚨 the per-app challenge response does not reveal that the email exists elsewhere", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
+    const email = "oracle@example.com";
+    await registerEmail(h, { appId: APP_A, email, appKey: APP_KEY, publicKey: PK_A });
+
+    // Registered on A, absent from B, and absent everywhere. From app B's vantage point
+    // the first two must be indistinguishable, or the endpoint answers "which tenants does
+    // this address use?" to anyone who can POST.
+    const onB = await h.challenge(req({ appId: APP_B, email }));
+    const neverSeen = await h.challenge(req({ appId: APP_B, email: "nobody@example.com" }));
+
+    expect(onB.status).toBe(neverSeen.status);
+    const [a, b] = [await onB.json(), await neverSeen.json()];
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+    expect(a.pbkdf2Iterations).toBe(b.pbkdf2Iterations);
+    expect(a.challenge).not.toBe(b.challenge); // fresh each time, like a real one
   });
 
   it("pubKey records are stored under disjoint app-scoped keys", async () => {

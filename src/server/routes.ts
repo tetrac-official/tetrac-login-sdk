@@ -7,6 +7,7 @@ import {
   APP_ID_HEADER,
   AUTH_TOKEN_HEADER,
   PUBLIC_KEY_HEADER,
+  PBKDF2_ITERATIONS,
   type AuthConfig,
   type DeepPartial,
 } from "../core/config.js";
@@ -19,7 +20,7 @@ import {
 } from "../core/types.js";
 import { PublicKey } from "@solana/web3.js";
 import { json, error, clientIp, readJson } from "./http.js";
-import { hashUserAgent } from "../core/crypto.js";
+import { hashUserAgent, generateChallenge } from "../core/crypto.js";
 import { checkRateLimit } from "./rateLimit.js";
 import { issueChallenge, consumeChallenge } from "./challenge.js";
 import { verifySolanaSignature, verifyAuthSignature } from "./signature.js";
@@ -115,6 +116,25 @@ function checkConfig(config: AuthConfig, sink?: (issue: ConfigWarning) => void):
           `Set a unique, stable id per deployment (your domain works well). Set it ONCE: it is ` +
           `app-key derivation input, so changing it later re-derives every key and existing ` +
           `encrypted wallets stop decrypting.`,
+      },
+      sink,
+    );
+  }
+  if (!config.trustProxyHeaders) {
+    warnOnce(
+      config.appId,
+      {
+        code: "no_requester_identity",
+        message:
+          `config.trustProxyHeaders is false, so there is no trustworthy client IP and the ` +
+          `per-IP rate limit is SKIPPED entirely. Two consequences: anti-abuse buckets fall ` +
+          `back to keying on the caller-supplied email/publicKey, so an attacker who names an ` +
+          `account can spend that account's own /challenge budget and hold it out of login; ` +
+          `and because each probed identifier gets its own counter, a horizontal sweep of N ` +
+          `addresses is N unthrottled requests. Behind a known proxy (Vercel, Cloudflare, an ` +
+          `ingress you control) set trustProxyHeaders: true and trustedProxyHops to the ` +
+          `number of hops you operate. Do NOT set it when the app is directly reachable — ` +
+          `x-forwarded-for is caller-supplied there, and trusting it is worse than this.`,
       },
       sink,
     );
@@ -359,34 +379,91 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         const e = validateEmail(body.email);
         if (e) return error(e);
       }
-      // Rate-limit BEFORE resolving/issuing, keyed on the client-supplied identifier
-      // (publicKey for the wallet flow, email for the email/biometric flow). Doing it
-      // here — rather than after resolution — means the IP bucket (when trusted) and
-      // the per-target bucket also throttle probes for UNKNOWN emails; otherwise an
-      // unknown email escapes limiting entirely and the 200-vs-400 response becomes an
-      // unbounded enumeration oracle. Per-target keying still avoids the global "unknown"
-      // lockout (H5); the residual per-target DoS is the developer's edge to own.
+      // Rate-limit BEFORE resolving/issuing, so a probe for an UNKNOWN email is charged
+      // too — otherwise it escapes limiting entirely.
+      //
+      // WHO is charged depends on whether we can identify the requester. Issuing a
+      // challenge is not a failure event and grants no capability, so charging the TARGET
+      // is backwards: the attacker names the victim, and the victim's own /challenge then
+      // 429s. That is a complete authentication denial by an unauthenticated caller, held
+      // open indefinitely at the limit rate.
+      //
+      //   trustworthy IP  ->  charge the REQUESTER, and DO NOT touch the target bucket.
+      //                       The abuser exhausts their own counter; the victim is
+      //                       unaffected, and a horizontal sweep is finally visible to a
+      //                       control that sees BREADTH rather than depth-per-identifier.
+      //   no IP           ->  fall back to the target bucket. It is the only key we have,
+      //                       and dropping it would leave challenge issuance unbounded.
+      //                       Keying globally instead is worse: one abuser would lock out
+      //                       every account at once.
+      //
+      // `/login` already gets this right for the same reason — it charges only on FAILED
+      // verification, so a valid login is never throttled by an attacker's attempts.
       const identifier = body?.publicKey ?? body?.email;
-      if (identifier) {
-        const limited = await rateLimited(req, { endpoint: "challenge", appId, identifier });
-        if (limited) return limited;
-      }
+      const targetBucket: RateLimitBucket | undefined =
+        !config.trustProxyHeaders && identifier ? { endpoint: "challenge", appId, identifier } : undefined;
+      const limited = await rateLimited(req, targetBucket);
+      if (limited) return limited;
+
       // Wallet flow passes publicKey; email/biometric flow passes the account email
       // (or internal biometric id), which we resolve to the identity publicKey.
       let publicKey = body?.publicKey ?? null;
       if (!publicKey && body?.email) {
         publicKey = await resolvePublicKeyByEmail(store, appId, body.email);
       }
-      if (!publicKey) return error("publicKey or email required");
+      // Neither identifier supplied — a malformed request, not a probe. Still a 400.
+      if (!publicKey && !body?.email) return error("publicKey or email required");
+
+      if (!publicKey) {
+        // UNKNOWN EMAIL — answer in the shape a real account would, and store nothing.
+        //
+        // This branch used to return 400 while a registered address returned 200, which is
+        // a clean account-existence oracle for anyone who can POST. Since the per-target
+        // bucket gives each probed address its own counter, sweeping N addresses cost N
+        // unthrottled requests: the throttle could see depth on one identifier but never
+        // breadth across many.
+        //
+        // The dummy is safe to hand out precisely because a challenge is not a secret: it
+        // is server-issued, public to whoever asked, and worthless without a signature from
+        // an authPublicKey no record holds. Never persisting it means /login fails at
+        // signature verification exactly as a wrong passkey does, so the two are
+        // indistinguishable there too.
+        //
+        // `pbkdf2Iterations` must carry the deployment's OWN default rather than being
+        // omitted: an absent field would re-open the oracle one key over, and the default
+        // is the modal value across real accounts anyway. `offchainEnvelope` is genuinely
+        // absent for every email account, so omitting it here matches.
+        //
+        // NOT constant-time: the real path performs storage work this one skips, so a
+        // determined attacker can still separate them by latency. This closes the trivial
+        // read, not the side channel.
+        return json({
+          challenge: generateChallenge(),
+          pbkdf2Iterations: PBKDF2_ITERATIONS[config.securityLevel],
+        });
+      }
+
       const challenge = await issueChallenge(store, appId, publicKey, config);
       // Accounts also need their PINNED derivation parameters back before they can sign:
       // the PBKDF2 iteration count (email) and the off-chain envelope (hardware wallet).
       // Both are app-key derivation input and neither is secret. Re-deriving with a
       // different value silently yields a different key and undecryptable wallets.
       const user = await getUserByPublicKey(store, appId, publicKey);
+      // ALWAYS emit a number — never omit the field.
+      //
+      // An omitted key is itself the oracle: a record with no pinned count answered
+      // `{challenge}` while the unknown-email dummy answers `{challenge, pbkdf2Iterations}`,
+      // so closing the status-code tell would just have moved it one key over. The server
+      // is now the single authority for the count, which also removes the client's old
+      // guess-100k-when-absent fallback — a guess only ever right by luck.
+      //
+      // Registration pins a count for every email account, so this default is reached only
+      // by a record written without one; the deployment's configured level is the closest
+      // thing to a correct answer for it. Wallet and biometric accounts carry no count and
+      // ignore the field entirely — they derive from a signature or a PRF, not PBKDF2.
       return json({
         challenge,
-        pbkdf2Iterations: user?.pbkdf2Iterations,
+        pbkdf2Iterations: user?.pbkdf2Iterations ?? PBKDF2_ITERATIONS[config.securityLevel],
         offchainEnvelope: user?.offchainEnvelope,
       });
     },
