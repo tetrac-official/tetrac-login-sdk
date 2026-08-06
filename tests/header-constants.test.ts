@@ -86,4 +86,33 @@ describe("wire header names are shared constants", () => {
     expect(Object.keys(sent).sort()).toEqual([AUTH_TOKEN_HEADER, PUBLIC_KEY_HEADER].sort());
     clearSession();
   });
+
+  it("🚨 L-4: authenticated responses are never cacheable", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { origin: ORIGIN } });
+    const publicKey = Keypair.generate().publicKey.toBase58();
+    const reg = await registerEmail(h, {
+      publicKey,
+      email: "cache@example.com",
+      appKey: APP_KEY,
+      wallets: [],
+    });
+    const { authToken } = await reg.json();
+
+    // /user-data returns the full record, encrypted wallet blobs included. With no cache
+    // directives the response is heuristically cacheable, so a shared cache keyed on URL
+    // alone could hand one user's record to another.
+    const res = await h.userData(
+      new Request("http://localhost/api/auth/user-data", {
+        headers: { [AUTH_TOKEN_HEADER]: authToken, [PUBLIC_KEY_HEADER]: publicKey },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+
+    // Errors too — they are built by the same helper.
+    expect((await h.userData(new Request("http://localhost/x"))).headers.get("cache-control")).toBe(
+      "no-store",
+    );
+  });
 });

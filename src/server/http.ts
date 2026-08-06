@@ -1,9 +1,18 @@
 // Small Web-standard (Request/Response) helpers shared by the route handlers.
 
+/**
+ * A JSON response, never cacheable.
+ *
+ * `no-store` is not optional here. `GET /user-data` returns the full user record —
+ * including every encrypted wallet blob — and a response carrying NO cache directives is
+ * heuristically cacheable, so any shared cache keyed on URL alone could serve one user's
+ * record to another. Auth is header-based rather than cookie-based, so Next's own route
+ * cache does not apply and this is hardening rather than a live bug; it is also one line.
+ */
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", "cache-control": "no-store" },
   });
 }
 
