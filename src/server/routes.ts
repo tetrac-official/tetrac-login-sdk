@@ -3,7 +3,13 @@
 import type { StorageAdapter } from "../storage/adapter.js";
 import { KvAuthStore, type AuthStore, type RateLimitBucket } from "../storage/store.js";
 import { resolveConfig, type AuthConfig, type DeepPartial } from "../core/config.js";
-import { WALLET_SLOTS, type AuthResult, type EncryptedWallet, type UserData } from "../core/types.js";
+import {
+  WALLET_SLOTS,
+  type AuthResult,
+  type EncryptedWallet,
+  type OffchainEnvelope,
+  type UserData,
+} from "../core/types.js";
 import { PublicKey } from "@solana/web3.js";
 import { json, error, clientIp, readJson } from "./http.js";
 import { hashUserAgent } from "../core/crypto.js";
@@ -95,6 +101,11 @@ function validateAuthPublicKey(key: string): string | null {
 // resistance. Floor = the documented level-1 (legacy) minimum; ceiling = level-3.
 const PBKDF2_MIN = 100_000;
 const PBKDF2_MAX = 1_000_000;
+/** The off-chain envelope pinned on a hardware account. Derivation input — validate it. */
+function validEnvelope(v: unknown): v is OffchainEnvelope {
+  return v === "legacy" || v === "v0";
+}
+
 function validIterations(n: unknown): boolean {
   return typeof n === "number" && Number.isInteger(n) && n >= PBKDF2_MIN && n <= PBKDF2_MAX;
 }
@@ -285,10 +296,16 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       }
       if (!publicKey) return error("publicKey or email required");
       const challenge = await issueChallenge(store, appId, publicKey, config);
-      // Email accounts also need their pinned PBKDF2 iteration count to re-derive the
-      // appKey (and thus the auth keypair) before signing — public, not secret.
-      const user = body?.email ? await getUserByPublicKey(store, appId, publicKey) : null;
-      return json({ challenge, pbkdf2Iterations: user?.pbkdf2Iterations });
+      // Accounts also need their PINNED derivation parameters back before they can sign:
+      // the PBKDF2 iteration count (email) and the off-chain envelope (hardware wallet).
+      // Both are app-key derivation input and neither is secret. Re-deriving with a
+      // different value silently yields a different key and undecryptable wallets.
+      const user = await getUserByPublicKey(store, appId, publicKey);
+      return json({
+        challenge,
+        pbkdf2Iterations: user?.pbkdf2Iterations,
+        offchainEnvelope: user?.offchainEnvelope,
+      });
     },
 
     async register(req) {
@@ -302,6 +319,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         signature?: string;
         challenge?: string;
         pbkdf2Iterations?: number;
+        offchainEnvelope?: OffchainEnvelope;
       }>(req);
       if (!body?.publicKey) return error("publicKey required");
       const appId = body.appId ?? config.appId;
@@ -327,6 +345,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // Absent is fine — legacy/wallet accounts don't pin one.
       if (body.pbkdf2Iterations != null && !validIterations(body.pbkdf2Iterations)) {
         return error("Invalid pbkdf2Iterations", 400);
+      }
+      if (body.offchainEnvelope != null && !validEnvelope(body.offchainEnvelope)) {
+        return error("Invalid offchainEnvelope", 400);
       }
 
       const limited = await rateLimited(req, {
@@ -386,6 +407,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         // pinned so the same count is used on every future login/unlock. Undefined for
         // wallet/biometric (they don't use PBKDF2).
         pbkdf2Iterations: body.pbkdf2Iterations,
+        // Hardware wallets pin the off-chain layout they signed under; absent otherwise.
+        offchainEnvelope: body.offchainEnvelope,
         // Real timestamp is stamped by the runtime; tests can inject via storage.
         createdAt: Date.now(),
       };
@@ -491,6 +514,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         signature?: string;
         challenge?: string;
         wallets?: EncryptedWallet[];
+        offchainEnvelope?: OffchainEnvelope;
       }>(req);
       if (!body?.publicKey || !body.signature || !body.challenge) {
         return error("publicKey, signature and challenge required");
@@ -500,6 +524,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (appErr) return error(appErr);
       const pkErr = validatePublicKey(body.publicKey);
       if (pkErr) return error(pkErr);
+      if (body.offchainEnvelope != null && !validEnvelope(body.offchainEnvelope)) {
+        return error("Invalid offchainEnvelope", 400);
+      }
       let wallets: EncryptedWallet[] = [];
       if (body.wallets !== undefined) {
         const r = readWallets(body.wallets);
@@ -537,6 +564,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
           publicKey: body.publicKey,
           authMethod: "wallet",
           wallets,
+          offchainEnvelope: body.offchainEnvelope,
           createdAt: Date.now(),
         };
         await persistUser(store, user);

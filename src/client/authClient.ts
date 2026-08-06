@@ -4,7 +4,20 @@ import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } f
 import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
 import { walletLoginMessage, walletAppKeyMessage, walletAppKeyMessageHw } from "../core/index.js";
-import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
+import type { AuthResult, EncryptedWallet, OffchainEnvelope, UserData, WalletRole } from "../core/types.js";
+
+/**
+ * A connected wallet's message signer.
+ *
+ * The options bag is HARDWARE-ONLY and safe to ignore: software wallets (Phantom,
+ * Solflare, a wallet-adapter) take one argument and always have. A Ledger signer honours
+ * `envelope` to pin the off-chain layout for app-key derivation, and reports the layout it
+ * settled on via `onEnvelope` at registration. See OffchainEnvelope for why that matters.
+ */
+export type WalletSignMessage = (
+  message: Uint8Array,
+  opts?: { envelope?: OffchainEnvelope; onEnvelope?: (e: OffchainEnvelope) => void },
+) => Promise<Uint8Array>;
 import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
 import {
   setSession,
@@ -14,6 +27,7 @@ import {
   getAuthToken,
   getEmail,
   getPbkdf2Iterations,
+  getOffchainEnvelope,
   configureVault,
 } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
@@ -46,7 +60,7 @@ import {
 export type ReauthCredentials =
   | { passkey: string }
   | {
-      signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+      signMessage: WalletSignMessage;
       /** Hardware (Ledger) account: re-derive the app key from the newline-free message. */
       hardwareWallet?: boolean;
     }
@@ -167,7 +181,14 @@ export class AuthClient {
       const keyMessage = creds.hardwareWallet
         ? walletAppKeyMessageHw(this.config.appId, this.clientOrigin())
         : walletAppKeyMessage(this.config.appId, this.clientOrigin());
-      const sig = await creds.signMessage(new TextEncoder().encode(keyMessage));
+      // Pin the layout this account registered under. Re-auth derives the SAME app key, so
+      // letting it cascade here would hand back a different key the moment a firmware
+      // update flips the device — and unlock() without `validateWith` arms it silently.
+      const pinned = creds.hardwareWallet ? getOffchainEnvelope() : null;
+      const sig = await creds.signMessage(
+        new TextEncoder().encode(keyMessage),
+        pinned ? { envelope: pinned as OffchainEnvelope } : undefined,
+      );
       return deriveAppKeyFromSignature(bytesToHex(sig));
     }
     if ("registration" in creds) {
@@ -306,33 +327,54 @@ export class AuthClient {
    */
   private async walletHandshake(
     publicKey: string,
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>,
+    signMessage: WalletSignMessage,
     hardwareWallet = false,
-  ): Promise<{ appKey: string; signatureHex: string; challenge: string }> {
-    const { challenge } = await this.post<{ challenge: string }>("challenge", { publicKey });
+  ): Promise<{
+    appKey: string;
+    signatureHex: string;
+    challenge: string;
+    offchainEnvelope?: OffchainEnvelope;
+  }> {
+    // /challenge also returns the account's PINNED off-chain envelope, when it has one —
+    // the hardware counterpart of pbkdf2Iterations, and app-key derivation input just the
+    // same. Absent for a wallet registering for the first time.
+    const { challenge, offchainEnvelope: pinned } = await this.post<{
+      challenge: string;
+      offchainEnvelope?: OffchainEnvelope;
+    }>("challenge", { publicKey });
     const enc = new TextEncoder();
+    // The AUTH signature may cascade freely: it is challenge-bound and stateless, so which
+    // envelope produced it does not matter — the server accepts any of them.
     const authSig = await signMessage(enc.encode(walletLoginMessage(challenge, this.clientOrigin())));
     // Hardware wallets derive the key from the newline-free message so the device
     // can clear-sign it (a Ledger rejects newline content / forces blind signing).
     const keyMessage = hardwareWallet
       ? walletAppKeyMessageHw(this.config.appId, this.clientOrigin())
       : walletAppKeyMessage(this.config.appId, this.clientOrigin());
-    const keySig = await signMessage(enc.encode(keyMessage));
+
+    // The KEY signature must NOT cascade. Pin the recorded layout; on first registration
+    // there is none yet, so let it cascade once and capture what the device chose.
+    let used: OffchainEnvelope | undefined = pinned;
+    const keySig = await signMessage(
+      enc.encode(keyMessage),
+      hardwareWallet ? { envelope: pinned, onEnvelope: (e) => (used = e) } : undefined,
+    );
     return {
       appKey: deriveAppKeyFromSignature(bytesToHex(keySig)),
       signatureHex: bytesToHex(authSig),
       challenge,
+      offchainEnvelope: hardwareWallet ? used : undefined,
     };
   }
 
   /** Log in an already-registered Web3 wallet. */
   async loginWithWallet(params: {
     publicKey: string;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    signMessage: WalletSignMessage;
     /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
     hardwareWallet?: boolean;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+    const { appKey, signatureHex, challenge, offchainEnvelope } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
       params.hardwareWallet,
@@ -342,7 +384,7 @@ export class AuthClient {
       signature: signatureHex,
       challenge,
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, offchainEnvelope });
     return result;
   }
 
@@ -353,11 +395,11 @@ export class AuthClient {
    */
   async connectWallet(params: {
     publicKey: string;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    signMessage: WalletSignMessage;
     /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
     hardwareWallet?: boolean;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+    const { appKey, signatureHex, challenge, offchainEnvelope } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
       params.hardwareWallet,
@@ -370,19 +412,21 @@ export class AuthClient {
       signature: signatureHex,
       challenge,
       wallets: flattenBundle(bundle),
+      // Pin the layout this device signed under, so future derivations do not cascade.
+      offchainEnvelope,
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, offchainEnvelope });
     return result;
   }
 
   /** Register a Web3 wallet, generating any additional signing wallets client-side. */
   async registerWithWallet(params: {
     publicKey: string;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    signMessage: WalletSignMessage;
     /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
     hardwareWallet?: boolean;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+    const { appKey, signatureHex, challenge, offchainEnvelope } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
       params.hardwareWallet,
@@ -396,8 +440,10 @@ export class AuthClient {
       wallets: flattenBundle(bundle),
       signature: signatureHex,
       challenge,
+      // Pin the layout this device signed under, so future derivations do not cascade.
+      offchainEnvelope,
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, offchainEnvelope });
     return result;
   }
 

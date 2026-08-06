@@ -14,6 +14,14 @@ export type Chain = "solana" | "evm";
  */
 export type WalletRole = "funds" | "signing";
 
+/**
+ * The off-chain envelope this account's hardware wallet signs under. Recorded at
+ * registration and re-used for every later derivation — see OffchainEnvelope. Absent for
+ * software wallets and for email/biometric accounts, which never sign an envelope.
+ */
+import type { OffchainEnvelope } from "./offchainMessage.js";
+export type { OffchainEnvelope };
+
 /** Authentication method used to establish the session. */
 export type AuthMethod = "email" | "wallet" | "biometric";
 
@@ -86,6 +94,20 @@ export interface UserData {
   createdAt: number;
   /** PBKDF2 iteration count used to derive the app key (email users). Pinned at registration. */
   pbkdf2Iterations?: number;
+  /**
+   * The off-chain envelope this HARDWARE wallet signed under at registration. Pinned for
+   * the same reason as pbkdf2Iterations: it is app-key derivation input, and re-deriving
+   * with a different one yields a different key.
+   *
+   * Which envelope a Ledger accepts is a property of its FIRMWARE, discovered by cascade
+   * at signing time. Without this, a firmware update flips the device to the other layout,
+   * the same wallet signing the same message produces a different signature, and every
+   * stored wallet stops decrypting — while login keeps working, because the server accepts
+   * either envelope. Not secret; returned by /challenge so the client can pin it.
+   *
+   * Absent for software wallets and email/biometric accounts, which sign no envelope.
+   */
+  offchainEnvelope?: OffchainEnvelope;
   /**
    * SHA-256 of the user's CURRENT session token (v0.5.0) — never the token itself.
    * Used solely to revoke the previous session on re-login (the digest IS the session

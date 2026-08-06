@@ -166,6 +166,35 @@ export function encodeOffchainMessage(
 }
 
 /**
+ * Which off-chain envelope layout a signature was produced over.
+ *
+ * 🚨 This is APP-KEY DERIVATION INPUT for hardware accounts, and must be pinned per
+ * account. A Web3 app key is `SHA-256(signature)` over a fixed message, and which envelope
+ * the device accepts is a property of its FIRMWARE, discovered by cascade at signing time.
+ * If a firmware update flips a device from `legacy` to `v0`, the same wallet signing the
+ * same message produces a DIFFERENT signature, hence a different app key, hence every
+ * stored wallet fails to decrypt — while login still succeeds, because the server accepts
+ * either envelope. There is no recovery path, so the layout used at registration is
+ * recorded on the account and re-used forever after.
+ */
+export type OffchainEnvelope = "legacy" | "v0";
+
+/** Encode `message` under ONE named layout — the pinned-derivation path (no cascade). */
+export function encodeOffchainMessageAs(
+  envelope: OffchainEnvelope,
+  message: Uint8Array | string,
+  signerPublicKey: Uint8Array,
+  options: EncodeOffchainMessageOptions = {},
+): Uint8Array {
+  return envelope === "legacy"
+    ? encodeOffchainMessageLegacy(message, options)
+    : encodeOffchainMessage(message, signerPublicKey, options);
+}
+
+/** The layouts in the order a signer should try them, paired with their names. */
+export const OFFCHAIN_ENVELOPES: readonly OffchainEnvelope[] = ["legacy", "v0"];
+
+/**
  * Every off-chain envelope a Ledger might sign for `message`, in the order a
  * client should try them (legacy first — what most deployed apps accept; v0 for
  * newer firmware). A signer cascades over these (falling back when the device
