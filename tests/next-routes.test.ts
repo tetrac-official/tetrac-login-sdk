@@ -69,8 +69,10 @@ describe("createNextAuthRoutes — action dispatch", () => {
       "http://localhost/api/auth/search-wallet?publicKey=9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
     );
     const res = await GET(req, ctx(["search-wallet"]));
-    expect(res.status).toBe(404); // handler's "Wallet not found" (valid key, unregistered) — dispatch worked
-    expect((await res.json()).error).toMatch(/wallet not found/i);
+    // Reaching the HANDLER is what this asserts: a valid, unregistered key answers
+    // 200 { exists: false } — a successful search with no match, not a routing failure.
+    expect(res.status).toBe(200);
+    expect((await res.json()).exists).toBe(false);
   });
 
   it("rejects an unknown GET action with 400, not 404", async () => {
@@ -137,5 +139,52 @@ describe("createNextAuthRoutes — prototype-chain dispatch", () => {
     });
     const res = await POST(jreq("nope", {}), ctx(["nope"]));
     expect(res.status).toBe(422);
+  });
+});
+
+// The SDK never answers 404. In a web context it reads as "page not found", so it
+// misrepresents every case it was used for here: an unknown action segment (the route
+// exists — 400), a search with no match (the query ran — 200 { exists: false }), and a
+// verified wallet with no account yet (well-formed and authenticated — 422).
+describe("no endpoint answers 404", () => {
+  it("🚨 unknown actions, empty searches and unregistered wallets all avoid 404", async () => {
+    const { POST, GET, handlers } = routes();
+
+    // 1. Unknown action segment.
+    expect((await POST(jreq("nope", {}), ctx(["nope"]))).status).toBe(400);
+    expect((await GET(new Request("http://localhost/api/auth/nope"), ctx(["nope"]))).status).toBe(400);
+
+    // 2. A search that matches nothing.
+    const search = await handlers.searchWallet(
+      new Request(
+        "http://localhost/api/auth/search-wallet?publicKey=9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu",
+      ),
+    );
+    expect(search.status).toBe(200);
+    expect((await search.json()).exists).toBe(false);
+  });
+
+  it("🚨 a VERIFIED wallet with no account gets 422, not 404", async () => {
+    const { Keypair } = await import("@solana/web3.js");
+    const nacl = (await import("tweetnacl")).default;
+    const { walletLoginMessage } = await import("../src/core/index");
+    const { handlers } = routes();
+
+    const kp = Keypair.generate();
+    const publicKey = kp.publicKey.toBase58();
+    const { challenge } = await (await handlers.challenge(jreq("challenge", { publicKey }))).json();
+    const signature = Array.from(
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        kp.secretKey,
+      ),
+      (b) => b.toString(16).padStart(2, "0"),
+    ).join("");
+
+    // The signature is genuine — the caller really does hold this key. There is just no
+    // account yet, which is neither a bad request nor a failed credential.
+    const res = await handlers.loginWallet(jreq("login-wallet", { publicKey, signature, challenge }));
+    expect(res.status).toBe(422);
+    expect((await res.json()).error).toBe("Wallet not registered");
   });
 });

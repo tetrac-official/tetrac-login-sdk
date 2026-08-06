@@ -497,7 +497,12 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         const user = await getUserByPublicKey(store, appId, body.publicKey);
         // A valid signature proves key ownership; a missing account is not an attack,
         // so don't feed the failure counter — just report it.
-        if (!user) return error("Wallet not registered", 404);
+        // 422, not 404. The request was well-formed AND the signature verified — the caller
+        // genuinely holds this key — there is simply no account to log in to yet. 404 would
+        // say the endpoint is missing; 400 would say the request was malformed, and it was
+        // not; 401 would say the credential failed, and it did not. A distinct status lets a
+        // client branch straight to registration instead of parsing the message.
+        if (!user) return error("Wallet not registered", 422);
         const token = await issueSession(store, user, config, issueFingerprint(req));
         return json(asResult(user, token));
       }
@@ -621,7 +626,15 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       const limited = await rateLimited(req, { endpoint: "search", appId, identifier: publicKey });
       if (limited) return limited;
       const user = await getUserByPublicKey(store, appId, publicKey);
-      return user ? json({ exists: true }) : error("Wallet not found", 404);
+      // A SEARCH that matched nothing is a successful search, not a missing resource, so
+      // it answers 200 with `exists: false` rather than 404. The query was well-formed and
+      // ran; "no result" is the result. 404 would claim the endpoint itself is absent.
+      //
+      // NOTE: this does not close the enumeration oracle (audit.md L-3) — the body still
+      // distinguishes a registered wallet from an unregistered one, which is the endpoint's
+      // entire purpose. It only stops that answer being carried by a status code that means
+      // something else.
+      return json({ exists: !!user });
     },
 
     async importWallet(req) {

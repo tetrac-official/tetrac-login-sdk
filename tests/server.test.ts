@@ -337,8 +337,11 @@ describe("search-wallet hardening (M2)", () => {
           "http://localhost/api/auth/search-wallet?publicKey=GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse",
         ),
       );
-    expect((await search()).status).toBe(404); // not found, but allowed
-    expect((await search()).status).toBe(404);
+    // A search that matches nothing is a successful search: 200 { exists: false }.
+    const first = await search();
+    expect(first.status).toBe(200);
+    expect((await first.json()).exists).toBe(false);
+    expect((await search()).status).toBe(200);
     expect((await search()).status).toBe(429); // 3rd exceeds the limit
   });
 });
