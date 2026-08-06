@@ -10,6 +10,7 @@ import { useAuth } from "@tetrac/login-sdk/react";
 import type { AuthResult } from "../core/types.js";
 import type { LoginPanelProps, PasskeyGeneratorConfig } from "./types.js";
 import { generateStrongPasskey, DEFAULT_PASSKEY_BYTES } from "./passkey.js";
+import { checkPasskeyLength } from "../core/crypto.js";
 
 export interface EmailMethodProps {
   mode: NonNullable<LoginPanelProps["emailMode"]>;
@@ -43,6 +44,15 @@ export function EmailMethod({
   // the account we were about to create, never to one that already exists, so this flips
   // the field from "here is your new passkey" to "enter the one you saved".
   const [isExistingUser, setIsExistingUser] = useState(false);
+
+  // Length floor, applied ONLY where a new account is being created.
+  //
+  // Signing in must never be blocked by it: an account registered before the floor existed
+  // holds a shorter passkey, and refusing to submit would lock that user out of wallets
+  // nothing else can decrypt. `isExistingUser` is the same case — the address came back
+  // taken, so the field now holds an existing account's passkey, not a new one.
+  const isCreating = mode !== "signin" && !isExistingUser;
+  const tooShort = isCreating && passkey ? checkPasskeyLength(passkey) : null;
 
   // Resolve the generator config + gate on emailMode. Default follows emailMode:
   // shown for signup/auto, HIDDEN for signin. `showFor:"always"` overrides;
@@ -240,7 +250,7 @@ export function EmailMethod({
       ) : null}
       <button
         type="submit"
-        disabled={busy || !email || !passkey}
+        disabled={busy || !email || !passkey || !!tooShort}
         className={classNames?.primaryButton}
         style={styles.primaryButton}
       >
@@ -251,6 +261,11 @@ export function EmailMethod({
         ) : null}
         {busy ? "…" : "Continue with email"}
       </button>
+      {tooShort ? (
+        <span className={classNames?.error} style={styles.error}>
+          {tooShort}
+        </span>
+      ) : null}
       {error ? (
         <span className={classNames?.error} style={styles.error}>
           {error}

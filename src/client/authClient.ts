@@ -7,7 +7,11 @@ import {
   type AuthConfig,
   type DeepPartial,
 } from "../core/config.js";
-import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../core/crypto.js";
+import {
+  deriveAppKeyFromPasskey,
+  deriveAppKeyFromSignature,
+  checkPasskeyLength,
+} from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
 import { walletLoginMessage, walletAppKeyMessage, walletAppKeyMessageHw } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, OffchainEnvelope, UserData, WalletRole } from "../core/types.js";
@@ -274,6 +278,13 @@ export class AuthClient {
 
   /** Register an email/passkey account; generates and encrypts wallets client-side. */
   async registerWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
+    // Enforced HERE, not in deriveAppKeyFromPasskey, so it covers integrators who build
+    // their own UI instead of using <EmailMethod>. Registration only: loginWithEmail must
+    // still derive for an account created before this floor existed, or that user loses
+    // their wallets — a strictly worse outcome than the weak key they already have.
+    const weak = checkPasskeyLength(params.passkey);
+    if (weak) throw new Error(weak);
+
     const iterations = PBKDF2_ITERATIONS[this.config.securityLevel];
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
