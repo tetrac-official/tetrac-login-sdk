@@ -39,12 +39,22 @@ export function EmailMethod({
   // and in the `passkey` field — never persisted, logged, or transmitted.
   const [revealed, setRevealed] = useState<string | null>(null);
   const [copiedFlash, setCopiedFlash] = useState(false);
+  // Set once a registration reports the address is taken. A GENERATED passkey belongs to
+  // the account we were about to create, never to one that already exists, so this flips
+  // the field from "here is your new passkey" to "enter the one you saved".
+  const [isExistingUser, setIsExistingUser] = useState(false);
 
   // Resolve the generator config + gate on emailMode. Default follows emailMode:
   // shown for signup/auto, HIDDEN for signin. `showFor:"always"` overrides;
   // explicit "signup" pins to signup only; "auto" == default.
   const pkGenConfig = useMemo<PasskeyGeneratorConfig | null>(() => {
-    if (!passkeyGenerator) return null;
+    // ENABLED BY DEFAULT — only an explicit `false` turns it off.
+    //
+    // It used to be opt-in, which meant the out-of-the-box experience was a free-text field
+    // with no floor, holding the secret that encrypts the user's wallet. Neither the demo
+    // nor a real integration switched it on. A typed passkey is the one input here that a
+    // database leak turns into an offline attack, and it is not resettable: it IS the key.
+    if (passkeyGenerator === false) return null;
     const cfg: PasskeyGeneratorConfig = typeof passkeyGenerator === "object" ? passkeyGenerator : {};
     const showFor = cfg.showFor ?? "auto";
     const visible =
@@ -60,6 +70,22 @@ export function EmailMethod({
   useEffect(() => {
     return () => setRevealed(null);
   }, []);
+
+  // AUTO-GENERATE for a new account, rather than waiting for a button press.
+  //
+  // Offering a generator the user may click still leaves the default path a typed
+  // password. Filling the field means the strong value is what happens by default and
+  // typing your own is the deliberate act. Never for a returning user: they must supply
+  // the passkey they already have.
+  useEffect(() => {
+    if (!pkGenConfig || isExistingUser || mode === "signin" || passkey) return;
+    const pk = generateStrongPasskey(pkGenConfig.bytes ?? DEFAULT_PASSKEY_BYTES);
+    setPasskey(pk);
+    setRevealed(pk); // AUTO-reveal: the user MUST save it — it is the only key to the wallet
+    pkGenConfig.onGenerate?.(pk);
+    // Deliberately not keyed on `passkey`: regenerating as the user types would be hostile.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pkGenConfig, isExistingUser, mode]);
 
   // Transient "Copied" flash.
   useEffect(() => {
@@ -100,16 +126,26 @@ export function EmailMethod({
         result = await loginWithEmail({ email, passkey });
       } else if (mode === "signup") {
         result = await registerWithEmail({ email, passkey });
+      } else if (isExistingUser) {
+        // Already told this address is taken — the field now holds a typed passkey.
+        result = await loginWithEmail({ email, passkey });
       } else {
         // "auto": try register, fall back to login if the account exists.
         try {
           result = await registerWithEmail({ email, passkey });
         } catch (err) {
-          if (String(err).includes("already exists")) {
-            result = await loginWithEmail({ email, passkey });
-          } else {
-            throw err;
+          if (!String(err).includes("already exists")) throw err;
+          if (passkey === revealed) {
+            // The value in the field was GENERATED for the account we were creating, so it
+            // cannot be this one's. Retrying it as a login would just 401 and burn a
+            // failed-login attempt against the real owner's rate-limit bucket. Ask instead.
+            setIsExistingUser(true);
+            setPasskey("");
+            setRevealed(null);
+            throw new Error("That email is already registered — enter its passkey to sign in.");
           }
+          // A TYPED passkey may well be the right one: fall back to login as before.
+          result = await loginWithEmail({ email, passkey });
         }
       }
       onSuccess(result);
