@@ -7,15 +7,17 @@ import nacl from "tweetnacl";
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { walletLoginMessage } from "../src/core/index";
-import { registerEmail, loginEmail } from "./_auth-helpers";
+import { registerEmail, loginEmail, addressFor } from "./_auth-helpers";
 
 const APP_KEY = "ab".repeat(32);
 const APP_A = "app.alpha";
 const APP_B = "app.beta";
 // Two distinct, canonical Solana public keys (the email "identity" key differs per app,
 // just as the client mints a fresh keypair per registration).
-const PK_A = "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9";
-const PK_B = "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu";
+// Real derived keypairs — /register requires proof of possession, so an identity can no
+// longer be an arbitrary base58 literal.
+const PK_A = addressFor("multi-app-A");
+const PK_B = addressFor("multi-app-B");
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {

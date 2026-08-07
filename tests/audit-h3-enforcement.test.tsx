@@ -64,9 +64,9 @@ describe("AuthClient — the floor covers custom UIs", () => {
     // jsdom has no global fetch; install one so "was it called?" is observable.
     const fetchMock = jest.fn();
     (globalThis as unknown as { fetch: unknown }).fetch = fetchMock;
-    await expect(
-      client().registerWithEmail({ email: "new@example.com", passkey: SHORT }),
-    ).rejects.toThrow(new RegExp(`at least ${MIN_PASSKEY_LENGTH} characters`, "i"));
+    await expect(client().registerWithEmail({ email: "new@example.com", passkey: SHORT })).rejects.toThrow(
+      new RegExp(`at least ${MIN_PASSKEY_LENGTH} characters`, "i"),
+    );
     // It must fail BEFORE deriving and POSTing — otherwise a weak account is half-created.
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -74,9 +74,9 @@ describe("AuthClient — the floor covers custom UIs", () => {
   it("🚨 loginWithEmail does NOT reject a short passkey", async () => {
     // The existing-user path. It will fail later for other reasons (no server here), but it
     // must NOT fail with the length error — that would strand wallets created before the floor.
-    await expect(
-      client().loginWithEmail({ email: "old@example.com", passkey: SHORT }),
-    ).rejects.not.toThrow(new RegExp(`at least ${MIN_PASSKEY_LENGTH} characters`, "i"));
+    await expect(client().loginWithEmail({ email: "old@example.com", passkey: SHORT })).rejects.not.toThrow(
+      new RegExp(`at least ${MIN_PASSKEY_LENGTH} characters`, "i"),
+    );
   });
 });
 

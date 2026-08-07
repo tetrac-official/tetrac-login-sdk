@@ -12,7 +12,7 @@ import { Keypair } from "@solana/web3.js";
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { AUTH_TOKEN_HEADER, PUBLIC_KEY_HEADER, APP_ID_HEADER, DEFAULT_CONFIG } from "../src/core/config";
-import { registerEmail } from "./_auth-helpers";
+import { registerEmail, addressFor } from "./_auth-helpers";
 
 const APP_KEY = "ab".repeat(32);
 const ORIGIN = "https://test.example";
@@ -35,10 +35,11 @@ describe("wire header names are shared constants", () => {
   it("🚨 a request built from the constants authenticates end-to-end", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { origin: ORIGIN } });
-    const publicKey = Keypair.generate().publicKey.toBase58();
+    const idLabel = Keypair.generate().publicKey.toBase58();
+    const publicKey = addressFor(idLabel);
 
     const reg = await registerEmail(h, {
-      publicKey,
+      publicKey: idLabel,
       email: "hdr@example.com",
       appKey: APP_KEY,
       wallets: [],
@@ -90,9 +91,10 @@ describe("wire header names are shared constants", () => {
   it("🚨 L-4: authenticated responses are never cacheable", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { origin: ORIGIN } });
-    const publicKey = Keypair.generate().publicKey.toBase58();
+    const idLabel = Keypair.generate().publicKey.toBase58();
+    const publicKey = addressFor(idLabel);
     const reg = await registerEmail(h, {
-      publicKey,
+      publicKey: idLabel,
       email: "cache@example.com",
       appKey: APP_KEY,
       wallets: [],

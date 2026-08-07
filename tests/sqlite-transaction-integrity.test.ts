@@ -127,13 +127,7 @@ describe("M-5(a) — overlapping transactions are serialized, not collapsed", ()
     await expect(bad).rejects.toThrow(/boom/);
     await expect(good).resolves.toBe("ok");
 
-    expect(execLog).toEqual([
-      "BEGIN IMMEDIATE",
-      "ROLLBACK",
-      "BEGIN IMMEDIATE",
-      "-- survivor",
-      "COMMIT",
-    ]);
+    expect(execLog).toEqual(["BEGIN IMMEDIATE", "ROLLBACK", "BEGIN IMMEDIATE", "-- survivor", "COMMIT"]);
   });
 
   it("a genuinely nested call still reuses the open transaction", async () => {

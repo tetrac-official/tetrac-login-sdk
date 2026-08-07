@@ -8,7 +8,7 @@
 //  - Two concurrent connect-wallet calls (upsert race)
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
-import { registerEmail, loginEmail } from "./_auth-helpers";
+import { registerEmail, loginEmail, addressFor } from "./_auth-helpers";
 import { issueChallenge, consumeChallenge } from "../src/server/challenge";
 import { KvAuthStore } from "../src/storage/store";
 import type { AuthConfig } from "../src/core/config";
@@ -124,7 +124,7 @@ describe("session issuance revocation", () => {
     const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const appKey = "ab".repeat(32);
-    const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
+    const pk = addressFor("concurrent-safety");
 
     await registerEmail(h, { publicKey: pk, email: "seq@test.com", appKey });
 
@@ -165,7 +165,7 @@ describe("session issuance revocation", () => {
     const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const appKey = "cd".repeat(32);
-    const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
+    const pk = addressFor("concurrent-safety");
 
     await registerEmail(h, { publicKey: pk, email: "race@test.com", appKey });
 
@@ -198,7 +198,7 @@ describe("session issuance revocation", () => {
     const h = createAuthHandlers({ store, config: { origin: "https://test.example" } });
 
     const appKey = "ef".repeat(32);
-    const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
+    const pk = addressFor("concurrent-safety");
 
     await registerEmail(h, { publicKey: pk, email: "orphan@test.com", appKey });
     const login = await loginEmail(h, { email: "orphan@test.com", appKey });

@@ -7,12 +7,9 @@ import {
   type AuthConfig,
   type DeepPartial,
 } from "../core/config.js";
-import {
-  deriveAppKeyFromPasskey,
-  deriveAppKeyFromSignature,
-  checkPasskeyLength,
-} from "../core/crypto.js";
+import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature, checkPasskeyLength } from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
+import nacl from "tweetnacl";
 import { walletLoginMessage, walletAppKeyMessage, walletAppKeyMessageHw } from "../core/index.js";
 import type { AuthResult, EncryptedWallet, OffchainEnvelope, UserData, WalletRole } from "../core/types.js";
 
@@ -28,7 +25,7 @@ export type WalletSignMessage = (
   message: Uint8Array,
   opts?: { envelope?: OffchainEnvelope; onEnvelope?: (e: OffchainEnvelope) => void },
 ) => Promise<Uint8Array>;
-import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
+import { generateWalletBundle, flattenBundle, decryptWalletSecret, toSolanaKeypair } from "./wallet.js";
 import {
   setSession,
   clearSession,
@@ -292,6 +289,8 @@ export class AuthClient {
       bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
 
+    // Prove we hold the identity key we are about to claim (see proveIdentity).
+    const proof = await this.proveIdentity(identity, appKey);
     const result = await this.post<AuthResult>("register", {
       publicKey: identity.publicKey,
       email: params.email,
@@ -299,6 +298,7 @@ export class AuthClient {
       authMethod: "email",
       wallets: flattenBundle(bundle),
       pbkdf2Iterations: iterations, // pin the count per-user so future level changes don't orphan this account
+      ...proof,
     });
     setSession({
       publicKey: result.publicKey,
@@ -351,6 +351,32 @@ export class AuthClient {
    * Using the fixed message for the key is what lets the same wallets decrypt on
    * every login and device.
    */
+  /**
+   * Prove possession of a freshly generated identity key, for an email/biometric register.
+   *
+   * The server requires every registration to sign a challenge with the identity key, so a
+   * caller cannot claim an address they do not control. This client generated that keypair
+   * moments ago and holds it under `appKey`, so the proof is produced locally with no
+   * prompt and no user interaction — invisible by design, and no weaker for it: the check
+   * is about key possession, and an attacker naming someone else's address has nothing to
+   * sign with.
+   *
+   * Costs one extra round trip (fetch a challenge) on the registration path only.
+   */
+  private async proveIdentity(
+    identity: EncryptedWallet,
+    appKey: string,
+  ): Promise<{ signature: string; challenge: string }> {
+    const { challenge } = await this.post<{ challenge: string }>("challenge", {
+      publicKey: identity.publicKey,
+    });
+    // Decrypt only to sign, then drop the reference — same discipline as every other
+    // signing path here.
+    const kp = await toSolanaKeypair(identity, appKey);
+    const message = new TextEncoder().encode(walletLoginMessage(challenge, this.clientOrigin()));
+    return { signature: bytesToHex(nacl.sign.detached(message, kp.secretKey)), challenge };
+  }
+
   private async walletHandshake(
     publicKey: string,
     signMessage: WalletSignMessage,
@@ -491,6 +517,7 @@ export class AuthClient {
 
     // Internal, login-resolvable identifier derived from the credential (never shown to the user).
     const internalEmail = biometricEmail(registration);
+    const proof = await this.proveIdentity(identity, appKey);
     const result = await this.post<AuthResult>("register", {
       publicKey: identity.publicKey,
       email: internalEmail,
@@ -498,6 +525,7 @@ export class AuthClient {
       // Auth keypair derived from the PRF secret; server stores only its public key.
       authPublicKey: deriveAuthPublicKey(appKey),
       wallets: flattenBundle(bundle),
+      ...proof,
     });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
     return { result, registration };

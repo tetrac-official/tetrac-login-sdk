@@ -60,9 +60,9 @@ describe("M-6 — the rate limiter fails CLOSED, never open", () => {
       transaction: (fn) => fn(driver),
     };
     const store = new SqlAuthStore(driver, postgresDialect());
-    await expect(
-      store.hitRateLimit({ endpoint: "ip", identifier: "1.2.3.4" }, 60, 5),
-    ).rejects.toThrow(/un-countable/i);
+    await expect(store.hitRateLimit({ endpoint: "ip", identifier: "1.2.3.4" }, 60, 5)).rejects.toThrow(
+      /un-countable/i,
+    );
   });
 
   it("a real count still works — the guard must not break the happy path", async () => {
@@ -81,9 +81,9 @@ describe("M-6 — the rate limiter fails CLOSED, never open", () => {
     // Number(0) is falsy — a `?? 1`-style guard is easy to rewrite into a `|| 1` that
     // silently rejects a legitimate zero. It must be accepted.
     const store = new SqlAuthStore(countingDriver(0), postgresDialect());
-    await expect(
-      store.hitRateLimit({ endpoint: "ip", identifier: "1.2.3.4" }, 60, 5),
-    ).resolves.toMatchObject({ allowed: true });
+    await expect(store.hitRateLimit({ endpoint: "ip", identifier: "1.2.3.4" }, 60, 5)).resolves.toMatchObject(
+      { allowed: true },
+    );
   });
 });
 

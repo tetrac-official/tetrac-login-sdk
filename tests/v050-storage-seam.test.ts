@@ -14,7 +14,7 @@ import { RedisAdapter } from "../src/storage/redis";
 import { KvAuthStore, type RateLimitResult } from "../src/storage/store";
 import { hashSessionToken } from "../src/core/crypto";
 import { DEFAULT_CONFIG } from "../src/core/config";
-import { registerEmail, jreq } from "./_auth-helpers";
+import { registerEmail, jreq, addressFor } from "./_auth-helpers";
 import { Keypair } from "@solana/web3.js";
 
 const APP_KEY = "a".repeat(64);
@@ -27,7 +27,9 @@ async function registerFresh(h: ReturnType<typeof createAuthHandlers>, email: st
   const publicKey = freshKeypair();
   const res = await registerEmail(h, { email, appKey: APP_KEY, publicKey });
   expect(res.status).toBe(201);
-  return { ...(await res.json()), publicKey } as { authToken: string; publicKey: string };
+  // The RESPONSE carries the address actually registered (the helper derives a real
+  // keypair from the label, since /register now demands proof of possession).
+  return (await res.json()) as { authToken: string; publicKey: string };
 }
 
 // =====================================================================================
@@ -61,8 +63,11 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
   it("the digest is never echoed to the client", async () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
-    const publicKey = freshKeypair();
-    const res = await registerEmail(h, { email: "echo@example.com", appKey: APP_KEY, publicKey });
+    const res = await registerEmail(h, {
+      email: "echo@example.com",
+      appKey: APP_KEY,
+      publicKey: freshKeypair(),
+    });
     const body = await res.json();
 
     expect(body.authToken).toMatch(/^[0-9a-f]{64}$/); // the RAW token, for the client

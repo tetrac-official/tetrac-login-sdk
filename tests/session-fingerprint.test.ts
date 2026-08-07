@@ -7,10 +7,12 @@ import { createAuthHandlers } from "../src/server/routes";
 import { hashSessionToken } from "../src/core/crypto";
 import { MemoryAdapter } from "../src/storage/memory";
 import { hashUserAgent } from "../src/core/crypto";
+import { identityFor, proofFor } from "./_auth-helpers";
 import { deriveAuthPublicKey } from "../src/client/authKey";
 
 const APP_KEY = "ab".repeat(32);
-const PUBKEY = "SoLfp11111111111111111111111111111111111111";
+const IDENTITY = identityFor("session-fingerprint");
+const PUBKEY = IDENTITY.publicKey.toBase58();
 const EMAIL = "fp@example.com";
 const UA_A = "Mozilla/5.0 (Macintosh) AppleWebKit/537 Chrome/120";
 const UA_B = "Mozilla/5.0 (Windows NT 10.0) Firefox/121";
@@ -23,11 +25,14 @@ function reqWith(body: unknown, headers: Record<string, string> = {}): Request {
   });
 }
 
-function register(h: ReturnType<typeof createAuthHandlers>, ua?: string) {
+async function register(h: ReturnType<typeof createAuthHandlers>, ua?: string) {
+  // /register now requires proof of possession of the identity key.
+  const proof = await proofFor(h, IDENTITY);
   return h.register(
     reqWith(
       {
         publicKey: PUBKEY,
+        ...proof,
         email: EMAIL,
         authPublicKey: deriveAuthPublicKey(APP_KEY),
         authMethod: "email",

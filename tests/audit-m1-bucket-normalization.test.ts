@@ -27,10 +27,7 @@ function handlers(config: Record<string, unknown> = {}) {
 const BAD_SIG = "ab".repeat(64);
 
 /** Attack an account with the given spellings; return how many requests got through. */
-async function attemptsUntilThrottled(
-  h: ReturnType<typeof handlers>,
-  spellings: string[],
-): Promise<number> {
+async function attemptsUntilThrottled(h: ReturnType<typeof handlers>, spellings: string[]): Promise<number> {
   let allowed = 0;
   for (const email of spellings) {
     const chRes = await h.challenge(jreq({ email }));
@@ -76,12 +73,7 @@ describe("M-1 — one account is one bucket, regardless of spelling", () => {
     await registerEmail(h, { publicKey: PK, email: "target@test.com", appKey: APP_KEY });
 
     const statuses: number[] = [];
-    for (const email of [
-      "target@test.com",
-      "Target@test.com",
-      "TARGET@TEST.COM",
-      "TaRgEt@TeSt.CoM",
-    ]) {
+    for (const email of ["target@test.com", "Target@test.com", "TARGET@TEST.COM", "TaRgEt@TeSt.CoM"]) {
       statuses.push((await h.challenge(jreq({ email }))).status);
     }
     expect(statuses).toContain(429);

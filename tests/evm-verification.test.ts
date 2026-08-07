@@ -19,7 +19,7 @@
 //  - Verifies the auth boundary: Solana = Web3 auth + identity, EVM = internal signing only
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
-import { registerEmail, loginEmail } from "./_auth-helpers";
+import { registerEmail, loginEmail, addressFor } from "./_auth-helpers";
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {
@@ -32,7 +32,7 @@ function req(body: unknown, headers: Record<string, string> = {}): Request {
 describe("EVM wallet — design intent (C2)", () => {
   const evmAddress = "0x742d35Cc6634C0532925a3b844Bc454e4438f44e";
 
-  const solIdentity = "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9";
+  const solIdentity = addressFor("evm-verification-sol");
 
   it("authMethod='wallet' with EVM address is rejected at validation (400)", async () => {
     // EVM addresses are NOT valid identities. Strict Solana validation rejects the
@@ -75,12 +75,20 @@ describe("EVM wallet — design intent (C2)", () => {
     const storage = new MemoryAdapter();
     const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
-    const rejected = await registerEmail(h, {
-      publicKey: evmAddress, // EVM as the identity → rejected
-      email: "evm-id@test.com",
-      appKey: "ab".repeat(32),
-      wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "encrypted-key" }],
-    });
+    // Direct call, not the helper: the helper derives a REAL Solana keypair from its
+    // label (registration now requires proof of possession), which would defeat the point.
+    // publicKey validation runs before the proof check, so the dummy proof never matters.
+    const rejected = await h.register(
+      req({
+        publicKey: evmAddress, // EVM as the identity → rejected
+        email: "evm-id@test.com",
+        authPublicKey: "ab".repeat(32),
+        authMethod: "email",
+        signature: "00".repeat(64),
+        challenge: "a".repeat(64),
+        wallets: [{ chain: "evm", role: "funds", publicKey: evmAddress, encryptedSecret: "encrypted-key" }],
+      }),
+    );
     expect(rejected.status).toBe(400);
 
     // The supported shape: a Solana identity, with the EVM key carried in the bundle.

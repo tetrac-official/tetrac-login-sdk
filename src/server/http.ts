@@ -39,11 +39,7 @@ export function error(message: string, status = 400): Response {
  * rightmost entries are set by infrastructure we control and are not
  * client-spoofable; the leftmost entry is attacker-controlled and never trusted.
  */
-export function clientIp(
-  req: Request,
-  trustProxyHeaders = false,
-  trustedProxyHops = 0,
-): string | null {
+export function clientIp(req: Request, trustProxyHeaders = false, trustedProxyHops = 0): string | null {
   if (!trustProxyHeaders) return null;
   const fwd = req.headers.get("x-forwarded-for");
   if (fwd) {

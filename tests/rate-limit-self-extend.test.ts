@@ -9,6 +9,7 @@
 //    may be stuck — verify the self-heal logic path
 //  - The "unknown" IP bucket behavior with trustProxyHeaders=false
 import { createAuthHandlers } from "../src/server/routes";
+import { identityFor, proofFor } from "./_auth-helpers";
 import { MemoryAdapter } from "../src/storage/memory";
 import { checkRateLimit } from "../src/server/rateLimit";
 import { KvAuthStore } from "../src/storage/store";
@@ -172,10 +173,12 @@ describe("rate limit integration in route handlers", () => {
 
     // Register with email — this triggers TWO rate limit checks:
     // one for IP, one for email identifier.
-    const reg = () =>
+    const identity = identityFor("rate-limit-self-extend");
+    const reg = async () =>
       h.register(
         req({
-          publicKey: "EdmxWPmx2WH6WgFfTdu9xfkYf3k1g5wD1zccTVySEEh1",
+          publicKey: identity.publicKey.toBase58(),
+          ...(await proofFor(h, identity)),
           email: "test@example.com",
           authPublicKey: "a".repeat(64),
           authMethod: "email",

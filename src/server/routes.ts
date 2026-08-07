@@ -427,7 +427,9 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // the target bucket for those requests and left challenge issuance unbounded.
       const identifier = body?.publicKey ?? body?.email;
       const targetBucket: RateLimitBucket | undefined =
-        !requesterIp(req) && identifier ? { endpoint: "challenge", appId, identifier: bucketId(identifier) } : undefined;
+        !requesterIp(req) && identifier
+          ? { endpoint: "challenge", appId, identifier: bucketId(identifier) }
+          : undefined;
       const limited = await rateLimited(req, targetBucket);
       if (limited) return limited;
 
@@ -562,18 +564,38 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         if (existing) return error("Account already exists", 409);
       }
 
-      // Web3 registrations must prove wallet ownership. Verify the signature BEFORE
-      // consuming the single-use challenge, so a forged signature can't burn a
-      // victim's pending challenge (matches login/loginWallet/connectWallet — WI-5).
-      if (body.authMethod === "wallet") {
-        if (!body.signature || !body.challenge) return error("signature and challenge required");
-        if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge, config.origin)) {
-          return error("Signature verification failed", 401);
-        }
-        const ok = await consumeChallenge(store, appId, body.publicKey, body.challenge);
-        if (!ok) return error("Invalid or expired challenge", 401);
-      } else if (!body.authPublicKey) {
+      // Email/biometric accounts additionally store an auth key; a wallet account proves
+      // itself by signature on every login and has none.
+      if (body.authMethod !== "wallet" && !body.authPublicKey) {
         return error("authPublicKey required for email/biometric registration");
+      }
+
+      // 🚨 EVERY registration proves possession of the identity key — not just the wallet
+      // path, which is how it used to be.
+      //
+      // The SDK's model is that an identity `publicKey` is either generated client-side by
+      // this SDK or is the user's own connected wallet. Nothing enforced that: the
+      // email/biometric branch accepted ANY well-formed base58 key. So a third party could
+      // register at a victim's real on-chain address with `authMethod: "email"`, plant
+      // attacker-controlled `wallets[]`, and wait. When the victim later connected that
+      // wallet they authenticated correctly, landed in the planted record, had their own
+      // generated bundle discarded (connectWallet only backfills an EMPTY record), and the
+      // app then rendered the attacker's addresses as deposit addresses — useActiveWallet's
+      // Web3 guard keys on `authMethod === "wallet"`, which the attacker had set to "email".
+      //
+      // The check costs an honest client nothing: it generated this keypair milliseconds
+      // ago, so it signs automatically with no prompt. That it is invisible is not a
+      // weakness — the proof is about KEY POSSESSION, not user attention, and an attacker
+      // naming a key they do not hold simply cannot produce the bytes.
+      //
+      // Verify BEFORE consuming the single-use challenge, so a forged signature can't burn a
+      // victim's pending challenge (matches login/loginWallet/connectWallet — WI-5).
+      if (!body.signature || !body.challenge) return error("signature and challenge required");
+      if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge, config.origin)) {
+        return error("Signature verification failed", 401);
+      }
+      if (!(await consumeChallenge(store, appId, body.publicKey, body.challenge))) {
+        return error("Invalid or expired challenge", 401);
       }
 
       // Every collision check has passed, so this request WILL create a record. Charge the
@@ -743,6 +765,15 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       }
 
       let user = await getUserByPublicKey(store, appId, body.publicKey);
+
+      // Defence in depth: a WALLET login must not resolve a record the email/biometric path
+      // created. Registration now proves possession of the identity key, so such a record
+      // should not exist for a wallet the caller controls — but if one ever does (an older
+      // record, a hand-rolled client), its `wallets[]` were never proven to belong to this
+      // key, and handing them back is how an attacker-planted deposit address reaches the UI.
+      // Fail closed rather than adopt a record we cannot vouch for.
+      if (user && user.authMethod !== "wallet") return error("Invalid credentials", 401);
+
       const isNew = !user;
       if (!user) {
         // The other creation path. A valid signature is required to get here, but keypairs

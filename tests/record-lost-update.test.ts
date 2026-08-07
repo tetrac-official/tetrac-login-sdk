@@ -18,7 +18,7 @@ import { Keypair } from "@solana/web3.js";
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { KvAuthStore } from "../src/storage/store";
-import { registerEmail, loginEmail, jreq } from "./_auth-helpers";
+import { registerEmail, loginEmail, jreq, addressFor } from "./_auth-helpers";
 
 const APP_KEY = "ab".repeat(32);
 const ORIGIN = "https://test.example";
@@ -36,9 +36,10 @@ function handlers(storage: MemoryAdapter) {
 
 async function newAccount(storage: MemoryAdapter, email: string) {
   const h = handlers(storage);
-  const publicKey = Keypair.generate().publicKey.toBase58();
+  const idLabel = Keypair.generate().publicKey.toBase58();
+  const publicKey = addressFor(idLabel);
   const res = await registerEmail(h, {
-    publicKey,
+    publicKey: idLabel,
     email,
     appKey: APP_KEY,
     wallets: [slot("solana", "funds", "original-solana")],

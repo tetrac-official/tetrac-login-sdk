@@ -16,6 +16,7 @@ import { Keypair } from "@solana/web3.js";
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { MAX_BODY_BYTES } from "../src/server/http";
+import { proofFor } from "./_auth-helpers";
 
 const ORIGIN = "https://test.example";
 
@@ -41,11 +42,14 @@ describe("H-2(a) — unknown wallet properties cannot inflate a record", () => {
   it("🚨 a padded wallet entry is stored stripped, not verbatim", async () => {
     const storage = new MemoryAdapter();
     const h = handlers(storage);
-    const publicKey = Keypair.generate().publicKey.toBase58();
+    const identity = Keypair.generate();
+    const publicKey = identity.publicKey.toBase58();
+    const proof = await proofFor(h, identity);
 
     const res = await h.register(
       post({
         publicKey,
+        ...proof,
         email: "bloat@example.com",
         authPublicKey: "ab".repeat(32),
         wallets: [
@@ -76,10 +80,12 @@ describe("H-2(a) — unknown wallet properties cannot inflate a record", () => {
   it("🚨 import-wallet strips too — a session holder cannot grow the record either", async () => {
     const storage = new MemoryAdapter();
     const h = handlers(storage);
-    const publicKey = Keypair.generate().publicKey.toBase58();
+    const identity = Keypair.generate();
+    const publicKey = identity.publicKey.toBase58();
+    const proof = await proofFor(h, identity);
 
     const reg = await h.register(
-      post({ publicKey, email: "imp@example.com", authPublicKey: "ab".repeat(32), wallets: [] }),
+      post({ publicKey, ...proof, email: "imp@example.com", authPublicKey: "ab".repeat(32), wallets: [] }),
     );
     const { authToken } = await reg.json();
     const auth = { "ttc-auth-token": authToken, "ttc-public-key": publicKey };
@@ -113,7 +119,9 @@ describe("H-2(a) — unknown wallet properties cannot inflate a record", () => {
   it("the worst-case legitimate record stays within its documented bound", async () => {
     const storage = new MemoryAdapter();
     const h = handlers(storage);
-    const publicKey = Keypair.generate().publicKey.toBase58();
+    const identity = Keypair.generate();
+    const publicKey = identity.publicKey.toBase58();
+    const proof = await proofFor(h, identity);
 
     // All four slots at the 8192-char ciphertext bound — the largest record the server
     // will ever hold, and the number every backend's column sizing is derived from.
@@ -125,7 +133,7 @@ describe("H-2(a) — unknown wallet properties cannot inflate a record", () => {
     ].map((s, i) => ({ ...s, publicKey: `pk${i}`, encryptedSecret: "z".repeat(8192) }));
 
     const res = await h.register(
-      post({ publicKey, email: "max@example.com", authPublicKey: "ab".repeat(32), wallets: max }),
+      post({ publicKey, ...proof, email: "max@example.com", authPublicKey: "ab".repeat(32), wallets: max }),
     );
     expect(res.status).toBe(201);
 
@@ -139,7 +147,9 @@ describe("H-2(a) — the request body itself is bounded", () => {
   it("🚨 a body past the cap is refused before it is parsed", async () => {
     const storage = new MemoryAdapter();
     const h = handlers(storage);
-    const publicKey = Keypair.generate().publicKey.toBase58();
+    const identity = Keypair.generate();
+    const publicKey = identity.publicKey.toBase58();
+    const proof = await proofFor(h, identity);
 
     const res = await h.register(
       post({

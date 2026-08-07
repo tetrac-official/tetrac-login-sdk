@@ -16,6 +16,7 @@ import { getUserByPublicKey } from "../src/server/session";
 import { DEFAULT_CONFIG } from "../src/core/config";
 import * as signature from "../src/server/signature";
 import { registerEmail, loginEmail } from "./_auth-helpers";
+import { deriveAuthPublicKey } from "../src/client/authKey";
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {
@@ -145,12 +146,18 @@ describe("SERVERSIDE-11 RESOLVED (publicKey format) / SERVERSIDE-5 residual (ema
       config: { origin: "https://test.example" },
     });
     const arbitrary = "0x" + "cd".repeat(20); // not a Solana ed25519 key
-    const res = await registerEmail(h, {
-      publicKey: arbitrary,
-      email: "evm@x.com",
-      appKey: APP_KEY,
-      wallets: [],
-    });
+    const res = await h.register(
+      req({
+        publicKey: arbitrary,
+        email: "evm@x.com",
+        authPublicKey: deriveAuthPublicKey(APP_KEY),
+        authMethod: "email",
+        wallets: [],
+        // Dummy: publicKey validation runs BEFORE the possession proof.
+        signature: "00".repeat(64),
+        challenge: "a".repeat(64),
+      }),
+    );
     expect(res.status).toBe(400); // publicKey format is now validated (SERVERSIDE-11)
   });
 
@@ -207,12 +214,17 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
     // An attacker can't even register publicKey="session:<token>" — strict Solana
     // validation rejects it (400, ':' isn't base58), so the namespace collision the
     // disjoint prefixes already prevented is now impossible at the door. Session intact.
-    const atk = await registerEmail(h, {
-      publicKey: `session:${token}`,
-      email: "atk@x.com",
-      appKey: APP_KEY,
-      wallets: [],
-    });
+    const atk = await h.register(
+      req({
+        publicKey: `session:${token}`,
+        email: "atk@x.com",
+        authPublicKey: deriveAuthPublicKey(APP_KEY),
+        authMethod: "email",
+        wallets: [],
+        signature: "00".repeat(64),
+        challenge: "a".repeat(64),
+      }),
+    );
     expect(atk.status).toBe(400);
     expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBe(body.publicKey); // intact
   });
