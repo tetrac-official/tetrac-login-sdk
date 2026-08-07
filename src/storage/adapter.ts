@@ -81,6 +81,18 @@ export interface StorageAdapter {
    * reintroduces exactly the race this design exists to eliminate.
    */
   hset(key: string, field: string, value: string): Promise<void>;
+  /**
+   * Set one field ONLY IF IT DOES NOT EXIST. Returns true when this call created it.
+   *
+   * 🚨 MUST be atomic — this is the email index's claim operation, and the entire defence
+   * against two concurrent registrations for one address. `hset` alone is last-write-wins:
+   * both callers pass the handler's "is this email taken?" check, both write, and the loser's
+   * account still EXISTS but is no longer reachable by email — its owner cannot log in, and
+   * their wallets are encrypted under a key only they hold.
+   *
+   * Redis `HSETNX`. Do NOT emulate it with hget-then-hset: that is the race, restated.
+   */
+  hsetnx(key: string, field: string, value: string): Promise<boolean>;
   /** Delete one field of a hash (no-op if absent). */
   hdel(key: string, field: string): Promise<void>;
   /** Read the whole hash as a plain object; `{}` — never null — when the key is absent. */

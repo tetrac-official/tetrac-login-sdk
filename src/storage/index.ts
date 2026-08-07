@@ -2,6 +2,7 @@
 export {
   KvAuthStore,
   normalizeEmail,
+  EmailTakenError,
   type AuthStore,
   type SessionValue,
   type RateLimitBucket,

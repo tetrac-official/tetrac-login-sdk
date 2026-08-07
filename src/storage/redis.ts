@@ -11,6 +11,7 @@ export interface RedisLike {
   getdel(key: string): Promise<string | null>;
   hget(key: string, field: string): Promise<string | null>;
   hset(key: string, field: string, value: string): Promise<unknown>;
+  hsetnx(key: string, field: string, value: string): Promise<number>;
   hdel(key: string, field: string): Promise<unknown>;
   hgetall(key: string): Promise<Record<string, string>>;
   /** OPTIONAL so existing mocks (which have no quit) still satisfy this type. ioredis has it. */
@@ -54,6 +55,11 @@ export class RedisAdapter implements StorageAdapter {
 
   async hset(key: string, field: string, value: string): Promise<void> {
     await this.client.hset(key, field, value);
+  }
+
+  async hsetnx(key: string, field: string, value: string): Promise<boolean> {
+    // Native HSETNX — one round trip, atomic on the server. Returns 1 when created.
+    return (await this.client.hsetnx(key, field, value)) === 1;
   }
 
   async hdel(key: string, field: string): Promise<void> {

@@ -64,6 +64,26 @@ export interface RateLimitBucket {
  * and distinct accounts. Case-insensitivity is a property of the EMAIL, not of the
  * keyspace.
  */
+/**
+ * The email index is already held by a DIFFERENT identity key.
+ *
+ * The handler checks for a collision before it writes, but check-then-act is not atomic:
+ * two concurrent registrations for one address both see "free" and both proceed. The store
+ * is the only layer that can settle it, so it does — and reports the loss rather than
+ * silently overwriting, which used to leave the first account intact but unreachable.
+ *
+ * Callers should translate this to the same 409 the pre-check produces.
+ */
+export class EmailTakenError extends Error {
+  constructor(
+    readonly email: string,
+    readonly appId: string,
+  ) {
+    super(`email already registered for appId "${appId}"`);
+    this.name = "EmailTakenError";
+  }
+}
+
 export function normalizeEmail(email: string): string {
   return email.toLowerCase().trim();
 }
@@ -288,7 +308,16 @@ export class KvAuthStore implements AuthStore {
       await this.kv.hset(key, KvAuthStore.walletField(w.chain, w.role), JSON.stringify(w));
     }
     if (user.email) {
-      await this.kv.hset(this.emailKey(user.email), user.appId, user.publicKey);
+      // CLAIM, don't overwrite. `hset` here was last-write-wins: two concurrent
+      // registrations for one address both passed the handler's collision check, both
+      // wrote, and the loser's account survived in storage while becoming UNREACHABLE by
+      // email — its owner could not log in, and only they held the key to its wallets.
+      const emailKey = this.emailKey(user.email);
+      if (!(await this.kv.hsetnx(emailKey, user.appId, user.publicKey))) {
+        // Already claimed. Ours if this is an update; someone else's if we lost the race.
+        const holder = await this.kv.hget(emailKey, user.appId);
+        if (holder !== user.publicKey) throw new EmailTakenError(user.email, user.appId);
+      }
     }
   }
 

@@ -1,7 +1,13 @@
 // Framework-agnostic auth route handlers built on the Web Request/Response API.
 // Next.js App Router consumes these directly via src/next.
 import type { StorageAdapter } from "../storage/adapter.js";
-import { KvAuthStore, normalizeEmail, type AuthStore, type RateLimitBucket } from "../storage/store.js";
+import {
+  KvAuthStore,
+  normalizeEmail,
+  EmailTakenError,
+  type AuthStore,
+  type RateLimitBucket,
+} from "../storage/store.js";
 import {
   resolveConfig,
   APP_ID_HEADER,
@@ -163,26 +169,34 @@ const HEX64_RE = /^[0-9a-f]{64}$/i;
 // the length, so a crafted appId can neither escape its namespace nor bloat keys.
 const APP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-function validateEmail(email: string): string | null {
+// 🚨 Every validator here TYPE-CHECKS FIRST.
+//
+// The body is JSON.parse output, so a field the TypeScript signature calls `string` can be
+// an array, a number, or an object at runtime. `EMAIL_RE.test(["a@b.co"])` is TRUE — RegExp
+// coerces its argument — and `["a@b.co"].length` is 1, so an array passed BOTH the format
+// check and the 320 bound. It then reached normalizeEmail(), where `.toLowerCase()` does not
+// exist on an array: an unauthenticated request turned into a framework 500.
+function validateEmail(email: unknown): string | null {
+  if (typeof email !== "string") return "Invalid email format";
   if (email.length > 320 || !EMAIL_RE.test(email)) return "Invalid email format";
   return null;
 }
 
-function validateAppId(appId: string, config: AuthConfig): string | null {
-  if (!appId || !APP_ID_RE.test(appId)) return "Invalid appId format";
+function validateAppId(appId: unknown, config: AuthConfig): string | null {
+  if (typeof appId !== "string" || !appId || !APP_ID_RE.test(appId)) return "Invalid appId format";
   // Optional production allowlist: reject any appId the deployment didn't declare,
   // so an attacker can't mint arbitrary namespaces or probe tenants by guessing ids.
   if (config.allowedAppIds && !config.allowedAppIds.includes(appId)) return "Unknown appId";
   return null;
 }
 
-function validatePublicKey(key: string): string | null {
+function validatePublicKey(key: unknown): string | null {
   // The account identity is a Solana ed25519 public key (generated client-side for
   // email/biometric, or the connected wallet for web3). Require base58 that decodes to
   // exactly 32 bytes in CANONICAL form: PublicKey throws on invalid base58 / wrong
   // length, the round-trip rejects short inputs PublicKey would left-pad, and EVM
   // `0x…` addresses fail because `0` isn't in the base58 alphabet.
-  if (!key) return "Invalid publicKey format";
+  if (typeof key !== "string" || !key) return "Invalid publicKey format";
   try {
     const pk = new PublicKey(key);
     if (pk.toBytes().length !== 32 || pk.toBase58() !== key) return "Invalid publicKey format";
@@ -192,8 +206,8 @@ function validatePublicKey(key: string): string | null {
   return null;
 }
 
-function validateAuthPublicKey(key: string): string | null {
-  if (!HEX64_RE.test(key)) return "Invalid authPublicKey format"; // ed25519 public key, 32 bytes hex
+function validateAuthPublicKey(key: unknown): string | null {
+  if (typeof key !== "string" || !HEX64_RE.test(key)) return "Invalid authPublicKey format"; // ed25519 public key, 32 bytes hex
   return null;
 }
 
@@ -620,7 +634,16 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         // Real timestamp is stamped by the runtime; tests can inject via storage.
         createdAt: Date.now(),
       };
-      await persistUser(store, user);
+      // The collision check above is check-then-act, so two concurrent registrations for one
+      // address both reach here. The STORE settles it atomically and throws for the loser;
+      // answer that with the same 409 the pre-check produces, so the client's "auto" mode
+      // falls back to login exactly as it would have.
+      try {
+        await persistUser(store, user);
+      } catch (e) {
+        if (e instanceof EmailTakenError) return error("Account already exists", 409);
+        throw e;
+      }
       const token = await issueSession(store, user, config, issueFingerprint(req));
       return json(asResult(user, token), 201);
     },

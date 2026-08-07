@@ -14,7 +14,7 @@
 //
 // A dialect author reads none of this. They declare `supportsReturning` and emit DDL.
 import type { AuthStore, SessionValue, RateLimitBucket, RateLimitResult } from "../store.js";
-import { normalizeEmail } from "../store.js";
+import { normalizeEmail, EmailTakenError } from "../store.js";
 import { sortWalletsBySlot, type UserData, type EncryptedWallet } from "../../core/types.js";
 import type { SqlDialect, SqlDriver } from "./types.js";
 
@@ -145,12 +145,41 @@ export class SqlAuthStore implements AuthStore {
       }
 
       if (user.email) {
-        await this.run(
+        // CLAIM, don't upsert.
+        //
+        // `ON CONFLICT (email, app_id) DO UPDATE SET public_key = ?` overwrote whoever held
+        // the address. The unique key stops two ROWS existing; it does nothing to stop the
+        // second registration STEALING the first one's row. The loser's user record survives
+        // and becomes unreachable by email — they cannot log in, and only they hold the key
+        // to their wallets.
+        //
+        // Read-then-insert is safe here only because it runs inside the transaction: the
+        // reader either sees the existing row, or races another inserter and loses on the
+        // (email, app_id) unique constraint, which surfaces as a throw. Both outcomes are
+        // "taken". This shape works on all three dialects — MySQL has no WHERE clause on
+        // ON DUPLICATE KEY UPDATE, so a conditional upsert is not portable.
+        const email = normalizeEmail(user.email);
+        const held = await this.run<{ public_key: string }>(
           tx,
-          `INSERT INTO ${t.emailIndex} (email, app_id, public_key) VALUES (?, ?, ?) ` +
-            this.dialect.upsert(["email", "app_id"], ["public_key = ?"]),
-          [normalizeEmail(user.email), user.appId, user.publicKey, user.publicKey],
+          `SELECT public_key FROM ${t.emailIndex} WHERE email = ? AND app_id = ?`,
+          [email, user.appId],
         );
+        const holder = held[0]?.public_key;
+        if (holder === undefined) {
+          try {
+            await this.run(tx, `INSERT INTO ${t.emailIndex} (email, app_id, public_key) VALUES (?, ?, ?)`, [
+              email,
+              user.appId,
+              user.publicKey,
+            ]);
+          } catch {
+            // Lost the insert race to a concurrent transaction.
+            throw new EmailTakenError(user.email, user.appId);
+          }
+        } else if (holder !== user.publicKey) {
+          throw new EmailTakenError(user.email, user.appId);
+        }
+        // holder === our publicKey: an update of our own record. Nothing to write.
       }
     });
   }

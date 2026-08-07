@@ -398,6 +398,51 @@ export function authStoreConformanceCases(
     );
   });
 
+  add("🚨 email index: the SAME email under ONE app is CLAIMED, never stolen", async (store) => {
+    // The handler checks "is this email taken?" before writing, but check-then-act is not
+    // atomic — two concurrent registrations both see "free". An upsert lets the second
+    // STEAL the row: the first account still exists but is no longer reachable by email,
+    // so its owner cannot log in, and only they hold the key to their wallets.
+    //
+    // The store is the only layer that can settle this. It must claim, and the loser must
+    // be told, not silently overwritten.
+    const first = makeUser({ appId: "app1", publicKey: PK_A, email: "contested@example.com" });
+    await store.putUser(first);
+
+    const second = makeUser({ appId: "app1", publicKey: PK_B, email: "contested@example.com" });
+    let rejected = false;
+    try {
+      await store.putUser(second);
+    } catch {
+      rejected = true;
+    }
+
+    assert(
+      rejected,
+      "SILENT STEAL: putUser accepted a second identity for an email another key already " +
+        "holds. It must throw (EmailTakenError) so the caller can answer 409.",
+    );
+    assertEqual(
+      await store.getPublicKeyByEmail("app1", "contested@example.com"),
+      PK_A,
+      "the ORIGINAL owner must still hold the address after a losing claim",
+    );
+  });
+
+  add("email index: re-writing a user's OWN record is not a collision", async (store) => {
+    // putUser serves updates too. Claiming must be idempotent for the current holder, or
+    // every profile write after registration would fail.
+    const u = makeUser({ appId: "app1", publicKey: PK_A, email: "owner@example.com" });
+    await store.putUser(u);
+    await store.putUser({ ...u, pbkdf2Iterations: 600_000 });
+
+    assertEqual(
+      await store.getPublicKeyByEmail("app1", "owner@example.com"),
+      PK_A,
+      "a user's own re-write must keep its index entry",
+    );
+  });
+
   add(
     "🚨 email index: concurrent putUser for one email under two apps — NEITHER write is lost",
     async (store) => {
