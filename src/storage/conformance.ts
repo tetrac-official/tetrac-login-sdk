@@ -36,6 +36,21 @@ export interface ConformanceOptions {
   advance?: (ms: number) => Promise<void> | void;
   /** Set true if the backend implements the optional `sweepExpired`. */
   supportsSweep?: boolean;
+  /**
+   * OPTIONAL. A factory returning a store whose BACKEND FAILS every read — the shape of a
+   * dropped connection, a pool timeout, a statement timeout. When supplied, the suite adds
+   * the fail-closed cases (invariant 3): a read that FAILED must PROPAGATE the error, never
+   * swallow it into an "absent"/"allowed" answer.
+   *
+   * This is what would have caught the 2026-08-08 F-1 regression, where `getUser` caught a
+   * failing wallets query and returned `null` — read by `connect-wallet` as "never
+   * registered", which then overwrote the only copy of the user's encrypted wallet keys.
+   *
+   * Build it by wrapping your driver/adapter so its read methods reject (see the SQLite and
+   * MemoryAdapter conformance tests for the two shapes). Omit it if your backend cannot
+   * cheaply simulate a failing read — the cases are then skipped, not failed.
+   */
+  makeFailingStore?: () => AuthStore | Promise<AuthStore>;
 }
 
 // --- tiny assertion kit (no test-framework dependency) ---------------------------
@@ -49,6 +64,19 @@ function assertEqual<T>(actual: T, expected: T, msg: string): void {
     throw new Error(
       `conformance: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
+  }
+}
+
+async function assertThrows(fn: () => Promise<unknown>, msg: string): Promise<void> {
+  let threw = false;
+  let returned: unknown;
+  try {
+    returned = await fn();
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error(`conformance: ${msg} — expected a thrown error, got ${JSON.stringify(returned)}`);
   }
 }
 
@@ -598,6 +626,74 @@ export function authStoreConformanceCases(
       const removed = await store.sweepExpired(2);
       assert(removed <= 2, `limit=2 must bound one batch, but ${removed} were removed`);
     });
+  }
+
+  // === OPTIONAL: FAIL CLOSED (supply makeFailingStore) ============================
+  // Invariant 3. A backend that answers "absent"/"allowed" when it actually FAILED has
+  // silently switched off a security control under exactly the load that broke it. The
+  // absence/expiry cases above prove a store reports "not there" correctly; these prove it
+  // never reports "not there" when the truth is "I could not tell". This is the case that
+  // pins the 2026-08-08 F-1 fix across every engine.
+
+  if (opts.makeFailingStore) {
+    const makeFailing = opts.makeFailingStore;
+    const failCase = (name: string, run: (store: AuthStore) => Promise<void>): void => {
+      cases.push({
+        name,
+        run: async () => {
+          const store = await makeFailing();
+          try {
+            await run(store);
+          } finally {
+            await store.close?.();
+          }
+        },
+      });
+    };
+
+    failCase("🚨 fail closed: getUser PROPAGATES a backend error — never null (F-1)", (store) =>
+      assertThrows(
+        () => store.getUser("app1", PK_A),
+        "SILENT KEY LOSS: getUser answered instead of throwing when the backend FAILED. `null` " +
+          "means 'answered, and absent' — connect-wallet reads it as 'never registered here', takes " +
+          "the creation branch, and overwrites the only copy of the user's encrypted wallet keys.",
+      ),
+    );
+
+    failCase("🚨 fail closed: getSession PROPAGATES a backend error — never null", (store) =>
+      assertThrows(
+        () => store.getSession("app1", "hash-1"),
+        "a swallowed getSession error returns null, which verifySession cannot tell from a genuine " +
+          "logout — a backend outage becomes a silent auth failure rather than a surfaced fault.",
+      ),
+    );
+
+    failCase("🚨 fail closed: getPublicKeyByEmail PROPAGATES a backend error — never null", (store) =>
+      assertThrows(
+        () => store.getPublicKeyByEmail("app1", "a@example.com"),
+        "a swallowed lookup error returns null — login then treats a transient outage as " +
+          "'no such account', and the /register path could re-create over an existing one.",
+      ),
+    );
+
+    failCase("🚨 fail closed: takeChallenge PROPAGATES a backend error — never false", (store) =>
+      assertThrows(
+        () => store.takeChallenge("app1", PK_A, "a".repeat(64)),
+        "a swallowed takeChallenge error returns false, turning a backend fault into an ordinary " +
+          "auth failure instead of a surfaced 500 — the caller cannot distinguish 'wrong challenge' " +
+          "from 'store down'.",
+      ),
+    );
+
+    failCase("🚨 fail closed: hitRateLimit PROPAGATES a backend error — never allowed=true", (store) =>
+      assertThrows(
+        () =>
+          store.hitRateLimit({ endpoint: "login", appId: "app1", identifier: "victim@example.com" }, 60, 5),
+        "FAIL OPEN: hitRateLimit answered instead of throwing when the backend FAILED. A rate " +
+          "limiter that cannot count must not grant permission — returning {allowed:true} disables " +
+          "the control under exactly the load that broke it.",
+      ),
+    );
   }
 
   return cases;

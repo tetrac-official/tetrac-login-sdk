@@ -14,6 +14,7 @@ import { authStoreConformanceCases } from "../src/storage/conformance";
 import { SqlAuthStore } from "../src/storage/sql/engine";
 import { sqliteDriver } from "../src/storage/sql/drivers";
 import { sqliteDialect } from "../src/storage/sql/dialects/sqlite";
+import type { SqlDriver } from "../src/storage/sql/types";
 import { createSqliteAuthStore, PreflightError, schemaFor, schemaStatementsFor } from "../src/storage/sql";
 
 // One mutable clock the suite drives via `advance`. The engine takes an injectable `now`,
@@ -28,12 +29,23 @@ function freshStore(): SqlAuthStore {
   return new SqlAuthStore(sqliteDriver(db as never), sqliteDialect(), { now: () => now });
 }
 
+// A store whose driver FAILS every query — the shape of a dropped connection. Feeds the
+// fail-closed conformance cases: the engine must propagate the error, never swallow it.
+function failingStore(): SqlAuthStore {
+  const driver: SqlDriver = {
+    query: () => Promise.reject(new Error("backend unavailable (connection reset)")),
+    transaction: () => Promise.reject(new Error("backend unavailable (connection reset)")),
+  };
+  return new SqlAuthStore(driver, sqliteDialect());
+}
+
 describe("ADR-002 — AuthStore conformance: SqlAuthStore on a REAL SQLite engine", () => {
   const cases = authStoreConformanceCases(freshStore, {
     advance: (ms) => {
       now += ms;
     },
     supportsSweep: true,
+    makeFailingStore: failingStore,
   });
 
   it("exposes the full case list", () => {

@@ -17,9 +17,21 @@ import { authStoreConformanceCases } from "../src/storage/conformance";
 import { SqlAuthStore } from "../src/storage/sql/engine";
 import { pgDriver } from "../src/storage/sql/drivers";
 import { postgresDialect } from "../src/storage/sql/dialects/postgres";
+import type { SqlDriver } from "../src/storage/sql/types";
 import { createPostgresAuthStore, PreflightError } from "../src/storage/sql";
 
 const POSTGRES_URL = process.env.POSTGRES_URL;
+
+// The fail-closed cases need a store whose backend FAILS every query — no real connection
+// required, since the point is that the shared engine propagates the error rather than
+// swallowing it. The dialect is irrelevant here (nothing reaches the DB).
+function failingStore(): SqlAuthStore {
+  const driver: SqlDriver = {
+    query: () => Promise.reject(new Error("backend unavailable (connection reset)")),
+    transaction: () => Promise.reject(new Error("backend unavailable (connection reset)")),
+  };
+  return new SqlAuthStore(driver, postgresDialect({ schema: "conf_fail" }));
+}
 
 const T0 = 1_700_000_000_000;
 let now = T0;
@@ -54,6 +66,7 @@ describePg("ADR-002 — AuthStore conformance: SqlAuthStore on a REAL Postgres",
           now += ms;
         },
         supportsSweep: true,
+        makeFailingStore: failingStore,
       })
     : [];
 
