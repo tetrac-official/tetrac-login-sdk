@@ -10,6 +10,7 @@ import { useAuth } from "@tetrac/login-sdk/react";
 import type { AuthResult } from "../core/types.js";
 import type { LoginPanelProps, PasskeyGeneratorConfig } from "./types.js";
 import { generateStrongPasskey, DEFAULT_PASSKEY_BYTES } from "./passkey.js";
+import { checkPasskeyLength } from "../core/crypto.js";
 
 export interface EmailMethodProps {
   mode: NonNullable<LoginPanelProps["emailMode"]>;
@@ -39,12 +40,31 @@ export function EmailMethod({
   // and in the `passkey` field — never persisted, logged, or transmitted.
   const [revealed, setRevealed] = useState<string | null>(null);
   const [copiedFlash, setCopiedFlash] = useState(false);
+  // Set once a registration reports the address is taken. A GENERATED passkey belongs to
+  // the account we were about to create, never to one that already exists, so this flips
+  // the field from "here is your new passkey" to "enter the one you saved".
+  const [isExistingUser, setIsExistingUser] = useState(false);
+
+  // Length floor, applied ONLY where a new account is being created.
+  //
+  // Signing in must never be blocked by it: an account registered before the floor existed
+  // holds a shorter passkey, and refusing to submit would lock that user out of wallets
+  // nothing else can decrypt. `isExistingUser` is the same case — the address came back
+  // taken, so the field now holds an existing account's passkey, not a new one.
+  const isCreating = mode !== "signin" && !isExistingUser;
+  const tooShort = isCreating && passkey ? checkPasskeyLength(passkey) : null;
 
   // Resolve the generator config + gate on emailMode. Default follows emailMode:
   // shown for signup/auto, HIDDEN for signin. `showFor:"always"` overrides;
   // explicit "signup" pins to signup only; "auto" == default.
   const pkGenConfig = useMemo<PasskeyGeneratorConfig | null>(() => {
-    if (!passkeyGenerator) return null;
+    // ENABLED BY DEFAULT — only an explicit `false` turns it off.
+    //
+    // It used to be opt-in, which meant the out-of-the-box experience was a free-text field
+    // with no floor, holding the secret that encrypts the user's wallet. Neither the demo
+    // nor a real integration switched it on. A typed passkey is the one input here that a
+    // database leak turns into an offline attack, and it is not resettable: it IS the key.
+    if (passkeyGenerator === false) return null;
     const cfg: PasskeyGeneratorConfig = typeof passkeyGenerator === "object" ? passkeyGenerator : {};
     const showFor = cfg.showFor ?? "auto";
     const visible =
@@ -60,6 +80,22 @@ export function EmailMethod({
   useEffect(() => {
     return () => setRevealed(null);
   }, []);
+
+  // AUTO-GENERATE for a new account, rather than waiting for a button press.
+  //
+  // Offering a generator the user may click still leaves the default path a typed
+  // password. Filling the field means the strong value is what happens by default and
+  // typing your own is the deliberate act. Never for a returning user: they must supply
+  // the passkey they already have.
+  useEffect(() => {
+    if (!pkGenConfig || isExistingUser || mode === "signin" || passkey) return;
+    const pk = generateStrongPasskey(pkGenConfig.bytes ?? DEFAULT_PASSKEY_BYTES);
+    setPasskey(pk);
+    setRevealed(pk); // AUTO-reveal: the user MUST save it — it is the only key to the wallet
+    pkGenConfig.onGenerate?.(pk);
+    // Deliberately not keyed on `passkey`: regenerating as the user types would be hostile.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pkGenConfig, isExistingUser, mode]);
 
   // Transient "Copied" flash.
   useEffect(() => {
@@ -100,16 +136,30 @@ export function EmailMethod({
         result = await loginWithEmail({ email, passkey });
       } else if (mode === "signup") {
         result = await registerWithEmail({ email, passkey });
+      } else if (isExistingUser) {
+        // Already told this address is taken — the field now holds a typed passkey.
+        result = await loginWithEmail({ email, passkey });
       } else {
         // "auto": try register, fall back to login if the account exists.
         try {
           result = await registerWithEmail({ email, passkey });
         } catch (err) {
-          if (String(err).includes("already exists")) {
-            result = await loginWithEmail({ email, passkey });
-          } else {
-            throw err;
+          // Branch on the STATUS, not the message text (audit 2026-08-08 F-2): 409 is the
+          // collision contract; anything else — including a 429 — is a real failure to
+          // surface, not a cue to retry as login. Duck-typed rather than
+          // `instanceof ApiError`, because a bundler can duplicate the class.
+          if ((err as { status?: unknown }).status !== 409) throw err;
+          if (passkey === revealed) {
+            // The value in the field was GENERATED for the account we were creating, so it
+            // cannot be this one's. Retrying it as a login would just 401 and burn a
+            // failed-login attempt against the real owner's rate-limit bucket. Ask instead.
+            setIsExistingUser(true);
+            setPasskey("");
+            setRevealed(null);
+            throw new Error("That email is already registered — enter its passkey to sign in.");
           }
+          // A TYPED passkey may well be the right one: fall back to login as before.
+          result = await loginWithEmail({ email, passkey });
         }
       }
       onSuccess(result);
@@ -204,7 +254,7 @@ export function EmailMethod({
       ) : null}
       <button
         type="submit"
-        disabled={busy || !email || !passkey}
+        disabled={busy || !email || !passkey || !!tooShort}
         className={classNames?.primaryButton}
         style={styles.primaryButton}
       >
@@ -215,6 +265,11 @@ export function EmailMethod({
         ) : null}
         {busy ? "…" : "Continue with email"}
       </button>
+      {tooShort ? (
+        <span className={classNames?.error} style={styles.error}>
+          {tooShort}
+        </span>
+      ) : null}
       {error ? (
         <span className={classNames?.error} style={styles.error}>
           {error}

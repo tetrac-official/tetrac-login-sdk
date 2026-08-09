@@ -24,6 +24,10 @@ const fetchMock = jest.fn(async () => ({ ok: true, json: async () => ({}) }));
 
 beforeAll(() => {
   Object.defineProperty(globalThis, "window", { value: globalThis, configurable: true });
+  Object.defineProperty(globalThis, "location", {
+    value: { hostname: "localhost", origin: "https://test.example" },
+    configurable: true,
+  });
   Object.defineProperty(globalThis, "localStorage", { value: storageShim(), configurable: true });
   Object.defineProperty(globalThis, "sessionStorage", { value: storageShim(), configurable: true });
   // configureVault binds a visibilitychange listener once window exists.

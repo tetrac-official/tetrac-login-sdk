@@ -40,15 +40,33 @@ and chosen by the consumer** — database drivers being the common case. Declare
 them optional, and load them with a lazy `import()` so a consumer who doesn't use them pays nothing
 at install time *or* in bundle size:
 
+This repo's own SDK supports five storage engines and a hardware wallet. **None** of those are
+`dependencies` — a consumer on Postgres should not install `ioredis`, `mysql2`, `better-sqlite3`, and
+three Ledger transports to use it:
+
 ```jsonc
 {
   "peerDependencies": {
     "ioredis": "^5.6.0",
-    "@upstash/redis": "^1.34.0"
+    "@upstash/redis": "^1.34.0",
+    "@vercel/kv": "^3.0.0",
+    "pg": "^8",
+    "mysql2": "^3",
+    "better-sqlite3": ">=9",
+    "@ledgerhq/hw-app-solana": "^7.10.4",
+    "next": ">=14",
+    "react": ">=18"
   },
   "peerDependenciesMeta": {
     "ioredis": { "optional": true },
-    "@upstash/redis": { "optional": true }
+    "@upstash/redis": { "optional": true },
+    "@vercel/kv": { "optional": true },
+    "pg": { "optional": true },
+    "mysql2": { "optional": true },
+    "better-sqlite3": { "optional": true },
+    "@ledgerhq/hw-app-solana": { "optional": true },
+    "next": { "optional": true },
+    "react": { "optional": true }
   }
 }
 ```
@@ -58,10 +76,22 @@ at install time *or* in bundle size:
 const { default: Redis } = await import("ioredis");
 ```
 
-The corollary: **depend on a structural interface, not on the driver's types.** Define a minimal
-`RedisLike` interface describing the handful of methods you actually call, and accept anything that
-structurally matches. Your SDK then never imports the driver's types at all, so a consumer on a
-different driver major version cannot break your build.
+The corollary, and the part that makes this scale: **depend on a structural interface, not on the
+driver's types.** Define a minimal `PgLike` / `MysqlLike` / `RedisLike` describing the handful of
+methods you actually call, and accept anything that structurally matches:
+
+```ts
+// The SDK never imports `pg`'s types. It accepts anything shaped like a pool — which is
+// also why one function covers node-postgres, @vercel/postgres, and @neondatabase/serverless.
+export interface PgLike {
+  query(text: string, values?: readonly unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  connect?(): Promise<PgClientLike>;   // optional — present only when you need transactions
+  end?(): Promise<void>;
+}
+```
+
+Two payoffs: a consumer on a different driver major cannot break your build, and one implementation
+covers every wire-compatible service you never explicitly supported.
 
 ### The peerDependencies rule, expanded
 

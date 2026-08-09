@@ -349,12 +349,21 @@ describe("passkeyGenerator — fill + enable + reveal", () => {
         onError={noop}
       />,
     );
+    // The field is ALREADY filled on mount — a generated passkey is the default path now,
+    // not something the user has to discover a button for.
+    const onMount = document.querySelector('input[type="password"]') as HTMLInputElement;
+    const firstValue = onMount.value; // capture the STRING — the element is live
+    expect(firstValue).toMatch(UNAMBIGUOUS);
+    expect(onGenerate).toHaveBeenCalledTimes(1);
+
+    // The button REGENERATES.
     fireEvent.click(screen.getByRole("button", { name: /generate a strong passkey/i }));
 
     const pwInput = document.querySelector('input[type="password"]') as HTMLInputElement;
     expect(pwInput.value).toMatch(UNAMBIGUOUS);
+    expect(pwInput.value).not.toBe(firstValue); // re-generate produced a NEW value
     expect(pwInput.value.length).toBeGreaterThanOrEqual(18);
-    expect(onGenerate).toHaveBeenCalledTimes(1);
+    expect(onGenerate).toHaveBeenCalledTimes(2);
     expect(onGenerate).toHaveBeenCalledWith(pwInput.value);
 
     // Reveal appears with the same value + a "can't be recovered" warning.
@@ -374,7 +383,16 @@ describe("passkeyGenerator — fill + enable + reveal", () => {
     let pw = document.querySelector('input[type="password"]') as HTMLInputElement;
     expect(pw.style.paddingRight).toBe("48px");
 
-    rerender(<EmailMethod mode="signup" styles={emailStyles} onSuccess={noop} onError={noop} />);
+    // Explicit opt-OUT is what removes it now — omitting the prop leaves it ON.
+    rerender(
+      <EmailMethod
+        mode="signup"
+        styles={emailStyles}
+        passkeyGenerator={false}
+        onSuccess={noop}
+        onError={noop}
+      />,
+    );
     pw = document.querySelector('input[type="password"]') as HTMLInputElement;
     expect(pw.style.paddingRight).toBe("");
   });
@@ -489,8 +507,16 @@ type EmailMethodPasskeyProp = React.ComponentProps<typeof EmailMethod>["passkeyG
 // Regression — a default panel / EmailMethod is byte-identical to today
 // ---------------------------------------------------------------------------
 describe("regression — default render is unchanged", () => {
-  it("EmailMethod without the generator: plain current-password input, no wrapper, no button", () => {
-    render(<EmailMethod mode="auto" styles={emailStyles} onSuccess={noop} onError={noop} />);
+  it("EmailMethod with the generator OPTED OUT: plain current-password input, no wrapper, no button", () => {
+    render(
+      <EmailMethod
+        mode="auto"
+        styles={emailStyles}
+        passkeyGenerator={false}
+        onSuccess={noop}
+        onError={noop}
+      />,
+    );
     expect(screen.queryByRole("button", { name: /generate a strong passkey/i })).toBeNull();
     const pw = document.querySelector('input[type="password"]') as HTMLInputElement;
     expect(pw.getAttribute("autocomplete")).toBe("current-password");
@@ -499,9 +525,11 @@ describe("regression — default render is unchanged", () => {
     expect((pw.parentElement as HTMLElement).tagName).toBe("FORM");
   });
 
-  it("LoginPanel with no new props renders no switch and no generate button", () => {
+  it("LoginPanel with no new props renders no switch, and DOES offer the generator", () => {
     render(<LoginPanel methods={["email", "wallet"]} walletConnector={connector} emailMode="signup" />);
     expect(screen.queryByRole("switch")).toBeNull();
-    expect(screen.queryByRole("button", { name: /generate a strong passkey/i })).toBeNull();
+    // Generated-by-default: the out-of-the-box panel no longer ships a bare text field for
+    // the secret that encrypts the wallet.
+    expect(screen.queryByRole("button", { name: /generate a strong passkey/i })).not.toBeNull();
   });
 });

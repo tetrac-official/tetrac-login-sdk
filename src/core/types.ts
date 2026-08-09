@@ -4,17 +4,52 @@
 export type Chain = "solana" | "evm";
 
 /**
- * Standard wallet roles. `funds` holds assets; `signing` is the agent wallet
- * used for delegated signing (so the funds key is never exposed to sign flows).
- * Consumers may also use arbitrary custom role strings.
+ * Wallet roles. `funds` holds assets; `signing` is the agent wallet used for delegated
+ * signing (so the funds key is never exposed to sign flows).
+ *
+ * CLOSED on purpose. A record holds at most one wallet per (chain, role) — four slots
+ * total — and that is what makes the encrypted blob a fixed-size thing rather than an
+ * append-only list. An open role string would make the slot space unbounded, so
+ * "import replaces a wallet" could not be enforced and a record could grow forever.
  */
-export type WalletRole = "funds" | "signing" | (string & {});
+export type WalletRole = "funds" | "signing";
+
+/**
+ * The off-chain envelope this account's hardware wallet signs under. Recorded at
+ * registration and re-used for every later derivation — see OffchainEnvelope. Absent for
+ * software wallets and for email/biometric accounts, which never sign an envelope.
+ */
+import type { OffchainEnvelope } from "./offchainMessage.js";
+export type { OffchainEnvelope };
 
 /** Authentication method used to establish the session. */
 export type AuthMethod = "email" | "wallet" | "biometric";
 
 /** Client-facing auth status, mirroring next-ttc's getAuthStatus(). */
 export type AuthStatus = "authenticated" | "session_expired" | "unauthenticated";
+
+/** Every (chain, role) slot a user record may hold — the record's fixed upper bound. */
+export const WALLET_SLOTS: ReadonlyArray<{ chain: Chain; role: WalletRole }> = [
+  { chain: "solana", role: "funds" },
+  { chain: "solana", role: "signing" },
+  { chain: "evm", role: "funds" },
+  { chain: "evm", role: "signing" },
+];
+
+/**
+ * Order wallets by their slot, so a record reads back the same way every time.
+ *
+ * Wallets are stored one per slot (a hash field on KV, a row on SQL), and neither backend
+ * promises an order when reading them back. Consumers iterate this array — `useWallets`
+ * renders it — so an unstable order would reshuffle the UI between requests for no reason.
+ */
+export function sortWalletsBySlot(wallets: EncryptedWallet[]): EncryptedWallet[] {
+  const rank = (w: EncryptedWallet): number => {
+    const i = WALLET_SLOTS.findIndex((s) => s.chain === w.chain && s.role === w.role);
+    return i === -1 ? WALLET_SLOTS.length : i;
+  };
+  return [...wallets].sort((a, b) => rank(a) - rank(b));
+}
 
 /** A single generated keypair after client-side encryption. */
 export interface EncryptedWallet {
@@ -59,6 +94,20 @@ export interface UserData {
   createdAt: number;
   /** PBKDF2 iteration count used to derive the app key (email users). Pinned at registration. */
   pbkdf2Iterations?: number;
+  /**
+   * The off-chain envelope this HARDWARE wallet signed under at registration. Pinned for
+   * the same reason as pbkdf2Iterations: it is app-key derivation input, and re-deriving
+   * with a different one yields a different key.
+   *
+   * Which envelope a Ledger accepts is a property of its FIRMWARE, discovered by cascade
+   * at signing time. Without this, a firmware update flips the device to the other layout,
+   * the same wallet signing the same message produces a different signature, and every
+   * stored wallet stops decrypting — while login keeps working, because the server accepts
+   * either envelope. Not secret; returned by /challenge so the client can pin it.
+   *
+   * Absent for software wallets and email/biometric accounts, which sign no envelope.
+   */
+  offchainEnvelope?: OffchainEnvelope;
   /**
    * SHA-256 of the user's CURRENT session token (v0.5.0) — never the token itself.
    * Used solely to revoke the previous session on re-login (the digest IS the session

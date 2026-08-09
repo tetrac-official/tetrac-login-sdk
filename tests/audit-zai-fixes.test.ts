@@ -3,6 +3,7 @@
 //   F8 — bounds-checked timingSafeEqual (no OOB read / NaN reliance)
 // (F9 — purge ttc_biometric_reg on logout — is asserted in tests/react-hooks.test.tsx.)
 import { createAuthHandlers } from "../src/server/routes";
+import { identityFor, proofFor } from "./_auth-helpers";
 import { MemoryAdapter } from "../src/storage/memory";
 import { deriveAuthPublicKey } from "../src/client/authKey";
 import { timingSafeEqual } from "../src/core/crypto";
@@ -17,9 +18,17 @@ function req(body: unknown): Request {
   });
 }
 
-function registerBody(extra: Record<string, unknown> = {}) {
+const IDENTITY = identityFor("audit-zai-fixes");
+
+async function registerBody(
+  h: { challenge: (r: Request) => Promise<Response> },
+  extra: Record<string, unknown> = {},
+) {
+  // /register now demands proof of possession of the identity key.
+  const proof = await proofFor(h, IDENTITY);
   return {
-    publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9",
+    publicKey: IDENTITY.publicKey.toBase58(),
+    ...proof,
     email: "floor@example.com",
     authPublicKey: deriveAuthPublicKey(APP_KEY),
     authMethod: "email",
@@ -38,8 +47,11 @@ describe("F3 — server PBKDF2 iteration floor", () => {
     ["600000.5 (non-integer)", 600_000.5],
   ];
   it.each(reject)("rejects pbkdf2Iterations=%s with 400", async (_label, iters) => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const res = await h.register(req(registerBody({ pbkdf2Iterations: iters })));
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
+    const res = await h.register(req(await registerBody(h, { pbkdf2Iterations: iters })));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toMatch(/pbkdf2Iterations/i);
   });
@@ -50,21 +62,30 @@ describe("F3 — server PBKDF2 iteration floor", () => {
     ["1000000 (ceiling)", 1_000_000],
   ];
   it.each(accept)("accepts pbkdf2Iterations=%s (201)", async (_label, iters) => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const res = await h.register(req(registerBody({ pbkdf2Iterations: iters })));
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
+    const res = await h.register(req(await registerBody(h, { pbkdf2Iterations: iters })));
     expect(res.status).toBe(201);
     expect((await res.json()).user.pbkdf2Iterations).toBe(iters);
   });
 
   it("rejects a non-number ('600000' string)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const res = await h.register(req(registerBody({ pbkdf2Iterations: "600000" })));
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
+    const res = await h.register(req(await registerBody(h, { pbkdf2Iterations: "600000" })));
     expect(res.status).toBe(400);
   });
 
   it("still registers when pbkdf2Iterations is omitted (legacy/wallet path)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const res = await h.register(req(registerBody()));
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
+    const res = await h.register(req(await registerBody(h)));
     expect(res.status).toBe(201);
     expect((await res.json()).user.pbkdf2Iterations).toBeUndefined();
   });

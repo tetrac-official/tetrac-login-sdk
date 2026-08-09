@@ -75,6 +75,18 @@ export class MemoryAdapter implements StorageAdapter {
     h.set(field, value);
   }
 
+  async hsetnx(key: string, field: string, value: string): Promise<boolean> {
+    let h = this.hstore.get(key);
+    if (!h) {
+      h = new Map();
+      this.hstore.set(key, h);
+    }
+    // Single-threaded JS with no await between the check and the set — genuinely atomic.
+    if (h.has(field)) return false;
+    h.set(field, value);
+    return true;
+  }
+
   async hdel(key: string, field: string): Promise<void> {
     const h = this.hstore.get(key);
     if (h) {

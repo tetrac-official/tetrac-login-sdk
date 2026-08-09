@@ -8,7 +8,7 @@
 //  - Two concurrent connect-wallet calls (upsert race)
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
-import { registerEmail, loginEmail } from "./_auth-helpers";
+import { registerEmail, loginEmail, addressFor } from "./_auth-helpers";
 import { issueChallenge, consumeChallenge } from "../src/server/challenge";
 import { KvAuthStore } from "../src/storage/store";
 import type { AuthConfig } from "../src/core/config";
@@ -121,10 +121,10 @@ describe("atomic challenge consumption (C9)", () => {
 describe("session issuance revocation", () => {
   it("sequential logins: second login revokes the first token", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const appKey = "ab".repeat(32);
-    const pk = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
+    const pk = addressFor("concurrent-safety");
 
     await registerEmail(h, { publicKey: pk, email: "seq@test.com", appKey });
 
@@ -150,12 +150,73 @@ describe("session issuance revocation", () => {
     const ud2After = await h.userData(req({}, { "ttc-auth-token": body2.authToken, "ttc-public-key": pk }));
     expect(ud2After.status).toBe(200);
   });
+
+  // L-5. The sequential case above passes because issueSession deletes the previous
+  // session key before minting the next one. That mechanism reads the previous hash off
+  // the caller's OWN snapshot of the record, so two logins in flight together both read
+  // the same value, both delete that same already-gone key, and neither deletes the
+  // other's. Two session keys stay live; the record's pointer names exactly one.
+  //
+  // Before the fix the loser's token still authenticated — and was unrevocable, since no
+  // later login and no logout could name it. verifySession now requires the presented
+  // hash to BE the record's pointer, so exactly one of the two survives.
+  it("🚨 concurrent logins: exactly ONE token is left usable", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
+
+    const appKey = "cd".repeat(32);
+    const pk = addressFor("concurrent-safety");
+
+    await registerEmail(h, { publicKey: pk, email: "race@test.com", appKey });
+
+    // Two devices signing in at the same moment.
+    const [a, b] = await Promise.all([
+      loginEmail(h, { email: "race@test.com", appKey }),
+      loginEmail(h, { email: "race@test.com", appKey }),
+    ]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    const tokenA = (await a.json()).authToken;
+    const tokenB = (await b.json()).authToken;
+    expect(tokenA).not.toBe(tokenB);
+
+    const used = await Promise.all(
+      [tokenA, tokenB].map(
+        async (t) => (await h.userData(req({}, { "ttc-auth-token": t, "ttc-public-key": pk }))).status,
+      ),
+    );
+
+    expect(used.filter((s) => s === 200)).toHaveLength(1);
+    expect(used.filter((s) => s === 401)).toHaveLength(1);
+  });
+
+  // The pointer is now load-bearing, so a token that was never the pointer must not work
+  // even while its session key is alive — this is the orphan the race used to produce.
+  it("🚨 a live session key whose hash is not the record's pointer is rejected", async () => {
+    const storage = new MemoryAdapter();
+    const store = new KvAuthStore(storage, testConfig.keyPrefixes);
+    const h = createAuthHandlers({ store, config: { origin: "https://test.example" } });
+
+    const appKey = "ef".repeat(32);
+    const pk = addressFor("concurrent-safety");
+
+    await registerEmail(h, { publicKey: pk, email: "orphan@test.com", appKey });
+    const login = await loginEmail(h, { email: "orphan@test.com", appKey });
+    const token = (await login.json()).authToken;
+
+    // The session key is untouched and unexpired; only the record's pointer moves — which
+    // is precisely the state the losing racer was left in.
+    await store.setSessionPointer("ttc", pk, "0".repeat(64));
+
+    const after = await h.userData(req({}, { "ttc-auth-token": token, "ttc-public-key": pk }));
+    expect(after.status).toBe(401);
+  });
 });
 
 describe("concurrent registration race", () => {
   it("two concurrent registrations with same email — only one succeeds", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
     const makeReg = (pk: string) =>
       registerEmail(h, { publicKey: pk, email: "duplicate@test.com", appKey: "ab".repeat(32) });
@@ -189,7 +250,7 @@ describe("concurrent registration race", () => {
 describe("concurrent connect-wallet upsert", () => {
   it("two concurrent connect-wallet calls for same new wallet — only one creates", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const kp = Keypair.generate();
     const pubKey = kp.publicKey.toBase58();
 
@@ -197,7 +258,10 @@ describe("concurrent connect-wallet upsert", () => {
     const chRes = await h.challenge(req({ publicKey: pubKey }));
     const { challenge } = await chRes.json();
     const sig = bytesToHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge)), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        kp.secretKey,
+      ),
     );
 
     // Both send the same challenge (only one should succeed)

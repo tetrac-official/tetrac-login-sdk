@@ -1,11 +1,31 @@
 // High-level browser auth client. Orchestrates key derivation, client-side wallet
 // generation, the API round-trips, and session storage for all three methods.
-import { resolveConfig, PBKDF2_ITERATIONS, type AuthConfig, type DeepPartial } from "../core/config.js";
-import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../core/crypto.js";
+import {
+  resolveConfig,
+  APP_ID_HEADER,
+  PBKDF2_ITERATIONS,
+  type AuthConfig,
+  type DeepPartial,
+} from "../core/config.js";
+import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature, checkPasskeyLength } from "../core/crypto.js";
 import { deriveAuthPublicKey, signAuthChallenge } from "./authKey.js";
+import nacl from "tweetnacl";
 import { walletLoginMessage, walletAppKeyMessage, walletAppKeyMessageHw } from "../core/index.js";
-import type { AuthResult, EncryptedWallet, UserData, WalletRole } from "../core/types.js";
-import { generateWalletBundle, flattenBundle, decryptWalletSecret } from "./wallet.js";
+import type { AuthResult, EncryptedWallet, OffchainEnvelope, UserData, WalletRole } from "../core/types.js";
+
+/**
+ * A connected wallet's message signer.
+ *
+ * The options bag is HARDWARE-ONLY and safe to ignore: software wallets (Phantom,
+ * Solflare, a wallet-adapter) take one argument and always have. A Ledger signer honours
+ * `envelope` to pin the off-chain layout for app-key derivation, and reports the layout it
+ * settled on via `onEnvelope` at registration. See OffchainEnvelope for why that matters.
+ */
+export type WalletSignMessage = (
+  message: Uint8Array,
+  opts?: { envelope?: OffchainEnvelope; onEnvelope?: (e: OffchainEnvelope) => void },
+) => Promise<Uint8Array>;
+import { generateWalletBundle, flattenBundle, decryptWalletSecret, toSolanaKeypair } from "./wallet.js";
 import {
   setSession,
   clearSession,
@@ -14,6 +34,7 @@ import {
   getAuthToken,
   getEmail,
   getPbkdf2Iterations,
+  getOffchainEnvelope,
   configureVault,
 } from "./session.js";
 import { registerPasskey, derivePasskeySecret, type PasskeyRegistration } from "./webauthn.js";
@@ -43,10 +64,29 @@ import {
  *  They are NOT interchangeable: feeding `{ registration }` for an email/web3
  *  account derives the wrong key and locks the user out — use `{ biometricUnlock }`.
  */
+/**
+ * A non-2xx API response, carrying the HTTP status.
+ *
+ * The status is the contract; the message is prose. `<EmailMethod>`'s auto mode used to
+ * decide "account exists → fall back to login" by substring-matching the message
+ * ("already exists"), which made a 429 — or any reworded error — terminal. Branch on
+ * `status` (409 = collision, 429 = throttled). Prefer duck-typing (`err.status === 409`)
+ * over `instanceof` in consuming code: a bundler can duplicate this class.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export type ReauthCredentials =
   | { passkey: string }
   | {
-      signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+      signMessage: WalletSignMessage;
       /** Hardware (Ledger) account: re-derive the app key from the newline-free message. */
       hardwareWallet?: boolean;
     }
@@ -70,6 +110,29 @@ const DEFAULT_WALLET_GEN: WalletGenConfig = {
   solana: ["funds", "signing"],
   evm: ["funds", "signing"],
 };
+
+/**
+ * The wallet bundle to generate for a WEB3 (connected-wallet) login.
+ *
+ * For email/biometric accounts the embedded Solana `funds` wallet IS the account
+ * identity — it is generated here and its public key becomes `UserData.publicKey`.
+ *
+ * For a Web3 login that is NOT true: the user's connected wallet (Phantom, Solflare,
+ * Ledger…) is already their Solana funds wallet, and it becomes `UserData.publicKey`.
+ * Generating a SECOND Solana `funds` wallet gives them a wallet they never asked for,
+ * whose private key the SDK holds and will happily reveal, and — worse — which
+ * `useActiveWallet()`/`useWallets()` then surface as "the Solana funds wallet",
+ * shadowing the real one. An app rendering that as a deposit address would send the
+ * user's funds to a wallet they don't know they own. (v0.5.1)
+ *
+ * So: strip the `funds` role from Solana. Other roles still make sense — a Solana
+ * `signing` (hot/session) wallet, and EVM wallets, are genuinely additional keys the
+ * connected Solana wallet cannot provide.
+ */
+function web3WalletGen(gen: WalletGenConfig): WalletGenConfig {
+  const solana = gen.solana?.filter((role) => role !== "funds");
+  return { ...gen, solana: solana?.length ? solana : undefined };
+}
 
 function bytesToHex(bytes: Uint8Array): string {
   let hex = "";
@@ -106,6 +169,25 @@ export class AuthClient {
     }
   }
 
+  /**
+   * The origin every wallet message is built from — read from `window.location`, NOT
+   * from config.
+   *
+   * That distinction is the fix, not a detail. If this came from config, a hostile page
+   * could set `{ appId: "victim.app", origin: "https://victim.app" }` and reproduce the
+   * victim deployment's exact app-key message, harvesting a signature whose SHA-256
+   * decrypts that user's whole wallet bundle. `window.location.origin` is the one value
+   * the page cannot lie about, and it is what the user sees in the address bar while
+   * the signing prompt names the same site.
+   */
+  private clientOrigin(): string {
+    const origin = typeof window !== "undefined" ? window.location?.origin : undefined;
+    if (!origin) {
+      throw new Error("[tetrac] Web3 wallet flows require a browser origin (window.location.origin).");
+    }
+    return origin;
+  }
+
   // --- Re-authentication (unlock + reveal) ---
 
   /**
@@ -123,9 +205,16 @@ export class AuthClient {
     }
     if ("signMessage" in creds) {
       const keyMessage = creds.hardwareWallet
-        ? walletAppKeyMessageHw(this.config.appId)
-        : walletAppKeyMessage(this.config.appId);
-      const sig = await creds.signMessage(new TextEncoder().encode(keyMessage));
+        ? walletAppKeyMessageHw(this.config.appId, this.clientOrigin())
+        : walletAppKeyMessage(this.config.appId, this.clientOrigin());
+      // Pin the layout this account registered under. Re-auth derives the SAME app key, so
+      // letting it cascade here would hand back a different key the moment a firmware
+      // update flips the device — and unlock() without `validateWith` arms it silently.
+      const pinned = creds.hardwareWallet ? getOffchainEnvelope() : null;
+      const sig = await creds.signMessage(
+        new TextEncoder().encode(keyMessage),
+        pinned ? { envelope: pinned as OffchainEnvelope } : undefined,
+      );
       return deriveAppKeyFromSignature(bytesToHex(sig));
     }
     if ("registration" in creds) {
@@ -183,20 +272,22 @@ export class AuthClient {
       body: JSON.stringify({ appId: this.config.appId, ...(body as Record<string, unknown>) }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((data as { error?: string }).error ?? `Request failed (${res.status})`);
+    if (!res.ok) {
+      throw new ApiError((data as { error?: string }).error ?? `Request failed (${res.status})`, res.status);
+    }
     return data as T;
   }
 
   /** Session + public-key + appId headers for authenticated requests. */
   private authHeaders(): Record<string, string> {
-    return { ...authHeaders(), [this.config.appIdHeader]: this.config.appId };
+    return { ...authHeaders(), [APP_ID_HEADER]: this.config.appId };
   }
 
   /** Fetch the authenticated user's full record (identity + encrypted wallets). */
   async fetchUserData(): Promise<UserData | null> {
     const res = await fetch(`${this.opts.apiBaseUrl}/user-data`, { headers: this.authHeaders() });
     if (res.status === 401) return null;
-    if (!res.ok) throw new Error(`user-data failed (${res.status})`);
+    if (!res.ok) throw new ApiError(`user-data failed (${res.status})`, res.status);
     const data = (await res.json().catch(() => ({}))) as { user?: UserData };
     return data.user ?? null;
   }
@@ -205,6 +296,13 @@ export class AuthClient {
 
   /** Register an email/passkey account; generates and encrypts wallets client-side. */
   async registerWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
+    // Enforced HERE, not in deriveAppKeyFromPasskey, so it covers integrators who build
+    // their own UI instead of using <EmailMethod>. Registration only: loginWithEmail must
+    // still derive for an account created before this floor existed, or that user loses
+    // their wallets — a strictly worse outcome than the weak key they already have.
+    const weak = checkPasskeyLength(params.passkey);
+    if (weak) throw new Error(weak);
+
     const iterations = PBKDF2_ITERATIONS[this.config.securityLevel];
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
@@ -212,6 +310,8 @@ export class AuthClient {
       bundle.solana?.funds ?? Object.values(bundle.solana ?? {})[0] ?? Object.values(bundle.evm ?? {})[0];
     if (!identity) throw new Error("walletGen must produce at least one wallet");
 
+    // Prove we hold the identity key we are about to claim (see proveIdentity).
+    const proof = await this.proveIdentity(identity, appKey);
     const result = await this.post<AuthResult>("register", {
       publicKey: identity.publicKey,
       email: params.email,
@@ -219,6 +319,7 @@ export class AuthClient {
       authMethod: "email",
       wallets: flattenBundle(bundle),
       pbkdf2Iterations: iterations, // pin the count per-user so future level changes don't orphan this account
+      ...proof,
     });
     setSession({
       publicKey: result.publicKey,
@@ -233,13 +334,22 @@ export class AuthClient {
   /** Log in with email + passkey. Re-derives the app key to unlock wallets. */
   async loginWithEmail(params: { email: string; passkey: string }): Promise<AuthResult> {
     // 1) Fetch a single-use challenge + the account's pinned PBKDF2 iteration count.
-    const { challenge, pbkdf2Iterations } = await this.post<{ challenge: string; pbkdf2Iterations?: number }>(
+    const { challenge, pbkdf2Iterations } = await this.post<{ challenge: string; pbkdf2Iterations: number }>(
       "challenge",
       { email: params.email },
     );
-    // 2) Re-derive the appKey (legacy accounts: 100k fallback) and sign the challenge
-    //    with the derived auth keypair — the server stores only the matching public key.
-    const iterations = pbkdf2Iterations ?? 100_000;
+    // 2) Re-derive the appKey with the count the SERVER pinned, and sign the challenge with
+    //    the derived auth keypair — the server stores only the matching public key.
+    //
+    //    No guess is made HERE. /challenge always returns a count now — it has to, since an
+    //    omitted field distinguished a real account from the dummy issued for an unknown
+    //    email, and that omission was an enumeration oracle. The server is the only side
+    //    that knows what an account was pinned to, so it is the only side that should say.
+    //
+    //    If the field is ever absent anyway (an older server), deriveAppKeyFromPasskey's own
+    //    `iterations = 100_000` default applies — the same value this line used to guess, so
+    //    that pairing still derives the key it always did.
+    const iterations = pbkdf2Iterations;
     const appKey = deriveAppKeyFromPasskey(params.passkey, params.email, iterations, this.config.appId);
     const signature = signAuthChallenge(appKey, challenge);
     const result = await this.post<AuthResult>("login", { email: params.email, signature, challenge });
@@ -262,35 +372,82 @@ export class AuthClient {
    * Using the fixed message for the key is what lets the same wallets decrypt on
    * every login and device.
    */
+  /**
+   * Prove possession of a freshly generated identity key, for an email/biometric register.
+   *
+   * The server requires every registration to sign a challenge with the identity key, so a
+   * caller cannot claim an address they do not control. This client generated that keypair
+   * moments ago and holds it under `appKey`, so the proof is produced locally with no
+   * prompt and no user interaction — invisible by design, and no weaker for it: the check
+   * is about key possession, and an attacker naming someone else's address has nothing to
+   * sign with.
+   *
+   * Costs one extra round trip (fetch a challenge) on the registration path only.
+   */
+  private async proveIdentity(
+    identity: EncryptedWallet,
+    appKey: string,
+  ): Promise<{ signature: string; challenge: string }> {
+    const { challenge } = await this.post<{ challenge: string }>("challenge", {
+      publicKey: identity.publicKey,
+    });
+    // Decrypt only to sign, then drop the reference — same discipline as every other
+    // signing path here.
+    const kp = await toSolanaKeypair(identity, appKey);
+    const message = new TextEncoder().encode(walletLoginMessage(challenge, this.clientOrigin()));
+    return { signature: bytesToHex(nacl.sign.detached(message, kp.secretKey)), challenge };
+  }
+
   private async walletHandshake(
     publicKey: string,
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>,
+    signMessage: WalletSignMessage,
     hardwareWallet = false,
-  ): Promise<{ appKey: string; signatureHex: string; challenge: string }> {
-    const { challenge } = await this.post<{ challenge: string }>("challenge", { publicKey });
+  ): Promise<{
+    appKey: string;
+    signatureHex: string;
+    challenge: string;
+    offchainEnvelope?: OffchainEnvelope;
+  }> {
+    // /challenge also returns the account's PINNED off-chain envelope, when it has one —
+    // the hardware counterpart of pbkdf2Iterations, and app-key derivation input just the
+    // same. Absent for a wallet registering for the first time.
+    const { challenge, offchainEnvelope: pinned } = await this.post<{
+      challenge: string;
+      offchainEnvelope?: OffchainEnvelope;
+    }>("challenge", { publicKey });
     const enc = new TextEncoder();
-    const authSig = await signMessage(enc.encode(walletLoginMessage(challenge)));
+    // The AUTH signature may cascade freely: it is challenge-bound and stateless, so which
+    // envelope produced it does not matter — the server accepts any of them.
+    const authSig = await signMessage(enc.encode(walletLoginMessage(challenge, this.clientOrigin())));
     // Hardware wallets derive the key from the newline-free message so the device
     // can clear-sign it (a Ledger rejects newline content / forces blind signing).
     const keyMessage = hardwareWallet
-      ? walletAppKeyMessageHw(this.config.appId)
-      : walletAppKeyMessage(this.config.appId);
-    const keySig = await signMessage(enc.encode(keyMessage));
+      ? walletAppKeyMessageHw(this.config.appId, this.clientOrigin())
+      : walletAppKeyMessage(this.config.appId, this.clientOrigin());
+
+    // The KEY signature must NOT cascade. Pin the recorded layout; on first registration
+    // there is none yet, so let it cascade once and capture what the device chose.
+    let used: OffchainEnvelope | undefined = pinned;
+    const keySig = await signMessage(
+      enc.encode(keyMessage),
+      hardwareWallet ? { envelope: pinned, onEnvelope: (e) => (used = e) } : undefined,
+    );
     return {
       appKey: deriveAppKeyFromSignature(bytesToHex(keySig)),
       signatureHex: bytesToHex(authSig),
       challenge,
+      offchainEnvelope: hardwareWallet ? used : undefined,
     };
   }
 
   /** Log in an already-registered Web3 wallet. */
   async loginWithWallet(params: {
     publicKey: string;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    signMessage: WalletSignMessage;
     /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
     hardwareWallet?: boolean;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+    const { appKey, signatureHex, challenge, offchainEnvelope } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
       params.hardwareWallet,
@@ -300,7 +457,7 @@ export class AuthClient {
       signature: signatureHex,
       challenge,
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, offchainEnvelope });
     return result;
   }
 
@@ -311,58 +468,67 @@ export class AuthClient {
    */
   async connectWallet(params: {
     publicKey: string;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    signMessage: WalletSignMessage;
     /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
     hardwareWallet?: boolean;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+    const { appKey, signatureHex, challenge, offchainEnvelope } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
       params.hardwareWallet,
     );
     // Sent only if the wallet is new; the server ignores it for returning wallets.
-    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
+    // NO embedded Solana `funds` wallet: the wallet they just connected IS it (web3WalletGen).
+    const bundle = await generateWalletBundle({ appKey, ...web3WalletGen(this.walletGen) });
     const result = await this.post<AuthResult>("connect-wallet", {
       publicKey: params.publicKey,
       signature: signatureHex,
       challenge,
       wallets: flattenBundle(bundle),
+      // Pin the layout this device signed under, so future derivations do not cascade.
+      offchainEnvelope,
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, offchainEnvelope });
     return result;
   }
 
   /** Register a Web3 wallet, generating any additional signing wallets client-side. */
   async registerWithWallet(params: {
     publicKey: string;
-    signMessage: (message: Uint8Array) => Promise<Uint8Array>;
+    signMessage: WalletSignMessage;
     /** Set true for a hardware wallet (Ledger) — uses the newline-free app-key message. */
     hardwareWallet?: boolean;
   }): Promise<AuthResult> {
-    const { appKey, signatureHex, challenge } = await this.walletHandshake(
+    const { appKey, signatureHex, challenge, offchainEnvelope } = await this.walletHandshake(
       params.publicKey,
       params.signMessage,
       params.hardwareWallet,
     );
-    // The connected wallet is the funds identity; generate extra (e.g. signing) wallets.
-    const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
+    // The connected wallet IS the Solana funds identity — generate only the extra wallets
+    // (Solana `signing`, EVM). web3WalletGen strips the redundant Solana `funds` role.
+    const bundle = await generateWalletBundle({ appKey, ...web3WalletGen(this.walletGen) });
     const result = await this.post<AuthResult>("register", {
       publicKey: params.publicKey,
       authMethod: "wallet",
       wallets: flattenBundle(bundle),
       signature: signatureHex,
       challenge,
+      // Pin the layout this device signed under, so future derivations do not cascade.
+      offchainEnvelope,
     });
-    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
+    setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey, offchainEnvelope });
     return result;
   }
 
   // --- Biometric ---
 
-  /** Register a biometric (passkey) account; PRF/gate secret becomes the app key. */
+  /** Register a biometric (passkey) account; PRF secret becomes the app key. */
   async registerWithBiometric(params: {
     userName: string;
   }): Promise<{ result: AuthResult; registration: PasskeyRegistration }> {
+    // Throws PrfUnavailableError on an authenticator without PRF — the derived secret IS
+    // this account's app key, so there is no passkey to retype and no wallet to re-sign.
+    // Callers should catch it and offer email or wallet registration instead.
     const registration = await registerPasskey(this.config.webauthn, params.userName);
     const appKey = await derivePasskeySecret(registration);
     const bundle = await generateWalletBundle({ appKey, ...this.walletGen });
@@ -372,13 +538,15 @@ export class AuthClient {
 
     // Internal, login-resolvable identifier derived from the credential (never shown to the user).
     const internalEmail = biometricEmail(registration);
+    const proof = await this.proveIdentity(identity, appKey);
     const result = await this.post<AuthResult>("register", {
       publicKey: identity.publicKey,
       email: internalEmail,
       authMethod: "biometric",
-      // Auth keypair derived from the PRF/gate secret; server stores only its public key.
+      // Auth keypair derived from the PRF secret; server stores only its public key.
       authPublicKey: deriveAuthPublicKey(appKey),
       wallets: flattenBundle(bundle),
+      ...proof,
     });
     setSession({ publicKey: result.publicKey, authToken: result.authToken, appKey });
     return { result, registration };
@@ -387,7 +555,7 @@ export class AuthClient {
   /** Biometric re-login: unlock the passkey secret and authenticate. */
   async loginWithBiometric(params: { registration: PasskeyRegistration }): Promise<AuthResult> {
     // Resolve the internal identity, fetch a challenge, then prove control by signing it
-    // with the auth keypair derived from the PRF/gate secret (released by Touch ID).
+    // with the auth keypair derived from the PRF secret (released by Touch ID).
     const email = biometricEmail(params.registration);
     const { challenge } = await this.post<{ challenge: string }>("challenge", { email });
     const appKey = await derivePasskeySecret(params.registration);

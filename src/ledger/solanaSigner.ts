@@ -8,8 +8,21 @@
 // This module is pure (no React) so it can be unit-tested without a device:
 // inject the two raw device methods and it produces a full signer.
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
-import { offchainMessageCandidates } from "../core/offchainMessage.js";
+import {
+  offchainMessageCandidates,
+  encodeOffchainMessageAs,
+  OFFCHAIN_ENVELOPES,
+  type OffchainEnvelope,
+} from "../core/offchainMessage.js";
 import type { SolanaSigner } from "../react/useSolanaSigner.js";
+
+/** Per-call control over which off-chain envelope a message is signed under. */
+export interface SignMessageOptions {
+  /** Sign under EXACTLY this layout — no cascade. Required for app-key derivation. */
+  envelope?: OffchainEnvelope;
+  /** Called with the layout the cascade settled on, so registration can record it. */
+  onEnvelope?: (envelope: OffchainEnvelope) => void;
+}
 
 export interface LedgerSolanaSignerDeps {
   /** base58 address of the signing account — becomes the signer's `publicKey`. */
@@ -79,12 +92,33 @@ export function createLedgerSolanaSigner(deps: LedgerSolanaSignerDeps): SolanaSi
     // negotiation — so cascade over the known layouts (legacy first, then v0),
     // falling back ONLY when the device rejects the header with 0x6a81. Any other
     // failure (user rejected, locked, blind-sign required) surfaces immediately.
-    signMessage: async (message: Uint8Array): Promise<Uint8Array> => {
+    //
+    // 🚨 For an APP-KEY signature the caller MUST pin `opts.envelope` to the layout the
+    // account registered with. The cascade picks by firmware, and a firmware update that
+    // flips the choice yields a different signature over the same message — a different
+    // app key, and every stored wallet undecryptable, with login still succeeding because
+    // the server accepts either. `opts.onEnvelope` reports the winner at registration so
+    // it can be recorded. The cascade remains correct for the AUTH signature, which is
+    // challenge-bound and stateless.
+    signMessage: async (message: Uint8Array, opts: SignMessageOptions = {}): Promise<Uint8Array> => {
+      if (opts.envelope) {
+        // Pinned: one layout, no fallback. A 0x6a81 here means the device can no longer
+        // produce this account's key — surfacing it is far better than silently deriving
+        // a different one.
+        return assert64(
+          await deps.signOffchainMessage(
+            deps.path,
+            encodeOffchainMessageAs(opts.envelope, message, publicKey.toBytes()),
+          ),
+        );
+      }
       const candidates = offchainMessageCandidates(message, publicKey.toBytes());
       let lastError: unknown;
-      for (const envelope of candidates) {
+      for (const [i, envelope] of candidates.entries()) {
         try {
-          return assert64(await deps.signOffchainMessage(deps.path, envelope));
+          const sig = assert64(await deps.signOffchainMessage(deps.path, envelope));
+          opts.onEnvelope?.(OFFCHAIN_ENVELOPES[i]!);
+          return sig;
         } catch (err) {
           lastError = err;
           const msg = err instanceof Error ? err.message : String(err);

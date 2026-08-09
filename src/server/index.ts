@@ -1,5 +1,10 @@
 // Server-only entry. Import from your API routes / backend, never the browser.
-export { createAuthHandlers, type AuthHandlers, type AuthHandlerOptions } from "./routes.js";
+export {
+  createAuthHandlers,
+  type AuthHandlers,
+  type AuthHandlerOptions,
+  type ConfigWarning,
+} from "./routes.js";
 export {
   verifySession,
   getUserByPublicKey,

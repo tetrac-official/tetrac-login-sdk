@@ -18,25 +18,30 @@ describe("verifySolanaSignature — malformed input fails closed", () => {
   const pub = kp.publicKey.toBase58();
 
   it("rejects an odd-length hex signature", () => {
-    expect(verifySolanaSignature(pub, "abc", CHALLENGE)).toBe(false);
+    expect(verifySolanaSignature(pub, "abc", CHALLENGE, "https://test.example")).toBe(false);
   });
 
   it("rejects a signature with non-hex characters", () => {
-    expect(verifySolanaSignature(pub, "zz".repeat(64), CHALLENGE)).toBe(false);
+    expect(verifySolanaSignature(pub, "zz".repeat(64), CHALLENGE, "https://test.example")).toBe(false);
   });
 
   it("rejects a well-formed but wrong signature", () => {
-    expect(verifySolanaSignature(pub, "00".repeat(64), CHALLENGE)).toBe(false);
+    expect(verifySolanaSignature(pub, "00".repeat(64), CHALLENGE, "https://test.example")).toBe(false);
   });
 
   it("rejects an invalid base58 public key (PublicKey ctor throws → caught)", () => {
-    expect(verifySolanaSignature("not valid base58 !!!", "00".repeat(64), CHALLENGE)).toBe(false);
+    expect(
+      verifySolanaSignature("not valid base58 !!!", "00".repeat(64), CHALLENGE, "https://test.example"),
+    ).toBe(false);
   });
 
   it("tolerates a 0x-prefixed signature and still verifies a real one", () => {
-    const sig = nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(CHALLENGE)), kp.secretKey);
-    expect(verifySolanaSignature(pub, "0x" + bytesToHex(sig), CHALLENGE)).toBe(true); // 0x strip branch
-    expect(verifySolanaSignature(pub, bytesToHex(sig), CHALLENGE)).toBe(true); // plain hex
+    const sig = nacl.sign.detached(
+      new TextEncoder().encode(walletLoginMessage(CHALLENGE, "https://test.example")),
+      kp.secretKey,
+    );
+    expect(verifySolanaSignature(pub, "0x" + bytesToHex(sig), CHALLENGE, "https://test.example")).toBe(true); // 0x strip branch
+    expect(verifySolanaSignature(pub, bytesToHex(sig), CHALLENGE, "https://test.example")).toBe(true); // plain hex
   });
 });
 

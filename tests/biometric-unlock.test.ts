@@ -1,18 +1,16 @@
 // unlockViaBiometric — optional biometric UNLOCK for ANY account (PRD §7, §12).
 //
 // Verifies the wrap/unwrap round-trip arms the EXACT app key for both an
-// email-style key (PBKDF2 hex) and a web3-style key (SHA256 hex); that PRF and
-// gate modes both round-trip; that enable throws when the vault is locked; that
-// a tampered AES-GCM blob and a declined assertion both fail closed; that
-// disable purges the blob; and the DISTINCTION GUARD — for the same credential,
-// `{ registration }` (primary) and `{ biometricUnlock }` (wrap) resolve to
-// DIFFERENT keys.
+// email-style key (PBKDF2 hex) and a web3-style key (SHA256 hex); that enable
+// throws when the vault is locked; that a tampered AES-GCM blob and a declined
+// assertion both fail closed; that disable purges the blob; that an authenticator
+// without PRF is REFUSED rather than downgraded; and the DISTINCTION GUARD — for
+// the same credential, `{ registration }` (primary) and `{ biometricUnlock }`
+// (wrap) resolve to DIFFERENT keys.
 //
-// Runs in the node env with Web Crypto (Node 18+). We REUSE the in-memory
-// IndexedDB + navigator.credentials mocking pattern from
-// tests/webauthn-migration.test.ts and tests/webauthn-gate.test.ts, extended to
-// cover the shared v2 DB (two stores: gate_secrets + unlock_blobs), .delete(),
-// and a configurable PRF assertion. Only ephemeral key material is used.
+// Runs in the node env with Web Crypto (Node 18+), against an in-memory IndexedDB
+// + navigator.credentials mock with a switchable PRF assertion. Only ephemeral key
+// material is used.
 import { deriveAppKeyFromPasskey, deriveAppKeyFromSignature } from "../src/core/crypto";
 
 const subtle = globalThis.crypto?.subtle;
@@ -114,9 +112,9 @@ function storageShim(): Storage {
   } as Storage;
 }
 
-// --- WebAuthn mock: switchable between PRF and gate, and decline ---
+// --- WebAuthn mock: PRF supported or not, and decline ---
 
-let credMode: "prf" | "gate" = "prf";
+let prfSupported = true;
 let declineAssertion = false;
 // Deterministic PRF output per (credentialId via the assertion). We key it on a
 // module-scope value set right before derivePasskeySecret runs.
@@ -143,13 +141,13 @@ function makeNavigator() {
     credentials: {
       create: async () => ({
         rawId: pendingRawId,
-        getClientExtensionResults: () => (credMode === "prf" ? { prf: { enabled: true } } : {}),
+        getClientExtensionResults: () => (prfSupported ? { prf: { enabled: true } } : {}),
       }),
       get: async () => {
         if (declineAssertion) return null; // user declined / cancelled
         return {
           getClientExtensionResults: () =>
-            credMode === "prf" ? { prf: { results: { first: hexToArrayBuffer(nextPrfHex) } } } : {},
+            prfSupported ? { prf: { results: { first: hexToArrayBuffer(nextPrfHex) } } } : {},
         };
       },
     },
@@ -188,10 +186,10 @@ import {
   VaultLockedError,
 } from "../src/client/session";
 
-const cfg = { rpId: "localhost", rpName: "TTC test", preferPrf: true };
+const cfg = { rpId: "localhost", rpName: "TTC test" };
 
-async function freshEnable(appKey: string, mode: "prf" | "gate"): Promise<PasskeyRegistration> {
-  credMode = mode;
+async function freshEnable(appKey: string): Promise<PasskeyRegistration> {
+  prfSupported = true;
   declineAssertion = false;
   pendingRawId = randomRawId();
   configureVault({ autoLockMs: 60_000 });
@@ -215,8 +213,7 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
 
   it("PRF mode: round-trips an email-style app key (PBKDF2 output)", async () => {
     const appKey = deriveAppKeyFromPasskey("hunter2-ephemeral", "user@example.com", 1_000);
-    const reg = await freshEnable(appKey, "prf");
-    expect(reg.mode).toBe("prf");
+    const reg = await freshEnable(appKey);
     expect(hasBiometricUnlock()).toBe(true);
 
     lockVault();
@@ -226,10 +223,9 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
     expect(getAppKey()).toBe(appKey); // exact app key re-armed
   });
 
-  it("gate mode: round-trips a web3-style app key (SHA256 output)", async () => {
+  it("round-trips a web3-style app key (SHA256 output)", async () => {
     const appKey = deriveAppKeyFromSignature("ab".repeat(32));
-    const reg = await freshEnable(appKey, "gate");
-    expect(reg.mode).toBe("gate");
+    const reg = await freshEnable(appKey);
 
     lockVault();
     await unlockViaBiometric(reg);
@@ -246,7 +242,7 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
 
   it("a tampered AES-GCM blob fails closed (auth tag check)", async () => {
     const appKey = deriveAppKeyFromSignature("cd".repeat(32));
-    const reg = await freshEnable(appKey, "gate");
+    const reg = await freshEnable(appKey);
 
     // Flip a ciphertext byte in the stored blob.
     const store = idb.dbs.get("ttc_passkey_store")!.stores.get("unlock_blobs")!;
@@ -262,7 +258,7 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
 
   it("a declined/absent assertion fails closed", async () => {
     const appKey = deriveAppKeyFromSignature("ef".repeat(32));
-    const reg = await freshEnable(appKey, "prf");
+    const reg = await freshEnable(appKey);
 
     lockVault();
     declineAssertion = true;
@@ -272,7 +268,7 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
 
   it("disable purges the blob (subsequent unlock fails closed)", async () => {
     const appKey = deriveAppKeyFromSignature("12".repeat(32));
-    const reg = await freshEnable(appKey, "gate");
+    const reg = await freshEnable(appKey);
     expect(hasBiometricUnlock()).toBe(true);
 
     await disableBiometricUnlock(reg);
@@ -286,30 +282,25 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
     await expect(unlockViaBiometric(reg)).rejects.toThrow(); // no blob -> fail closed
   });
 
-  it("clearSession (logout) purges the unlock blob + gate secret (PRD §7)", async () => {
+  it("clearSession (logout) purges the unlock blob (PRD §7)", async () => {
     // The clearSession hook is a DISTINCT path from disableBiometricUnlock: it
     // reads the credentialId from the localStorage marker (not a registration
-    // arg) and fires the async purge best-effort. Gate mode also stores a gate
-    // secret, so we assert BOTH the unlock_blobs blob and the gate_secrets entry
-    // are gone after logout.
+    // arg) and fires the async purge best-effort.
     const appKey = deriveAppKeyFromSignature("34".repeat(32));
-    const reg = await freshEnable(appKey, "gate");
+    const reg = await freshEnable(appKey);
     expect(hasBiometricUnlock()).toBe(true);
 
     const blobStore = idb.dbs.get("ttc_passkey_store")!.stores.get("unlock_blobs")!;
-    const gateStore = idb.dbs.get("ttc_passkey_store")!.stores.get("gate_secrets")!;
     expect(blobStore.get(reg.credentialId)).toBeDefined();
-    expect(gateStore.get(reg.credentialId)).toBeDefined();
 
     clearSession();
     // Marker is removed synchronously inside the hook.
     expect(hasBiometricUnlock()).toBe(false);
 
-    // The durable stores are cleared asynchronously (best-effort); the in-memory
+    // The durable store is cleared asynchronously (best-effort); the in-memory
     // shim resolves via queueMicrotask, so drain the event loop before asserting.
     await new Promise((r) => setTimeout(r, 0));
     expect(blobStore.get(reg.credentialId)).toBeUndefined();
-    expect(gateStore.get(reg.credentialId)).toBeUndefined();
 
     // No blob -> a subsequent unlock fails closed.
     lockVault();
@@ -318,12 +309,33 @@ describeCrypto("biometric unlock — wrap/unwrap round-trip", () => {
     expect(getAppKey()).toBeNull();
   });
 
+  it("🚨 an authenticator without PRF is REFUSED, never downgraded to on-device storage", async () => {
+    // Gate mode used to cover this case by minting a random secret and keeping it in
+    // IndexedDB under a non-extractable AES-GCM key. That key's HANDLE sat beside its
+    // own ciphertext, so any same-origin script could decrypt it with no biometric
+    // ceremony — and for a biometric-PRIMARY account that secret WAS the app key, i.e.
+    // IndexedDB was its sole custodian. The mode is gone: no PRF, no credential.
+    prfSupported = false;
+    declineAssertion = false;
+    pendingRawId = randomRawId();
+    configureVault({ autoLockMs: 60_000 });
+    armAppKey("aa".repeat(32));
+
+    await expect(enableBiometricUnlock(cfg, "user")).rejects.toThrow(/PRF extension/);
+
+    // Nothing was persisted on the way out.
+    const db = idb.dbs.get("ttc_passkey_store");
+    expect(db?.stores.get("gate_secrets")).toBeUndefined(); // the store no longer exists
+    expect(hasBiometricUnlock()).toBe(false);
+    prfSupported = true;
+  });
+
   it("DISTINCTION GUARD: { registration } secret != { biometricUnlock } unwrapped key", async () => {
     // For the SAME credential: derivePasskeySecret(reg) (the biometric-PRIMARY
     // path) must NOT equal the app key recovered by unwrapping the blob (the
     // biometric-UNLOCK path). Confusing the two is the exact bug this prevents.
     const appKey = deriveAppKeyFromPasskey("ephemeral-pw", "guard@example.com", 1_000);
-    const reg = await freshEnable(appKey, "prf");
+    const reg = await freshEnable(appKey);
 
     const primarySecret = await derivePasskeySecret(reg); // would be the app key for a PRIMARY account
     const unlockedKey = await unwrapAppKey(reg.credentialId, primarySecret); // the wrap path

@@ -19,7 +19,7 @@
 // stores keep their `StorageAdapter` and are wrapped by `KvAuthStore` below — nothing
 // existing breaks.
 import type { StorageAdapter } from "./adapter.js";
-import type { UserData } from "../core/types.js";
+import { sortWalletsBySlot, type UserData, type EncryptedWallet } from "../core/types.js";
 import { DEFAULT_CONFIG, type KeyPrefixes } from "../core/config.js";
 import { appScoped } from "../server/keys.js";
 
@@ -64,6 +64,26 @@ export interface RateLimitBucket {
  * and distinct accounts. Case-insensitivity is a property of the EMAIL, not of the
  * keyspace.
  */
+/**
+ * The email index is already held by a DIFFERENT identity key.
+ *
+ * The handler checks for a collision before it writes, but check-then-act is not atomic:
+ * two concurrent registrations for one address both see "free" and both proceed. The store
+ * is the only layer that can settle it, so it does — and reports the loss rather than
+ * silently overwriting, which used to leave the first account intact but unreachable.
+ *
+ * Callers should translate this to the same 409 the pre-check produces.
+ */
+export class EmailTakenError extends Error {
+  constructor(
+    readonly email: string,
+    readonly appId: string,
+  ) {
+    super(`email already registered for appId "${appId}"`);
+    this.name = "EmailTakenError";
+  }
+}
+
 export function normalizeEmail(email: string): string {
   return email.toLowerCase().trim();
 }
@@ -92,18 +112,73 @@ export function normalizeEmail(email: string): string {
 export interface AuthStore {
   // --- users -------------------------------------------------------------------
   getUser(appId: string, publicKey: string): Promise<UserData | null>;
-  /** Upsert the record AND maintain the email index. Both, or neither — one transaction
-   *  where the backend supports it. Concurrent putUser for the same email under two
-   *  different appIds must not lose either write. */
+  /**
+   * Create or replace the record AND maintain the email index. Both, or neither — one
+   * transaction where the backend supports it. Concurrent putUser for the same email
+   * under two different appIds must not lose either write.
+   *
+   * This is the WHOLE-RECORD write, and it belongs to registration only. Every other
+   * mutation must use the field-scoped writes below, because a whole-record write is a
+   * read-modify-write and two of them racing lose data — see {@link putWalletSlot}.
+   */
   putUser(user: UserData): Promise<void>;
+  /**
+   * Write ONE wallet slot, leaving every other field of the record untouched.
+   *
+   * 🚨 This exists because the alternative destroys wallet keys. A record used to be a
+   * single JSON blob that every write rewrote wholesale, so an import that overlapped a
+   * login — an ordinary occurrence, since issuing a session also rewrote the record —
+   * resolved last-write-wins and silently dropped one of them. `encryptedSecret` is the
+   * ONLY copy of a client-generated private key: there is no backup, no escrow, and no
+   * re-derivation, so losing it strands any assets at that address permanently. Both
+   * requests returned 200.
+   *
+   * A record holds at most one wallet per (chain, role) — four slots (see WALLET_SLOTS) —
+   * so this addresses a slot rather than an array index, and writing one slot cannot
+   * disturb another. Two writers targeting the SAME slot resolve last-write-wins, which
+   * is what "replace this wallet" means.
+   *
+   * The write must be atomic with respect to other fields. On a KV backend that is one
+   * hash-field write; on SQL it is one row in the wallets table.
+   */
+  putWalletSlot(appId: string, publicKey: string, wallet: EncryptedWallet): Promise<void>;
+  /**
+   * Point the record at the session it currently owns, touching nothing else.
+   *
+   * Issuing a session used to rewrite the entire user record just to store this digest,
+   * which made every login collide with any concurrent wallet write. It is one field, so
+   * it gets one field write.
+   */
+  setSessionPointer(appId: string, publicKey: string, tokenHash: string): Promise<void>;
   /** Resolve an email to its publicKey for ONE app. Matched via {@link normalizeEmail}. */
   getPublicKeyByEmail(appId: string, email: string): Promise<string | null>;
 
   // --- challenges (single-use, TTL-bound) ---------------------------------------
+  /**
+   * ADD a challenge for this identity. Challenges ACCUMULATE — issuing one must never
+   * invalidate another that is already in flight.
+   *
+   * 🚨 A single slot per (appId, publicKey) was a targeted denial of login. `/challenge`
+   * is unauthenticated and accepts any public key or email, so anyone who can name an
+   * account could overwrite the challenge its owner was in the middle of signing. At
+   * securityLevel 2 the victim spends ~7s in PBKDF2 before submitting, which is an
+   * enormous window: one request per attempt, from anywhere, holds a named user out of
+   * their own account indefinitely.
+   *
+   * Each challenge expires independently, so the set drains on its own and is bounded by
+   * the issuance rate limit — there is nothing to evict, and eviction would reintroduce
+   * the same attack (flood the set, push the victim's out).
+   */
   putChallenge(appId: string, publicKey: string, challenge: string, ttlSeconds: number): Promise<void>;
-  /** ATOMIC get-and-delete. Returns the stored challenge and removes it; null if absent
-   *  OR expired. The CALLER does the constant-time compare — never the backend. */
-  takeChallenge(appId: string, publicKey: string): Promise<string | null>;
+  /**
+   * ATOMICALLY consume THE presented challenge. Returns true if it was present (and
+   * removes it), false if absent or expired.
+   *
+   * Atomicity is the entire replay defense: of N concurrent callers presenting the same
+   * value, exactly ONE may get true. Consuming by value means one identity's outstanding
+   * challenges are independent — burning one leaves the others usable.
+   */
+  takeChallenge(appId: string, publicKey: string, presented: string): Promise<boolean>;
 
   // --- sessions (keyed by the token's SHA-256 digest, never the token) -----------
   putSession(appId: string, tokenHash: string, value: SessionValue, ttlSeconds: number): Promise<void>;
@@ -187,37 +262,101 @@ export class KvAuthStore implements AuthStore {
     return `${this.prefixes.rateLimit}${scope}:${b.identifier}`;
   }
 
+  // The user record is a HASH, not a JSON string, and that is a correctness decision
+  // rather than an encoding preference. Fields:
+  //
+  //   p            the profile — every UserData field except `wallets`/`authTokenHash`
+  //   t            authTokenHash (the session pointer)
+  //   w:{chain}:{role}   one encrypted wallet, one per slot
+  //
+  // Splitting it this way is what makes a per-field write possible. `hset` is required to
+  // be atomic per field (see StorageAdapter), so an import writing `w:evm:funds` and a
+  // login writing `t` cannot clobber each other — which as one JSON blob they did, losing
+  // an unrecoverable wallet key.
+  private static readonly F_PROFILE = "p";
+  private static readonly F_TOKEN = "t";
+  private static walletField(chain: string, role: string): string {
+    return `w:${chain}:${role}`;
+  }
+
   async getUser(appId: string, publicKey: string): Promise<UserData | null> {
-    const raw = await this.kv.get(appScoped(this.prefixes.pubKey, appId, publicKey));
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as UserData;
-    } catch {
-      return null; // malformed/non-JSON value — fail safe instead of throwing
+    const h = await this.kv.hgetall(appScoped(this.prefixes.pubKey, appId, publicKey));
+    const profile = h[KvAuthStore.F_PROFILE];
+    if (!profile) return null;
+    // NO catch around the parses (invariant 3: errors fail closed). A hash that exists
+    // but cannot be parsed is not "absent" — returning null here told connect-wallet
+    // "no such account", and its creation branch then overwrote this record's wallet
+    // slots, the only copy of the user's encrypted keys. Throwing 500s the request and
+    // the record survives.
+    const user = JSON.parse(profile) as UserData;
+    const wallets: EncryptedWallet[] = [];
+    for (const [field, raw] of Object.entries(h)) {
+      if (!field.startsWith("w:")) continue;
+      wallets.push(JSON.parse(raw) as EncryptedWallet);
     }
+    user.wallets = sortWalletsBySlot(wallets);
+    const token = h[KvAuthStore.F_TOKEN];
+    if (token) user.authTokenHash = token;
+    return user;
   }
 
   async putUser(user: UserData): Promise<void> {
-    await this.kv.set(appScoped(this.prefixes.pubKey, user.appId, user.publicKey), JSON.stringify(user));
-    if (user.email) {
-      await this.kv.hset(this.emailKey(user.email), user.appId, user.publicKey);
+    const key = appScoped(this.prefixes.pubKey, user.appId, user.publicKey);
+    const { wallets, authTokenHash, ...profile } = user;
+    await this.kv.hset(key, KvAuthStore.F_PROFILE, JSON.stringify(profile));
+    if (authTokenHash) await this.kv.hset(key, KvAuthStore.F_TOKEN, authTokenHash);
+    for (const w of wallets ?? []) {
+      await this.kv.hset(key, KvAuthStore.walletField(w.chain, w.role), JSON.stringify(w));
     }
+    if (user.email) {
+      // CLAIM, don't overwrite. `hset` here was last-write-wins: two concurrent
+      // registrations for one address both passed the handler's collision check, both
+      // wrote, and the loser's account survived in storage while becoming UNREACHABLE by
+      // email — its owner could not log in, and only they held the key to its wallets.
+      const emailKey = this.emailKey(user.email);
+      if (!(await this.kv.hsetnx(emailKey, user.appId, user.publicKey))) {
+        // Already claimed. Ours if this is an update; someone else's if we lost the race.
+        const holder = await this.kv.hget(emailKey, user.appId);
+        if (holder !== user.publicKey) throw new EmailTakenError(user.email, user.appId);
+      }
+    }
+  }
+
+  async putWalletSlot(appId: string, publicKey: string, wallet: EncryptedWallet): Promise<void> {
+    await this.kv.hset(
+      appScoped(this.prefixes.pubKey, appId, publicKey),
+      KvAuthStore.walletField(wallet.chain, wallet.role),
+      JSON.stringify(wallet),
+    );
+  }
+
+  async setSessionPointer(appId: string, publicKey: string, tokenHash: string): Promise<void> {
+    await this.kv.hset(appScoped(this.prefixes.pubKey, appId, publicKey), KvAuthStore.F_TOKEN, tokenHash);
   }
 
   async getPublicKeyByEmail(appId: string, email: string): Promise<string | null> {
     return this.kv.hget(this.emailKey(email), appId);
   }
 
-  async putChallenge(appId: string, publicKey: string, challenge: string, ttlSeconds: number): Promise<void> {
-    await this.kv.set(appScoped(this.prefixes.challenge, appId, publicKey), challenge, {
-      exSeconds: ttlSeconds,
-    });
+  // One key PER CHALLENGE VALUE: `challenge:{appId}:{publicKey}:{challenge}`. That is what
+  // lets challenges accumulate — issuing one cannot overwrite another already in flight —
+  // and it keeps the consume a single atomic GETDEL on an exact key.
+  //
+  // The challenge is 64 hex chars minted by generateChallenge(), and consumeChallenge
+  // rejects anything else BEFORE it reaches here, so the value can never carry the ':'
+  // separator or escape its namespace.
+  private challengeKey(appId: string, publicKey: string, challenge: string): string {
+    return `${appScoped(this.prefixes.challenge, appId, publicKey)}:${challenge}`;
   }
 
-  async takeChallenge(appId: string, publicKey: string): Promise<string | null> {
-    // One GETDEL: two concurrent consumes cannot both read the value before either
-    // deletes it — only one sees it. This is the entire challenge-replay defense.
-    return this.kv.getdel(appScoped(this.prefixes.challenge, appId, publicKey));
+  async putChallenge(appId: string, publicKey: string, challenge: string, ttlSeconds: number): Promise<void> {
+    await this.kv.set(this.challengeKey(appId, publicKey, challenge), "1", { exSeconds: ttlSeconds });
+  }
+
+  async takeChallenge(appId: string, publicKey: string, presented: string): Promise<boolean> {
+    // One GETDEL on the exact key: two concurrent consumes of the SAME challenge cannot
+    // both observe it — only one does. This is the entire challenge-replay defense.
+    return (await this.kv.getdel(this.challengeKey(appId, publicKey, presented))) !== null;
   }
 
   async putSession(appId: string, tokenHash: string, value: SessionValue, ttlSeconds: number): Promise<void> {
@@ -247,10 +386,21 @@ export class KvAuthStore implements AuthStore {
       // and drops the stale TTL, which is what makes this correct — and is exactly the
       // invariant a naive SQL upsert gets wrong, producing a permanent lockout.)
       await this.kv.expire(key, windowSeconds);
-    } else if (count > maxAttempts) {
-      // Self-heal: a crash between a prior incr and its expire would leave the counter
-      // wedged over the limit with NO TTL, blocking this identifier forever. Re-applying
-      // expire is cheap and idempotent and guarantees the counter can drain.
+    } else if (count === maxAttempts + 1) {
+      // Self-heal, ONCE per window — deliberately not on every over-limit hit.
+      //
+      // The hazard being healed is a crash between a prior incr and its expire, which
+      // leaves the counter with NO TTL and would block this identifier forever. Firing on
+      // the FIRST hit past the cap heals that within at most `maxAttempts` further
+      // requests, which is all the guarantee is worth.
+      //
+      // Firing on EVERY over-limit hit (`count > maxAttempts`) instead made each one
+      // extend the window, so the counter never drained while traffic continued. Once past
+      // the cap a single request per window held it there indefinitely and `count` grew
+      // without bound. Because these buckets are keyed on a CALLER-SUPPLIED email or
+      // public key, that turned a throttle into an unauthenticated, targeted denial of
+      // service against a named account, at traffic well under the published limit.
+      // See tests/rate-limit-sustained-lockout.test.ts.
       await this.kv.expire(key, windowSeconds);
     }
     return {

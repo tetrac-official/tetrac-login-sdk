@@ -17,6 +17,25 @@ export interface KeyPrefixes {
   rateLimit: string;
 }
 
+/**
+ * The wire header names, as CONSTANTS rather than config.
+ *
+ * They were once configurable — `AuthConfig.sessionHeader` / `publicKeyHeader` /
+ * `appIdHeader` — and the server honoured them while the client hardcoded the same three
+ * strings. Setting one therefore broke authentication silently: the server looked for the
+ * configured name, the client sent the literal, and every authenticated request returned
+ * 401 with nothing to indicate why. Two sources of truth for one wire contract.
+ *
+ * A single exported constant cannot drift. It is also the better documentation — importable
+ * by a wrapper route, a proxy allowlist, or a test, instead of a re-typed string literal.
+ */
+/** Carries the opaque session token. */
+export const AUTH_TOKEN_HEADER = "ttc-auth-token";
+/** Carries the user's public key. */
+export const PUBLIC_KEY_HEADER = "ttc-public-key";
+/** Carries the request's appId on authenticated routes; falls back to config.appId. */
+export const APP_ID_HEADER = "ttc-app-id";
+
 export interface RateLimitConfig {
   windowSeconds: number;
   maxAttempts: number;
@@ -26,8 +45,11 @@ export interface WebAuthnConfig {
   /** Relying Party ID — must match the site's registrable domain. */
   rpId?: string;
   rpName: string;
-  /** Prefer the PRF extension (derive encryption key from authenticator). */
-  preferPrf: boolean;
+  // NOTE: there is no PRF opt-out. The WebAuthn PRF extension is required for every
+  // biometric flow; an authenticator without it throws PrfUnavailableError. Serving
+  // such a device would mean storing a secret the page can read — i.e. one any script
+  // on the origin can read — which is not a weaker tier of the guarantee but its
+  // absence. Those users get email + passkey or a Web3 wallet instead.
 }
 
 /** Developer-chosen key-derivation strength. Higher = stronger but slower. */
@@ -73,6 +95,13 @@ export interface AuthConfig {
    */
   appId: string;
   /**
+   * The deployment's canonical origin, e.g. `"https://myapp.example"` — scheme + host
+   * (+ port), no path, no trailing slash.
+   *
+   * REQUIRED for every Web3 wallet route;
+   */
+  origin: string;
+  /**
    * Optional allowlist of accepted `appId` values (v0.4.0). When set, a request
    * carrying any other appId is rejected (`Unknown appId`). Leave undefined to
    * accept any well-formed appId (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`). STRONGLY
@@ -90,19 +119,9 @@ export interface AuthConfig {
   securityLevel: SecurityLevel;
   /** TTL for wallet-login challenges, in seconds. */
   challengeTtlSeconds: number;
-  /** Header carrying the opaque session token. */
-  sessionHeader: string;
-  /** Header carrying the user's public key. */
-  publicKeyHeader: string;
-  /**
-   * Header carrying the request's `appId` on authenticated routes (logout,
-   * user-data, import-wallet) so session lookups are scoped to the right app
-   * (v0.4.0). Default "ttc-app-id". When absent, the server falls back to
-   * config.appId (single-app deployments need not send it).
-   */
-  appIdHeader: string;
-  /** TTL applied to issued session tokens, in seconds. Default 14400 (4h) — a leaked
-   *  bearer token dies sooner. Each new login also revokes the prior token. */
+  /** TTL applied to issued session tokens, in seconds. Default 86400 (24h). The TTL is the
+   *  backstop, not the primary revocation path: each new login revokes the prior token, so
+   *  a leaked bearer token dies at the owner's next sign-in rather than at expiry. */
   sessionTtlSeconds: number;
   /**
    * Optionally bind each session to a coarse fingerprint of the request `User-Agent`
@@ -134,6 +153,40 @@ export interface AuthConfig {
   trustedProxyHops: number;
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
+  /**
+   * The GLOBAL per-IP bucket, checked on every rate-limited route and keyed on the client
+   * IP alone — no endpoint, no appId. Default **100 per 60s**.
+   *
+   * It is deliberately its own config, NOT `rateLimit` (audit 2026-08-08 F-7). `rateLimit`
+   * sizes PER-ENDPOINT, PER-IDENTIFIER buckets; this one AGGREGATES every request from an
+   * address. Reusing `rateLimit`'s 10/60s here meant one egress IP supported only ~2
+   * sign-ins per minute (an "auto" email sign-in is up to four counted requests), which is
+   * fine for a residential IP and wrong for the population that shares one: corporate and
+   * university NAT, carrier-grade NAT, VPN exit nodes. Size this above
+   * `requests-per-sign-in × expected concurrent users per egress IP`; it is still a strong
+   * abuse signal (100/60s ≈ 25 concurrent sign-ins from one NAT) while not throttling
+   * shared-IP users during normal use.
+   */
+  ipRateLimit: RateLimitConfig;
+  /**
+   * Ceiling on ACCOUNT CREATION for the whole deployment. Default **2 per 60s**.
+   *
+   * This is the one bucket that is not keyed on anything the caller supplies. Every other
+   * bucket is keyed on an email or a public key taken from the request body, so an
+   * attacker rotating either gets a fresh counter and the limit never fires — which is how
+   * an anonymous client creates unbounded permanent records. A single global counter has
+   * no key to rotate.
+   *
+   * Charged ONLY when a record is actually created — not on every `/register` hit. The
+   * client's "auto" mode registers first and falls back to login on 409, so returning
+   * users hit `/register` routinely; counting those would throttle ordinary logins.
+   *
+   * SIZE THIS FROM YOUR SIGNUP VOLUME. It is a capacity number, not a security dial. If a
+   * launch does 200 signups an hour, 2/min is comfortable; if it does 200 in five minutes,
+   * this will reject real users, who then see a 429 and must retry. That failure is
+   * recoverable — nobody is locked out of an existing account — but it is still a failure.
+   */
+  accountCreationRateLimit: RateLimitConfig;
   webauthn: WebAuthnConfig;
   /**
    * Idle window (ms) before the in-browser app key auto-locks. After it locks,
@@ -147,18 +200,19 @@ export interface AuthConfig {
    * never the ambient session key. Default true. (Reserved — v1 always re-auths.)
    */
   revealRequiresReauth: boolean;
-  /** Max total wallets a single user record may hold — import-wallet cap (record-bloat DoS guard). */
-  maxWalletsPerUser: number;
 }
 
-export const DEFAULT_CONFIG: AuthConfig = {
+/**
+ * Defaults for everything EXCEPT `origin`, which has no safe default: on a server there
+ * is nothing to infer it from, and inventing one (localhost, the request's Host header)
+ * would silently un-bind every wallet signature. resolveConfig supplies it from
+ * `window.location.origin` in a browser and demands it explicitly everywhere else.
+ */
+export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
   appId: "ttc", // override per-deployment for cross-app key isolation (see AuthConfig.appId)
   securityLevel: 2,
   challengeTtlSeconds: 300,
-  sessionHeader: "ttc-auth-token",
-  publicKeyHeader: "ttc-public-key",
-  appIdHeader: "ttc-app-id",
-  sessionTtlSeconds: 14_400,
+  sessionTtlSeconds: 86_400,
   bindSessionToUserAgent: false,
   trustProxyHeaders: false,
   trustedProxyHops: 0,
@@ -173,25 +227,66 @@ export const DEFAULT_CONFIG: AuthConfig = {
     windowSeconds: 60,
     maxAttempts: 10,
   },
+  ipRateLimit: {
+    windowSeconds: 60,
+    maxAttempts: 100,
+  },
+  accountCreationRateLimit: {
+    windowSeconds: 60,
+    maxAttempts: 2,
+  },
   webauthn: {
     rpName: "TTC",
-    preferPrf: true,
   },
   autoLockMs: 15_000,
   lockOnHide: true,
   revealRequiresReauth: true,
-  maxWalletsPerUser: 64,
 };
 
-/** Merge a partial override onto the defaults (shallow per top-level group). */
+/**
+ * Normalize an origin for message building and comparison: lowercase, no trailing
+ * slash. `window.location.origin` and a hand-written config value must produce the
+ * same bytes or every wallet login fails, so both sides route through this.
+ */
+export function normalizeOrigin(origin: string): string {
+  return origin.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/** `window.location.origin` when running in a browser, else undefined. */
+function browserOrigin(): string | undefined {
+  return typeof window !== "undefined" ? window.location?.origin : undefined;
+}
+
+/**
+ * Merge a partial override onto the defaults (shallow per top-level group).
+ *
+ * `origin` is mandatory in the resolved config. In a browser it defaults to the page's
+ * REAL `window.location.origin`; on a server it must be given explicitly, and resolving
+ * without it throws rather than producing a config whose wallet signatures verify
+ * against nothing in particular.
+ */
 export function resolveConfig(override?: DeepPartial<AuthConfig>): AuthConfig {
-  if (!override) return DEFAULT_CONFIG;
+  const origin = override?.origin ?? browserOrigin();
+  if (!origin) {
+    throw new Error(
+      "[tetrac] config.origin is required. Set it to this deployment's canonical origin " +
+        "(e.g. 'https://myapp.example'). It binds wallet signatures to your site so they " +
+        "cannot be relayed from another, and it is app-key derivation input — set it once " +
+        "and never change it, or existing encrypted wallets will not decrypt.",
+    );
+  }
   return {
     ...DEFAULT_CONFIG,
     ...override,
-    keyPrefixes: { ...DEFAULT_CONFIG.keyPrefixes, ...override.keyPrefixes },
-    rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...override.rateLimit },
-    webauthn: { ...DEFAULT_CONFIG.webauthn, ...override.webauthn },
+    origin: normalizeOrigin(origin),
+    keyPrefixes: { ...DEFAULT_CONFIG.keyPrefixes, ...override?.keyPrefixes },
+    rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...override?.rateLimit },
+    ipRateLimit: { ...DEFAULT_CONFIG.ipRateLimit, ...override?.ipRateLimit },
+    accountCreationRateLimit: {
+      ...DEFAULT_CONFIG.accountCreationRateLimit,
+      ...override?.accountCreationRateLimit,
+    },
+    webauthn: { ...DEFAULT_CONFIG.webauthn, ...override?.webauthn },
   } as AuthConfig;
 }
 

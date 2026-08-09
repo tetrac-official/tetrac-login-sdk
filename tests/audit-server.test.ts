@@ -16,6 +16,7 @@ import { getUserByPublicKey } from "../src/server/session";
 import { DEFAULT_CONFIG } from "../src/core/config";
 import * as signature from "../src/server/signature";
 import { registerEmail, loginEmail } from "./_auth-helpers";
+import { deriveAuthPublicKey } from "../src/client/authKey";
 
 function req(body: unknown, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/api/auth", {
@@ -26,7 +27,16 @@ function req(body: unknown, headers: Record<string, string> = {}): Request {
 }
 const SOL_PUB = "SoLPubKey1111111111111111111111111111111111";
 const APP_KEY = "ab".repeat(32); // fixed 64-hex app key for the signature-auth flow
-const wallet = (i = 0) => ({ chain: "solana", role: `r${i}`, publicKey: `p${i}`, encryptedSecret: "c" });
+// A wallet in one of the four (chain, role) slots a record may hold. Roles are closed
+// ("funds" | "signing") and a record holds at most one wallet per slot, so `i` indexes
+// the slot space rather than growing a list.
+const SLOTS = [
+  { chain: "solana", role: "funds" },
+  { chain: "solana", role: "signing" },
+  { chain: "evm", role: "funds" },
+  { chain: "evm", role: "signing" },
+] as const;
+const wallet = (i = 0) => ({ ...SLOTS[i % SLOTS.length], publicKey: `p${i}`, encryptedSecret: "c" });
 
 async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: string, publicKey = SOL_PUB) {
   const res = await registerEmail(h, { publicKey, email, appKey: APP_KEY, wallets: [wallet()] });
@@ -34,34 +44,33 @@ async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: str
 }
 
 describe("H5 RESOLVED — challenge rate limiting is per-target, not a shared global bucket", () => {
-  it("distinct publicKeys get independent buckets ⇒ one abuser can't lock out everyone", async () => {
+  it("distinct REGISTERED publicKeys get independent buckets ⇒ one abuser can't lock out everyone", async () => {
+    // The concern is that flooding ONE real account's /challenge must not lock out OTHERS.
+    // That per-account distinctness applies to keys that resolve to a record — so seed the
+    // three as real wallet accounts. Unregistered keys deliberately SHARE one global bucket
+    // now (audit 2026-08-08 F-5, see audit-f5-*), so they are the wrong fixture here.
+    const store = new KvAuthStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes);
+    const A = "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9";
+    const B = "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu";
+    const C = "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse";
+    for (const publicKey of [A, B, C]) {
+      await store.putUser({ appId: "ttc", publicKey, authMethod: "wallet", wallets: [], createdAt: 1 });
+    }
     const h = createAuthHandlers({
-      storage: new MemoryAdapter(),
-      config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+      store,
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
     // trustProxyHeaders defaults false ⇒ the SDK no longer gates on the shared "unknown"
     // IP bucket; each /challenge is rate-limited on its OWN resolved-publicKey counter, so
     // hammering one target can't exhaust a global bucket and lock out the others.
-    expect(
-      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
-    ).toBe(200);
-    expect(
-      (await h.challenge(req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }))).status,
-    ).toBe(200);
-    expect(
-      (await h.challenge(req({ publicKey: "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse" }))).status,
-    ).toBe(200); // NO global lockout
+    expect((await h.challenge(req({ publicKey: A }))).status).toBe(200);
+    expect((await h.challenge(req({ publicKey: B }))).status).toBe(200);
+    expect((await h.challenge(req({ publicKey: C }))).status).toBe(200); // NO global lockout
     // The per-target limit still bites when a SINGLE target is flooded…
-    expect(
-      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
-    ).toBe(200); // AAA #2 (== limit)
-    expect(
-      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
-    ).toBe(429); // AAA #3 (> limit)
+    expect((await h.challenge(req({ publicKey: A }))).status).toBe(200); // AAA #2 (== limit)
+    expect((await h.challenge(req({ publicKey: A }))).status).toBe(429); // AAA #3 (> limit)
     // …and a different target is unaffected by that flood.
-    expect(
-      (await h.challenge(req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }))).status,
-    ).toBe(200);
+    expect((await h.challenge(req({ publicKey: B }))).status).toBe(200);
   });
 });
 
@@ -69,24 +78,33 @@ describe("challenge UNKNOWN-email rate limiting (WI-4 enumeration hardening)", (
   it("untrusted: repeated /challenge for the SAME unknown email is throttled (was previously unlimited)", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
-    // Unknown email resolves to no publicKey ⇒ 400, but the request is now rate-limited
-    // (the limit moved BEFORE resolution, so unknown emails no longer escape it).
+    // An unknown email now answers 200 with an unstored DUMMY challenge rather than 400 —
+    // the 400 was an account-existence oracle (L-3). What this case pins is unchanged: the
+    // limit runs BEFORE resolution, so probes for unknown emails are charged rather than
+    // escaping the counter entirely.
     const probe = () => h.challenge(req({ email: "ghost@example.com" }));
-    expect((await probe()).status).toBe(400);
-    expect((await probe()).status).toBe(400);
+    expect((await probe()).status).toBe(200);
+    expect((await probe()).status).toBe(200);
     expect((await probe()).status).toBe(429); // 3rd same-email probe throttled
   });
 
   it("trusted proxy: unknown-email probes from one source IP are IP-throttled across DIFFERENT emails", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { trustProxyHeaders: true, rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
+      config: {
+        origin: "https://test.example",
+        trustProxyHeaders: true,
+        // The per-IP bucket carries its own limit now (F-7); size THAT to exercise it.
+        ipRateLimit: { maxAttempts: 2, windowSeconds: 60 },
+      },
     });
+    // This is the case requester-keying exists for: DIFFERENT emails, one source. Per-target
+    // keying gave each probed address its own counter and never saw the sweep at all.
     const probe = (email: string) => h.challenge(req({ email }, { "x-forwarded-for": "1.2.3.4" }));
-    expect((await probe("a@ghost.com")).status).toBe(400);
-    expect((await probe("b@ghost.com")).status).toBe(400);
+    expect((await probe("a@ghost.com")).status).toBe(200);
+    expect((await probe("b@ghost.com")).status).toBe(200);
     expect((await probe("c@ghost.com")).status).toBe(429); // IP bucket curbs enumeration
   });
 });
@@ -102,9 +120,14 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
   });
 
   it("a 0x EVM address fails closed on the wallet-auth path — rejected at publicKey validation (400)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const evm = "0x" + "ef".repeat(20);
-    expect(signature.verifySolanaSignature(evm, "00".repeat(64), "challenge")).toBe(false);
+    expect(signature.verifySolanaSignature(evm, "00".repeat(64), "challenge", "https://test.example")).toBe(
+      false,
+    );
     const res = await h.loginWallet(
       req({ publicKey: evm, signature: "00".repeat(64), challenge: "x".repeat(64) }),
     );
@@ -118,19 +141,31 @@ describe("BY DESIGN — external wallet auth is Solana-only (EVM is internal-sig
 // a *well-formed* identity still registers without proving control of the email.
 describe("SERVERSIDE-11 RESOLVED (publicKey format) / SERVERSIDE-5 residual (email ownership)", () => {
   it("rejects an arbitrary non-Solana publicKey (e.g. an EVM 0x address) with 400", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
-    const arbitrary = "0x" + "cd".repeat(20); // not a Solana ed25519 key
-    const res = await registerEmail(h, {
-      publicKey: arbitrary,
-      email: "evm@x.com",
-      appKey: APP_KEY,
-      wallets: [],
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
     });
+    const arbitrary = "0x" + "cd".repeat(20); // not a Solana ed25519 key
+    const res = await h.register(
+      req({
+        publicKey: arbitrary,
+        email: "evm@x.com",
+        authPublicKey: deriveAuthPublicKey(APP_KEY),
+        authMethod: "email",
+        wallets: [],
+        // Dummy: publicKey validation runs BEFORE the possession proof.
+        signature: "00".repeat(64),
+        challenge: "a".repeat(64),
+      }),
+    );
     expect(res.status).toBe(400); // publicKey format is now validated (SERVERSIDE-11)
   });
 
   it("still registers a well-formed Solana identity with NO email-ownership proof (SERVERSIDE-5 residual)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await registerEmail(h, {
       publicKey: "GmaDrppBC7P5ARKV8g3djiwP89vz1jLK23V2GBjuAEGB",
       email: "noproof@x.com",
@@ -145,7 +180,7 @@ describe("AUTHSESSION-3 RESOLVED — a valid login is never blocked by an attack
   it("the victim's correct login still succeeds after an attacker exhausts the failure limit", async () => {
     const h = createAuthHandlers({
       storage: new MemoryAdapter(),
-      config: { rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
+      config: { origin: "https://test.example", rateLimit: { maxAttempts: 3, windowSeconds: 60 } },
     });
     const email = "victim@example.com";
     await registerUser(h, email);
@@ -170,7 +205,7 @@ describe("AUTHSESSION-3 RESOLVED — a valid login is never blocked by an attack
 describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.parse is guarded", () => {
   it("a 'session:'-prefixed publicKey cannot collide with the session-token store", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     // The victim's live session now lives under "session:<token>" (NOT "pubKey:session:<token>").
     const { body } = await registerUser(h, "victim@example.com");
     const token = body.authToken;
@@ -179,19 +214,29 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
     // An attacker can't even register publicKey="session:<token>" — strict Solana
     // validation rejects it (400, ':' isn't base58), so the namespace collision the
     // disjoint prefixes already prevented is now impossible at the door. Session intact.
-    const atk = await registerEmail(h, {
-      publicKey: `session:${token}`,
-      email: "atk@x.com",
-      appKey: APP_KEY,
-      wallets: [],
-    });
+    const atk = await h.register(
+      req({
+        publicKey: `session:${token}`,
+        email: "atk@x.com",
+        authPublicKey: deriveAuthPublicKey(APP_KEY),
+        authMethod: "email",
+        wallets: [],
+        signature: "00".repeat(64),
+        challenge: "a".repeat(64),
+      }),
+    );
     expect(atk.status).toBe(400);
     expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBe(body.publicKey); // intact
   });
 
-  it("getUserByPublicKey guards JSON.parse — a non-JSON stored value yields null, not a crash", async () => {
+  it("getUserByPublicKey answers null for an absent record", async () => {
     const storage = new MemoryAdapter();
-    await storage.set("pubKey:ttc:weird", "not-json{"); // malformed record
+    // A stray STRING key is invisible to the hash read — the record hash simply does not
+    // exist, so this is the ABSENT case and null is correct. An existing-but-unparseable
+    // record is the opposite case and must THROW, not read as absent — audit 2026-08-08
+    // F-1 (see audit-f1-getuser-fail-closed.test.ts): null here is what let connect-wallet
+    // re-create the record and overwrite its wallet keys.
+    await storage.set("pubKey:ttc:weird", "not-json{");
     const user = await getUserByPublicKey(
       new KvAuthStore(storage, DEFAULT_CONFIG.keyPrefixes),
       "ttc",
@@ -201,27 +246,50 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
   });
 });
 
-describe("SERVERSIDE-4 RESOLVED — import-wallet enforces a per-user total cap", () => {
-  it("import beyond maxWalletsPerUser (default 64) is rejected (400); the total stops growing", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+describe("SERVERSIDE-4 RESOLVED — the record is slot-bounded, so import cannot grow it", () => {
+  it("🚨 repeated imports never grow the record past its four (chain, role) slots", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const { body } = await registerUser(h, "user@example.com"); // starts with 1 wallet
     const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
-    const batch = Array.from({ length: 16 }, (_, i) => wallet(i)); // max per-batch is enforced (16)
+    const full = SLOTS.map((_, i) => wallet(i)); // one wallet per slot
 
-    // 1 → 17 → 33 → 49 all fit under the 64 cap; the next (would be 65) is rejected.
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(200);
-    expect((await h.importWallet(req({ wallets: batch }, auth))).status).toBe(400); // 49 + 16 > 64
+    // The old cap was a COUNT (64) over an append. That let a session holder add 63
+    // entries of ~8 KB ciphertext. The bound is now structural: there are four slots and
+    // an import replaces one, so the record cannot grow no matter how often this runs.
+    for (let i = 0; i < 5; i++) {
+      expect((await h.importWallet(req({ wallets: full }, auth))).status).toBe(200);
+    }
 
     const ud = await (await h.userData(req({}, auth))).json();
-    expect(ud.user.wallets.length).toBe(49); // capped — the rejected batch did not persist
+    expect(ud.user.wallets.length).toBe(SLOTS.length);
+
+    // …and every slot is unique.
+    const slots = ud.user.wallets.map((w: { chain: string; role: string }) => `${w.chain}:${w.role}`);
+    expect(new Set(slots).size).toBe(SLOTS.length);
+  });
+
+  it("a payload with more entries than there are slots is rejected", async () => {
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
+    const { body } = await registerUser(h, "toomany@example.com");
+    const auth = { "ttc-auth-token": body.authToken, "ttc-public-key": body.publicKey };
+    const tooMany = [...SLOTS.map((_, i) => wallet(i)), { ...wallet(0), publicKey: "extra" }];
+
+    expect((await h.importWallet(req({ wallets: tooMany }, auth))).status).toBe(400);
   });
 });
 
 describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKey / email (400)", () => {
   it("rejects a whitespace-padded publicKey", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: "   ",
@@ -235,7 +303,10 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   });
 
   it("rejects a 100k-character publicKey (length bound)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: "x".repeat(100_000),
@@ -249,7 +320,10 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
   });
 
   it("rejects a malformed email", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.register(
       req({
         publicKey: SOL_PUB,
@@ -265,7 +339,10 @@ describe("SERVERSIDE-11 RESOLVED — input validation rejects malformed publicKe
 
 describe("WEBAUTHN-1 RESOLVED — login requires a challenge signature, not a bearer hash", () => {
   it("a login without a signature is rejected; a valid challenge signature succeeds", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const appKey = "deadbeef".repeat(8); // a 256-bit PRF/gate secret (biometric appKey)
     const bioEmail = "bio_FAKECREDENTIALID@passkey.local";
 

@@ -28,6 +28,7 @@ export {
   isBiometricAvailable,
   registerPasskey,
   derivePasskeySecret,
+  PrfUnavailableError,
   type PasskeyRegistration,
 } from "./webauthn.js";
 export {
@@ -39,6 +40,7 @@ export {
 export {
   AuthClient,
   createAuthClient,
+  ApiError,
   type AuthClientOptions,
   type WalletGenConfig,
   type ReauthCredentials,

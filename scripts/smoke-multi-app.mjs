@@ -51,7 +51,15 @@ console.log(
 
 // One shared DB + one shared auth service, serving multiple apps.
 const db = new MemoryAdapter();
-const h = createAuthHandlers({ storage: db });
+const h = createAuthHandlers({
+  storage: db,
+  config: {
+    origin: "https://test.example",
+    // This script creates several accounts back-to-back to prove tenant isolation. The
+    // default 2/min creation ceiling is deliberate but is not what is under test here.
+    accountCreationRateLimit: { windowSeconds: 60, maxAttempts: 100 },
+  },
+});
 
 // 1) Email index is a { appId: publicKey } map — the requested shape.
 console.log("Email index → { appId: publicKey } map:");
@@ -69,7 +77,10 @@ check(
 );
 check(
   "records live under disjoint app-scoped keys",
-  (await db.get(`pubKey:${APP_A}:${PK_A}`)) !== null && (await db.get(`pubKey:${APP_B}:${PK_A}`)) === null,
+  // The record is a HASH (profile / session pointer / one field per wallet slot), so
+  // presence is "has any field", not "get() returned a string".
+  Object.keys(await db.hgetall(`pubKey:${APP_A}:${PK_A}`)).length > 0 &&
+    Object.keys(await db.hgetall(`pubKey:${APP_B}:${PK_A}`)).length === 0,
 );
 
 // 2) Same wallet on two apps → independent records, each its own encrypted bundle.
@@ -79,7 +90,10 @@ const W = kp.publicKey.toBase58();
 async function connect(appId, ct) {
   const { challenge } = await (await h.challenge(req({ appId, publicKey: W }))).json();
   const sig = bytesToHex(
-    nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge)), kp.secretKey),
+    nacl.sign.detached(
+      new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+      kp.secretKey,
+    ),
   );
   const wallets = [{ chain: "solana", role: "funds", publicKey: W, encryptedSecret: ct }];
   return h.connectWallet(req({ appId, publicKey: W, signature: sig, challenge, wallets }));
@@ -98,7 +112,9 @@ check(
 // 3) A challenge issued for one app does not satisfy another.
 console.log("\nChallenge scoping:");
 const { challenge: chA } = await (await h.challenge(req({ appId: APP_A, publicKey: W }))).json();
-const sigA = bytesToHex(nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(chA)), kp.secretKey));
+const sigA = bytesToHex(
+  nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(chA, "https://test.example")), kp.secretKey),
+);
 const cross = await h.loginWallet(req({ appId: APP_B, publicKey: W, signature: sigA, challenge: chA }));
 check("app-A challenge spent under app B → 401", cross.status === 401);
 
@@ -138,7 +154,10 @@ const colon = await h.register(
   }),
 );
 check("appId containing ':' (namespace separator) → 400", colon.status === 400);
-const allow = createAuthHandlers({ storage: new MemoryAdapter(), config: { allowedAppIds: [APP_A] } });
+const allow = createAuthHandlers({
+  storage: new MemoryAdapter(),
+  config: { origin: "https://test.example", allowedAppIds: [APP_A] },
+});
 const undeclared = await allow.register(
   req({
     appId: APP_B,

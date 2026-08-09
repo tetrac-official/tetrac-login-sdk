@@ -5,7 +5,7 @@
 import React, { useEffect, useState, type CSSProperties } from "react";
 // Public subpath import — see EmailMethod.tsx for why we avoid `../react/...`.
 import { useAuth } from "@tetrac/login-sdk/react";
-import { isBiometricAvailable } from "../client/webauthn.js";
+import { isBiometricAvailable, PrfUnavailableError } from "../client/webauthn.js";
 import type { AuthResult } from "../core/types.js";
 import type { PasskeyRegistration } from "../client/webauthn.js";
 import type { LoginPanelProps } from "./types.js";
@@ -35,6 +35,13 @@ export function BiometricMethod({
   const [available, setAvailable] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Set when the ceremony reveals the authenticator has no PRF extension. The mount
+  // probe cannot detect this — isBiometricAvailable() only asks whether a platform
+  // authenticator EXISTS (UVPAA), and a device can have Touch ID while lacking PRF.
+  // PRF support is reported only in the credential's extension results, so we learn
+  // it by attempting, and then retire the option rather than let the user retry into
+  // the same failure.
+  const [prfUnsupported, setPrfUnsupported] = useState(false);
 
   // Feature-detect once on mount; isBiometricAvailable is async (UVPAA probe).
   useEffect(() => {
@@ -66,18 +73,25 @@ export function BiometricMethod({
       }
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
-      setError(e.message);
+      // PrfUnavailableError is a device capability verdict, not a user mistake — and
+      // it is permanent for this authenticator. Retire the option and say something a
+      // user can act on, instead of surfacing the developer-facing message verbatim.
+      // onError still fires so the host app can steer to email / wallet itself.
+      if (e instanceof PrfUnavailableError) setPrfUnsupported(true);
+      else setError(e.message);
       onError(e);
     } finally {
       setBusy(false);
     }
   }
 
-  if (available === false) {
+  if (available === false || prfUnsupported) {
     return (
       <div className={classNames?.method} style={styles.method}>
         <span className={classNames?.muted} style={styles.muted}>
-          Biometric not available on this device.
+          {prfUnsupported
+            ? "This device can't protect a wallet key with biometrics. Continue with email or a wallet instead."
+            : "Biometric not available on this device."}
         </span>
       </div>
     );

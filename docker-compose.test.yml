@@ -1,0 +1,55 @@
+# Real engines for the storage conformance suite.
+#
+#   npm run test:docker      # bring these up, run the FULL suite against all of them, tear down
+#   npm run docker:up        # just start them (leave running for iteration)
+#   npm run docker:down      # stop them
+#
+# WHY THIS EXISTS: atomicity, expiry, and collation are properties of the ENGINE. A mock only
+# asserts that you mocked it the way you imagined — and every one of those imaginings has been
+# wrong at least once here. Running MySQL for real is what surfaced the two bugs that shipped
+# in the first cut of the SQL engine (a semicolon inside a DDL comment shattering the schema
+# split; mysql2 returning VARBINARY columns as Buffer, so every key comparison silently failed).
+# Neither was reachable from a mock, and neither was visible on SQLite or Postgres.
+#
+# Ports are deliberately non-standard so this never collides with a database you actually use.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: pw
+      POSTGRES_DB: tetrac_test
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: pw
+      MYSQL_DATABASE: tetrac_test
+    ports:
+      - "53306:3306"
+    # STRICT_ALL_TABLES on purpose: the SDK's preflight REFUSES to boot without strict mode,
+    # because non-strict MySQL truncates a 64-wallet UserData blob into invalid JSON and the
+    # user loses every wallet in it. The test suite asserts both the refusal AND the happy path,
+    # so the container must be strict.
+    command: --sql-mode=STRICT_ALL_TABLES,NO_ENGINE_SUBSTITUTION
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-ppw"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

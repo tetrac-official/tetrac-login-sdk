@@ -13,12 +13,33 @@
 import { authStoreConformanceCases } from "../src/storage/conformance";
 import { KvAuthStore } from "../src/storage/store";
 import { MemoryAdapter } from "../src/storage/memory";
+import type { StorageAdapter } from "../src/storage/adapter";
 import { DEFAULT_CONFIG } from "../src/core/config";
 
 // A single mutable clock the suite drives via `advance`. Reset by each makeStore() call,
 // which the suite invokes once per case — so cases never leak time into each other.
 const T0 = 1_700_000_000_000;
 let now = T0;
+
+// A backend that FAILS every operation — the shape of a dropped connection. Feeds the
+// fail-closed conformance cases: KvAuthStore must let these errors propagate, not swallow
+// them into a null/allowed answer.
+class FailingAdapter implements StorageAdapter {
+  private fail(): never {
+    throw new Error("backend unavailable (connection reset)");
+  }
+  get = () => this.fail();
+  set = () => this.fail();
+  del = () => this.fail();
+  incr = () => this.fail();
+  expire = () => this.fail();
+  getdel = () => this.fail();
+  hget = () => this.fail();
+  hset = () => this.fail();
+  hsetnx = () => this.fail();
+  hdel = () => this.fail();
+  hgetall = () => this.fail();
+}
 
 describe("AuthStore conformance — KvAuthStore over MemoryAdapter", () => {
   const cases = authStoreConformanceCases(
@@ -33,6 +54,7 @@ describe("AuthStore conformance — KvAuthStore over MemoryAdapter", () => {
       // MemoryAdapter implements sweepExpired (it expires lazily, so it genuinely leaks
       // without one), and KvAuthStore forwards it.
       supportsSweep: true,
+      makeFailingStore: () => new KvAuthStore(new FailingAdapter(), DEFAULT_CONFIG.keyPrefixes),
     },
   );
 

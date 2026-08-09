@@ -38,9 +38,13 @@ export function verifySolanaSignature(
   publicKeyBase58: string,
   signatureHex: string,
   challenge: string,
+  origin: string,
 ): boolean {
   try {
-    const message = new TextEncoder().encode(walletLoginMessage(challenge));
+    // `origin` MUST come from server configuration, never from the request — it is
+    // the whole anti-relay property. A caller that echoes back a client-supplied
+    // origin has rebuilt the vulnerability this parameter exists to close.
+    const message = new TextEncoder().encode(walletLoginMessage(challenge, origin));
     const sig = hexToBytes(signatureHex);
     const pubKeyBytes = new PublicKey(publicKeyBase58).toBytes();
     // 1) Raw (software wallets) — the default, unchanged path.

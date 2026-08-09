@@ -10,12 +10,17 @@
 //  - To survive a reload WITHOUT re-running a passkey ceremony, use the
 //    biometric-unlock feature: it re-arms the key from a Touch/Face-ID-gated
 //    wrapped blob, not from a raw key sitting in web storage.
+import { AUTH_TOKEN_HEADER, PUBLIC_KEY_HEADER } from "../core/config.js";
 import type { AuthStatus } from "../core/types.js";
 
 const TOKEN_KEY = "ttc-auth-token";
 const PUBKEY_KEY = "ttc-public-key";
 const EMAIL_KEY = "user_email";
 const EK_ITER_KEY = "ttc_pbkdf2_iter"; // per-user PBKDF2 iteration count, pinned at register/login
+// Per-account off-chain envelope for HARDWARE wallets, pinned at register/login. Like the
+// iteration count it is derivation input, not a secret: re-deriving under the other layout
+// silently produces a different app key and every stored wallet fails to decrypt.
+const EK_ENVELOPE_KEY = "ttc_offchain_envelope";
 const LOCK_SIGNAL_KEY = "ttc_lock_signal"; // cross-tab lock sentinel (CLIENTVAULT-7) — a bumped
 // timestamp, never a secret; writing it fires a `storage` event in sibling tabs.
 
@@ -200,6 +205,8 @@ export function setSession(params: {
   email?: string;
   /** PBKDF2 iteration count this account's app key was derived with (email users). */
   pbkdf2Iterations?: number;
+  /** Off-chain envelope this account's hardware wallet derives under. */
+  offchainEnvelope?: string;
 }): void {
   if (!hasWindow()) return;
   localStorage.setItem(TOKEN_KEY, params.authToken);
@@ -208,6 +215,7 @@ export function setSession(params: {
   if (typeof params.pbkdf2Iterations === "number") {
     localStorage.setItem(EK_ITER_KEY, String(params.pbkdf2Iterations));
   }
+  if (params.offchainEnvelope) localStorage.setItem(EK_ENVELOPE_KEY, params.offchainEnvelope);
   armAppKey(params.appKey);
 }
 
@@ -296,6 +304,11 @@ export function getPbkdf2Iterations(): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Off-chain envelope pinned for this account (hardware wallets), or null. */
+export function getOffchainEnvelope(): string | null {
+  return hasWindow() ? localStorage.getItem(EK_ENVELOPE_KEY) : null;
+}
+
 /** The app/encryption key, or null when the vault is locked. */
 export function getAppKey(): string | null {
   if (isLocked()) return null;
@@ -309,6 +322,7 @@ export function clearSession(): void {
     localStorage.removeItem(PUBKEY_KEY);
     localStorage.removeItem(EMAIL_KEY);
     localStorage.removeItem(EK_ITER_KEY);
+    localStorage.removeItem(EK_ENVELOPE_KEY);
   }
   // Fire feature cleanup hooks (e.g. purge biometric-unlock blobs). Best-effort:
   // a throwing hook must never block logout.
@@ -342,7 +356,10 @@ export function authHeaders(): Record<string, string> {
   const token = getAuthToken();
   const pubKey = getPublicKey();
   const headers: Record<string, string> = {};
-  if (token) headers["ttc-auth-token"] = token;
-  if (pubKey) headers["ttc-public-key"] = pubKey;
+  // The SAME constants the server reads. These were once two independent strings — a
+  // config field on the server and a literal here — which meant renaming the header broke
+  // authentication silently.
+  if (token) headers[AUTH_TOKEN_HEADER] = token;
+  if (pubKey) headers[PUBLIC_KEY_HEADER] = pubKey;
   return headers;
 }

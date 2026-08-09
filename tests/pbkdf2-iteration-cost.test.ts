@@ -86,9 +86,9 @@ describe("security level → PBKDF2 iteration plumbing", () => {
     expect(PBKDF2_ITERATIONS[1]).toBe(100_000);
     expect(PBKDF2_ITERATIONS[2]).toBe(600_000);
     expect(PBKDF2_ITERATIONS[3]).toBe(1_000_000);
-    expect(resolveConfig().securityLevel).toBe(2); // default level 2 = 600k (OWASP)
-    expect(resolveConfig({ securityLevel: 1 }).securityLevel).toBe(1);
-    expect(resolveConfig({ securityLevel: 3 }).securityLevel).toBe(3);
+    expect(resolveConfig({ origin: "https://test.example" }).securityLevel).toBe(2); // default level 2 = 600k (OWASP)
+    expect(resolveConfig({ origin: "https://test.example", securityLevel: 1 }).securityLevel).toBe(1);
+    expect(resolveConfig({ origin: "https://test.example", securityLevel: 3 }).securityLevel).toBe(3);
   });
 
   it("different iteration counts produce different app keys (migration safety)", () => {

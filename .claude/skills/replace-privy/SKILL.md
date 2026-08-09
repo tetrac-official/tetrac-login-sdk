@@ -24,30 +24,33 @@ Privy and `@tetrac/login-sdk` solve the same surface problem (let users log in a
 |---|---|---|
 | Key generation | Server-side MPC (Privy's infra) | Client-side in the browser (`Keypair.generate()`, viem `generatePrivateKey()`) |
 | Key custody | Privy holds shares | Nobody — user's browser has the only decryptable copy |
-| Server sees | MPC shares, OAuth identities | Ciphertext blob + public key. Since **v0.5.0**, not even the session token: the store holds only `SHA-256(token)` |
+| Server sees | MPC shares, OAuth identities | Ciphertext blob + public key. Not even the session token: the store holds only `SHA-256(token)` |
 | Reveal / export | Privy hosts a reveal iframe (`exportWallet`) | App decrypts the local blob and renders it (`decryptWalletSecret` / `withDecryptedKey`) |
-| Login methods | Email OTP, Google, Twitter, GitHub, external wallet | Email + passkey, Web3 wallet signature, biometric (WebAuthn PRF). **No OAuth.** |
+| Login methods | Email OTP, Google, Twitter, GitHub, external wallet | Email + passkey, Web3 wallet signature, biometric (WebAuthn PRF **required**). **No OAuth.** |
 | Cross-device recovery | Privy reconstructs from MPC shares + login proof | Deterministic re-derivation of the encryption key from passkey+email or wallet signature |
-| Storage | Privy's infra — nothing for you to run | **You run it.** Redis / Upstash out of the box, or implement `AuthStore` for your own database (§ Step 0) |
+| Storage | Privy's infra — nothing for you to run | **You run it.** Postgres/Supabase, MySQL, SQLite, and Redis/Upstash all ship first-party (§ Step 0.3) |
 
-### What v0.5.0 changed for this migration
+### Current version: 0.7.0
 
-Short version: **nothing on the client.** v0.5.0 was a server/storage release, and it touched zero
-files under `src/client`, `src/react`, or `src/ui`. Every React example in this skill —
+This skill targets **0.7.0**. Everything under `@tetrac/login-sdk/react` —
 `AuthProvider`, `useAuth`, `useSigner`, `useUser`, `useExportKey`, `authHeaders()`,
-`AuthResult.authToken` — is unchanged and still correct.
+`AuthResult.authToken` — works as written below.
 
-Three things that *do* affect you:
+Four things that shape the migration:
 
-- **Storage is now a real decision, with two options** (`{ storage }` for Redis-family, `{ store }`
-  for an `AuthStore` over your own database). Step 0.3.
+- **Storage is a real decision, and SQL is first-party now.** Postgres/Supabase, MySQL, and SQLite
+  ship as `@tetrac/login-sdk/storage/sql`; Redis-family stays on `{ storage }`. Step 0.3.
+- **`config.origin` is REQUIRED and permanent.** `resolveConfig` throws without it. It is app-key
+  derivation input for Web3 accounts, exactly like `appId` — set it once, never change it. Step 1.
 - **Session tokens are stored as `SHA-256` digests**, never in the clear. The client still receives
-  and sends the raw token exactly as before — but the trust-model table above is now stronger: a
-  leaked server database yields *digests*, not replayable credentials. Worth mentioning if the user
-  is comparing security postures with Privy.
-- **Upgrading an existing v0.4.x deployment logs every user out once** (their old session keys no
-  longer resolve). Irrelevant for a fresh Privy migration; it matters only if the app is *already* on
-  the SDK.
+  and sends the raw token exactly as before, but a leaked server database yields *digests*, not
+  replayable credentials. Worth raising if the user is comparing security postures with Privy.
+- **Biometric requires WebAuthn PRF and fails closed.** There is no fallback mode. Authenticators
+  without PRF throw `PrfUnavailableError` at registration — catch it and offer email+passkey rather
+  than silently downgrading. Touch ID and Face ID have PRF; some older cross-platform keys do not.
+
+> Already on an older SDK version rather than on Privy? Use the **`nextjs-login-sdk`** skill instead
+> — upgrading 0.5.0 → 0.7.0 has two data-destroying steps that this skill does not cover.
 
 Two practical consequences you MUST surface to the user before starting:
 
@@ -63,11 +66,11 @@ Two practical consequences you MUST surface to the user before starting:
 | `useWallets()` (Solana subpath) | `useAuth().publicKey` + `user.wallets` from `/api/auth/user-data` |
 | `useExportWallet({ address })` | `useExportKey(walletBlob).reveal(reauth)` — enforces a fresh re-auth ceremony (preferred); low-level: `useSigner().decrypt(walletBlob)` |
 | `embeddedWallets.solana.createOnLogin: "users-without-wallets"` | Automatic — `registerWithEmail` / `registerWithBiometric` / `connectWallet` generate the bundle |
-| `user.linkedAccounts.find(a => a.walletClientType === 'privy')` | `user.wallets.find(w => w.chain === "solana" && w.role === "funds")` |
+| `user.linkedAccounts.find(a => a.walletClientType === 'privy')` | **`useActiveWallet()`** — do **not** hand-roll `wallets.find(w => w.role === "funds")` (see the ⚠️ below) |
 | `solanaWallet.signTransaction({ transaction: bytes })` | Build a `Keypair` via `useSigner().solanaKeypair(walletBlob)`, then `tx.partialSign(kp)` |
 | Privy's hosted UI / `appearance: {...}` | Build your own login UI; SDK is headless |
 
-Server-side: Privy talks to Privy's API. The SDK requires you to run its routes **and its storage** yourself — `createNextAuthRoutes({ storage })` at `app/api/auth/[...action]/route.ts`. (Since v0.5.0 there is also `{ store }`, which takes an `AuthStore` if you're backing the SDK with your own database — Step 0.3.) See the README **Server (Next.js App Router)** section.
+Server-side: Privy talks to Privy's API. The SDK requires you to run its routes **and its storage** yourself — `createNextAuthRoutes({ storage })` (Redis-family) or `createNextAuthRoutes({ store })` (SQL / custom) at `app/api/auth/[...action]/route.ts`. Step 0.3.
 
 > **Use the ready-made React hooks.** This skill predates several first-class hooks the SDK now ships from `@tetrac/login-sdk/react`: `useUser` / `useWallets` / `useActiveWallet` (load the user record + encrypted wallets — no hand-rolled fetch), `useSolanaSigner` / `useEvmSigner` (drop-in `@solana/wallet-adapter`-shaped signers), `useExportKey` (reveal a key behind a forced re-auth ceremony), and `useBiometricUnlock` (add Touch/Face-ID unlock to *any* account). The hand-written shims below still work and are useful when you need exact wallet-adapter API compatibility, but prefer the official hooks where you can — they track the SDK's security model (memory-only vault, auto-lock, re-auth-to-reveal) for you.
 
@@ -81,32 +84,37 @@ Run these in order. Each step is self-contained — verify before moving on.
 2. Decide where the server routes live. Default is `app/api/auth/[...action]/route.ts`. The SDK serves every endpoint from that one catch-all.
 3. **Pick a storage backend.** Privy gave you this for free; now you run it. This is usually the only piece of *new infrastructure* the migration introduces, so raise it early rather than at deploy time.
 
-   | Option | When |
-   |---|---|
-   | **Upstash Redis** | The default recommendation for serverless/Vercel. Works on the edge runtime. |
-   | **ioredis** (`REDIS_URL`) | Local dev, or a self-hosted/managed Redis. Node runtime only. |
-   | **Vercel KV** | **Legacy.** Vercel sunset Vercel KV in Oct 2024 and now routes it to Upstash via the Marketplace. `VercelKVAdapter` still works and is still supported, but don't pick it for a new deployment. |
-   | **Your existing database** | Implement the **`AuthStore`** port (v0.5.0) — see below. |
+   | Option | Wire it with | When |
+   |---|---|---|
+   | **Postgres / Supabase / Neon / RDS** | `createPostgresAuthStore({ client: pool })` | You already run Postgres. One wire protocol covers Supabase, Neon, RDS/Aurora, Railway, Render, Fly, CockroachDB. |
+   | **MySQL / MariaDB** | `createMysqlAuthStore({ client })` | You already run MySQL. |
+   | **SQLite / libSQL / Turso** | `createSqliteAuthStore({ client })` | Single-node or edge-replicated. |
+   | **Upstash Redis** | `{ storage }` | No existing database. One env var, works on the edge runtime. |
+   | **ioredis** (`REDIS_URL`) | `{ storage }` | Local dev, or self-hosted/managed Redis. Node runtime only. |
+   | **Vercel KV** | `{ storage }` | **Legacy.** Vercel sunset it in Oct 2024 and routes it to Upstash now. Works, but don't pick it for a new deployment. |
+   | **Mongo / DynamoDB / Convex** | hand-written `AuthStore` | Nothing ships. Use the **`multi-database`** skill — this is real work with real failure modes. |
 
-   > **"I already run Postgres/Supabase — do I really need Redis?"** This comes up constantly, because
-   > a Next.js app migrating off Privy almost always has a database already. The honest answer as of
-   > **v0.5.0**: there is **no first-party Postgres/Mongo/MySQL backend yet** — the SDK ships the
-   > Redis family (Redis, Upstash, Vercel KV, Memory). What v0.5.0 *does* ship is the **`AuthStore`
-   > port**, so you can back it with any database yourself:
+   > **"I already run Postgres/Supabase — do I really need Redis?"** **No.** This used to be the
+   > answer's weak point; it isn't any more. Postgres, MySQL, and SQLite are first-party:
    >
    > ```ts
-   > createNextAuthRoutes({ store: new MyPostgresStore(pool) });   // instead of { storage }
+   > import { createPostgresAuthStore, schemaFor } from "@tetrac/login-sdk/storage/sql";
+   >
+   > // 1. Run schemaFor("postgres") against your database — do NOT hand-write the schema.
+   > // 2. Point the SDK at it. Preflight runs here and REFUSES TO BOOT on the dangerous stuff.
+   > const store = await createPostgresAuthStore({ client: pool });
+   > export const { GET, POST } = createNextAuthRoutes({ store, config: { origin, appId } });
    > ```
    >
-   > That is a real, supported path — but it is **not a 20-minute job**, and a plausible-looking
-   > implementation can permanently lock users out or accept expired sessions. If you go this route,
-   > read [`docs/STORAGE_ADAPTERS.md`](../../../docs/STORAGE_ADAPTERS.md) and verify against the
-   > shipped conformance suite (`@tetrac/login-sdk/storage/conformance`) — it is the acceptance bar,
-   > and it exists precisely because "obvious" backends are wrong in non-obvious ways.
+   > The preflight is the reason to use this rather than hand-rolling: it refuses to boot on a
+   > world-readable Supabase `public` schema, a non-strict MySQL that would silently truncate wallet
+   > ciphertext, or a SQLite file sitting under a web-served directory. Those are exactly the
+   > failures that don't show up in a smoke test.
    >
-   > **Recommendation for a Privy migration: start on Upstash.** It is one env var and zero risk; you
-   > are already changing enough in this migration. Swapping the backend later is a one-line change
-   > at the route, with no client impact.
+   > **Recommendation:** use the database you already have. Reach for Upstash only if you have none —
+   > it is one env var and zero new infrastructure. Swapping later is a one-line change at the route,
+   > with no client impact. **Do not hand-write an `AuthStore` for a SQL engine** — you would be
+   > re-deriving correctness rules that already ship, tested against real engines.
 
 4. Install:
    ```bash
@@ -133,23 +141,45 @@ const storage = await resolveStorageAdapter();
 export const { GET, POST } = createNextAuthRoutes({
   storage,
   config: {
-    appId: "shyft.lol", // MUST be unique + stable per deployment — it domain-separates
-    // key derivation AND namespaces storage. The default "ttc" gives no isolation.
-    webauthn: { rpName: "Shyft", preferPrf: true },
-    // sessionHeader / publicKeyHeader / keyPrefixes only if you need to namespace
+    // BOTH of these are app-key derivation input and BOTH are permanent. Set them once.
+    // Changing either re-derives every app key and existing wallets stop decrypting.
+    appId: "shyft.lol",              // unique + stable; also the storage namespace.
+                                     // The default "ttc" gives no isolation at all.
+    origin: "https://shyft.lol",     // REQUIRED — resolveConfig throws without it.
+                                     // Scheme + host (+ port). No path, no trailing slash.
+
+    allowedAppIds: ["shyft.lol"],    // reject any other appId. Warns at boot if unset.
+    webauthn: { rpName: "Shyft" },   // preferPrf is gone — PRF is mandatory now.
+
+    // Set ONLY if a proxy you operate is actually in front (Vercel, Cloudflare, your
+    // ingress). On a directly-reachable app, x-forwarded-for is caller-supplied and
+    // trusting it is worse than leaving this off.
+    trustProxyHeaders: !!process.env.VERCEL,
+    trustedProxyHops: 0,
   },
+  onWarning: (w) => console.warn(`[auth] ${w.code}: ${w.message}`),
 });
 
 export const runtime = "nodejs"; // ioredis requires node; use "edge" with Upstash
 ```
 
-Backing it with your own database instead (v0.5.0 — see Step 0.3): swap `storage` for `store`.
+Backing it with a SQL database instead (Step 0.3): swap `storage` for `store`.
 
 ```ts
-export const { GET, POST } = createNextAuthRoutes({ store: new MyPostgresStore(pool) });
+const store = await createPostgresAuthStore({ client: pool });
+export const { GET, POST } = createNextAuthRoutes({ store, config: { appId, origin } });
 ```
 
-Smoke-test: `curl -X POST http://localhost:3000/api/auth/challenge -H 'content-type: application/json' -d '{"publicKey":"xxx"}'` should return `{ "challenge": "<hex>" }`.
+**`origin` and preview deployments.** A Vercel preview on `https://app-git-xyz.vercel.app` derives
+*different* Web3 app keys than production, because the origin is baked into the message the wallet
+signs. Either pin the production origin in every environment sharing a database, or treat preview
+accounts as throwaway. Do not let this one surface after launch.
+
+Smoke-test: `curl -X POST http://localhost:3000/api/auth/challenge -H 'content-type: application/json' -d '{"publicKey":"xxx"}'` should return `{ "challenge": "<hex>", "pbkdf2Iterations": 600000 }`.
+
+Note that `/challenge` answers `200` for an **unknown** email too, with an unstored dummy challenge —
+that is deliberate (it used to be an account-existence oracle). Don't build an "account exists" check
+on it; use the `409` from `/register`.
 
 ### Step 2 — Replace `WalletProvider.tsx`
 
@@ -185,7 +215,7 @@ export default function WalletProvider({ children }: { children: React.ReactNode
         <AuthProvider
           apiBaseUrl="/api/auth"
           walletGen={{ solana: ["funds", "signing"], evm: ["funds"] }}
-          config={{ webauthn: { rpName: "Shyft", preferPrf: true } }}
+          config={{ webauthn: { rpName: "Shyft" } }}
         >
           {children}
         </AuthProvider>
@@ -361,7 +391,7 @@ Privy gave you a hosted modal for free. With the SDK you write it. Minimum viabl
 "use client";
 import { useEffect, useState } from "react";
 import { useAuth } from "@tetrac/login-sdk/react";
-import { isBiometricAvailable, type PasskeyRegistration } from "@tetrac/login-sdk/client";
+import { isBiometricAvailable, PrfUnavailableError, type PasskeyRegistration } from "@tetrac/login-sdk/client";
 import { useWallet as useExternalWallet } from "@solana/wallet-adapter-react";
 
 export function AuthModal() {
@@ -400,14 +430,23 @@ export function AuthModal() {
   };
 
   const onBiometric = async () => {
-    const stored = localStorage.getItem("ttc-passkey-reg");
-    if (stored) {
-      await loginWithBiometric({ registration: JSON.parse(stored) as PasskeyRegistration });
-    } else {
-      const { registration } = await registerWithBiometric({ userName: email || "Shyft user" });
-      localStorage.setItem("ttc-passkey-reg", JSON.stringify(registration));
+    try {
+      const stored = localStorage.getItem("ttc-passkey-reg");
+      if (stored) {
+        await loginWithBiometric({ registration: JSON.parse(stored) as PasskeyRegistration });
+      } else {
+        const { registration } = await registerWithBiometric({ userName: email || "Shyft user" });
+        localStorage.setItem("ttc-passkey-reg", JSON.stringify(registration));
+      }
+      setOpen(false);
+    } catch (e) {
+      // The authenticator has no WebAuthn PRF, so there is no assertion-bound secret to
+      // derive the app key from. The SDK fails closed here on purpose — the old fallback
+      // stored a secret any same-origin script could decrypt without any biometric prompt.
+      // Route the user to email+passkey; do NOT retry or downgrade.
+      if (e instanceof PrfUnavailableError) setBioAvailable(false);
+      else throw e;
     }
-    setOpen(false);
   };
 
   return (
@@ -598,7 +637,9 @@ After the migration, walk through each one. Don't skip — Privy gave you a lot 
 
 - [ ] `grep -rln "@privy-io" src` returns nothing.
 - [ ] **Storage is actually wired in the deployed environment.** `resolveStorageAdapter()` throws in production when no backend env var is set (rather than silently falling back to a localhost Redis that would give each instance its own ephemeral store). A successful deploy that 500s on first login is almost always this.
-- [ ] **`config.appId` is set to something unique and stable** (not the default `"ttc"`). It domain-separates key derivation — changing it later re-derives every app key and existing wallets stop decrypting.
+- [ ] **`config.appId` AND `config.origin` are set, unique, and stable.** Both are app-key derivation input — changing either later re-derives every app key and existing wallets stop decrypting. `origin` must be identical across every environment that shares a database (watch Vercel preview URLs).
+- [ ] **Boot warnings are clean.** `createAuthHandlers` warns on `unrestricted_app_id` (set `allowedAppIds`), `default_app_id` (appId still `"ttc"`), and `no_requester_identity` (`trustProxyHeaders` false). Each names a real consequence — resolve or consciously accept.
+- [ ] **Biometric registration handles `PrfUnavailableError`** rather than showing a generic failure. There is no fallback mode.
 - [ ] Email signup: new account → wallet generated → network tab shows the POST `/api/auth/register` body contains `wallets[].encryptedSecret` (ciphertext) but **no plaintext** secret/private key.
 - [ ] Email login on a second device with same email+passkey → same wallet public key surfaces (deterministic recovery works).
 - [ ] Wallet login (Phantom): two signature prompts (challenge + app-key message), then `connected` flips to true.
@@ -608,6 +649,8 @@ After the migration, walk through each one. Don't skip — Privy gave you a lot 
 - [ ] Logout clears the bearer token + public key from `localStorage` and drops the in-memory app key (the key is never in `sessionStorage`/`localStorage` to begin with).
 - [ ] Closing the tab and reopening sets `status` to `session_expired` (token survives in localStorage but the memory-only appKey is gone) — re-login is required to spend.
 - [ ] Leaving the tab idle ~15s (or switching tabs) auto-locks the vault: `useSigner().unlocked` flips to false and signing throws `VaultLockedError` until re-auth.
+- [ ] **Importing a wallet REPLACES its `(chain, role)` slot** rather than appending. A record holds at most four wallets (`WALLET_SLOTS`). If any UI resolves a wallet with `.find()`, confirm it surfaces the replacement and not a stale earlier entry.
+- [ ] Logging in on a second device **immediately invalidates the first**. Single active session is enforced on every request, not just at issuance — expect the older device to 401 rather than linger until TTL.
 
 ## Gotchas specific to this migration
 
@@ -615,7 +658,24 @@ After the migration, walk through each one. Don't skip — Privy gave you a lot 
 
 **Embedded EVM wallet.** Privy auto-created an EVM wallet on Base. The SDK's `walletGen: { evm: ["funds"] }` does the same, but only on email/biometric registration. If a user signs in via `connectWallet` (Solana signature), they don't get an EVM wallet automatically because `connectWallet` registers them as `authMethod: "wallet"` and the EVM key would be encrypted under a key derived from the Solana signature — fine for them, but no Privy-equivalent EVM identity on external-wallet users. Decide if that matters for your app.
 
-**`user.linkedAccounts` is gone.** Anywhere code probed `user.linkedAccounts` to find embedded vs external, switch to `user.wallets.find((w) => w.chain === "solana" && w.role === "funds")` (embedded) vs `useExternalWallet().connected` (external).
+**`user.linkedAccounts` is gone — and don't replace it with `role === "funds"`. ⚠️** Use
+**`useActiveWallet()`** (or `useWallets().find(w => w.isIdentity)`).
+
+`role === "funds"` looks like the obvious translation and it is **wrong for Web3 accounts**. For an
+email/biometric account the embedded Solana `funds` wallet *is* the identity. For a
+`authMethod: "wallet"` account the identity is the **connected wallet** (`user.publicKey`) — the SDK
+holds no key for it, and it is *not* in `user.wallets`. So:
+
+- `wallets.find(w => w.role === "funds")` returns **nothing** for a clean Web3 account…
+- …or, on an account created by an old SDK version, it returns a **stray embedded wallet** that
+  should never have been generated. Render that as a deposit address and the user sends funds to a
+  wallet they don't know they own. (`connectWallet`/`registerWithWallet` no longer mint a second
+  Solana funds wallet, and `useActiveWallet()` resolves the Web3 identity from the record rather than
+  from the wallet-adapter connection.)
+
+`useActiveWallet()` gets this right on both paths, and returns `encrypted: null` for an external
+wallet — which is also your signal that there is **nothing to export** (you cannot export a Phantom
+key). Gate any export UI on `active?.encrypted`, exactly as the demo does.
 
 **`embeddedWallets.showWalletUIs: false`** — no equivalent needed; the SDK has no UI to hide.
 
@@ -625,7 +685,8 @@ After the migration, walk through each one. Don't skip — Privy gave you a lot 
 
 ## What this skill does not cover
 
-- **OAuth methods (Google, Twitter, GitHub).** PRD §14 marks them as open. If the user needs them, either drop those buttons, or bridge via NextAuth: have NextAuth complete the OAuth flow, then call `registerWithEmail({ email: oauthEmail, passkey: deterministic-from-oauth-sub })`. That bridge is its own design exercise — don't improvise it inside this migration.
-- **Privy Smart Wallets / Account Abstraction.** Not in v1 (PRD §1, Non-Goals). If the Privy app relied on 4337 smart accounts, this SDK can't drop in — flag and stop.
+- **OAuth methods (Google, Twitter, GitHub).** Not supported. If the user needs them, either drop those buttons, or bridge via NextAuth: have NextAuth complete the OAuth flow, then call `registerWithEmail({ email: oauthEmail, passkey: deterministic-from-oauth-sub })`. That bridge is its own design exercise — don't improvise it inside this migration.
+- **Privy Smart Wallets / Account Abstraction.** Not supported. If the Privy app relied on 4337 smart accounts, this SDK can't drop in — flag and stop.
 - **Migrating an *already-active* Privy user base.** Existing users have keys held by Privy's MPC. There is no way to import those into a non-custodial scheme without first calling Privy's `exportWallet` on each user and asking them to import the raw key into the new SDK. Treat this as a separate UX project; this skill assumes a fresh deployment or a deliberate keep-existing-Privy-users-on-Privy phase.
-- **Writing a custom `AuthStore`** to back the SDK with Postgres/Supabase/Mongo/etc. instead of Redis. That is a real, supported path (v0.5.0) but it is its own piece of work with its own failure modes — a backend that looks correct can permanently lock users out or accept expired sessions. Use the **`multi-database`** skill and [`docs/STORAGE_ADAPTERS.md`](../../../docs/STORAGE_ADAPTERS.md), and do it as a **separate change** from the Privy migration. Don't improvise a database backend and a wallet-stack swap in the same PR.
+- **Writing a custom `AuthStore`** for an engine that doesn't ship (Mongo, DynamoDB, Convex, Durable Objects). Postgres/MySQL/SQLite/Redis all ship — do **not** hand-write those. For anything else, use the **`multi-database`** skill, verify against `@tetrac/login-sdk/storage/conformance`, and do it as a **separate change** from the Privy migration. Don't improvise a database backend and a wallet-stack swap in the same PR.
+- **Upgrading an app already on an older `@tetrac/login-sdk`.** That is the **`nextjs-login-sdk`** skill, and it has two data-destroying steps this one doesn't cover.

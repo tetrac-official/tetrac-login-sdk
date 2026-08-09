@@ -11,20 +11,23 @@
 //   decrypt / sign / reveal) works unchanged for any auth method.
 //
 // AT-REST SAFETY: the wrapped blob can sit in IndexedDB because unwrapping always
-// requires a fresh Touch ID assertion — the PRF secret is never persisted, and
-// the gate secret is held under a non-extractable AES-GCM key released only after
-// a successful userVerification assertion. Storage-scraping XSS reads ciphertext
-// it can never unwrap.
+// requires a fresh Touch ID assertion. The PRF secret that derives the wrap key is
+// never persisted — it exists only for the duration of an assertion — so the blob
+// is inert on its own. Storage-scraping XSS reads ciphertext it can never unwrap.
+//
+// This is what distinguishes the blob from the deleted gate mode: gate stored a
+// USABLE key handle beside its own ciphertext, so a script could decrypt with no
+// ceremony at all. Here the unwrapping key does not exist until the user touches
+// the sensor.
 //
 // CRYPTO (PRD §4): authenticated encryption via NATIVE WebCrypto AES-256-GCM (the
 // same primitive wallet secrets now use). The AES key is HKDF-SHA-256 of the passkey
-// secret (the raw PRF/gate secret is NEVER used directly as a key).
+// secret (the raw PRF secret is NEVER used directly as a key).
 import type { WebAuthnConfig } from "../core/config.js";
 import { armAppKey, getAppKey, VaultLockedError, registerSessionClearHook } from "./session.js";
 import {
   registerPasskey,
   derivePasskeySecret,
-  gateDelete,
   b64urlDecode,
   openPasskeyDb,
   UNLOCK_BLOBS_STORE,
@@ -54,7 +57,7 @@ interface UnlockBlob {
 /**
  * Derive the AES-256-GCM wrapping key from the passkey secret via HKDF-SHA-256:
  *   salt = the credentialId BYTES (b64url-decoded), info = "ttc-biometric-unlock-v1".
- * The raw PRF/gate secret is never used directly as the AES key.
+ * The raw PRF secret is never used directly as the AES key.
  */
 async function deriveWrapKey(credentialId: string, secretHex: string): Promise<CryptoKey> {
   const ikm = fromHex(secretHex);
@@ -196,7 +199,7 @@ export async function unlockViaBiometric(registration: PasskeyRegistration): Pro
 }
 
 /**
- * Remove the wrapped blob + the gate secret + the on-device marker for a
+ * Remove the wrapped blob + the on-device marker for a
  * credential. After this, hasBiometricUnlock() is false and the at-rest blob is
  * gone. Idempotent.
  */
@@ -207,18 +210,16 @@ export async function disableBiometricUnlock(registration: PasskeyRegistration):
 // --- logout purge wiring (no session -> biometricUnlock import cycle) ---
 
 /**
- * Purge all biometric-unlock state for a credential: the IndexedDB wrapped blob,
- * the gate secret (gate mode only; no-op for PRF), and the sync localStorage
- * marker. Always removes the marker first so a half-completed purge can't leave
- * hasBiometricUnlock() reporting true.
+ * Purge all biometric-unlock state for a credential: the IndexedDB wrapped blob and
+ * the sync localStorage marker. Always removes the marker first so a half-completed
+ * purge can't leave hasBiometricUnlock() reporting true.
  */
 async function purge(credentialId: string): Promise<void> {
   if (hasWindow()) localStorage.removeItem(MARKER_KEY);
   await blobDelete(credentialId);
-  await gateDelete(credentialId);
 }
 
-// On logout (clearSession), purge the registered credential's blob + gate secret.
+// On logout (clearSession), purge the registered credential's wrapped blob.
 // We read the credentialId from the SYNC marker (the registration object isn't
 // available here) and fire the async purge best-effort. Registered at module
 // load; session.ts never imports this file, so there is no import cycle.
@@ -226,9 +227,8 @@ registerSessionClearHook(() => {
   if (!hasWindow()) return;
   const credentialId = localStorage.getItem(MARKER_KEY);
   // Remove the marker synchronously so hasBiometricUnlock() flips immediately,
-  // then clear the durable stores asynchronously (best-effort).
+  // then clear the durable store asynchronously (best-effort).
   localStorage.removeItem(MARKER_KEY);
   if (!credentialId) return;
   void blobDelete(credentialId).catch(() => {});
-  void gateDelete(credentialId).catch(() => {});
 });

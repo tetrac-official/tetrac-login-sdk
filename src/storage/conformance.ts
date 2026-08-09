@@ -19,7 +19,7 @@
 // a REAL engine in Docker, not a mock — atomicity, collation and expiry are properties
 // of the engine, and a mock only asserts you mocked it the way you imagined.
 import type { AuthStore } from "./store.js";
-import type { UserData, EncryptedWallet } from "../core/types.js";
+import { WALLET_SLOTS, type UserData, type EncryptedWallet } from "../core/types.js";
 
 export interface ConformanceCase {
   name: string;
@@ -36,6 +36,21 @@ export interface ConformanceOptions {
   advance?: (ms: number) => Promise<void> | void;
   /** Set true if the backend implements the optional `sweepExpired`. */
   supportsSweep?: boolean;
+  /**
+   * OPTIONAL. A factory returning a store whose BACKEND FAILS every read — the shape of a
+   * dropped connection, a pool timeout, a statement timeout. When supplied, the suite adds
+   * the fail-closed cases (invariant 3): a read that FAILED must PROPAGATE the error, never
+   * swallow it into an "absent"/"allowed" answer.
+   *
+   * This is what would have caught the 2026-08-08 F-1 regression, where `getUser` caught a
+   * failing wallets query and returned `null` — read by `connect-wallet` as "never
+   * registered", which then overwrote the only copy of the user's encrypted wallet keys.
+   *
+   * Build it by wrapping your driver/adapter so its read methods reject (see the SQLite and
+   * MemoryAdapter conformance tests for the two shapes). Omit it if your backend cannot
+   * cheaply simulate a failing read — the cases are then skipped, not failed.
+   */
+  makeFailingStore?: () => AuthStore | Promise<AuthStore>;
 }
 
 // --- tiny assertion kit (no test-framework dependency) ---------------------------
@@ -49,6 +64,19 @@ function assertEqual<T>(actual: T, expected: T, msg: string): void {
     throw new Error(
       `conformance: ${msg} — expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
+  }
+}
+
+async function assertThrows(fn: () => Promise<unknown>, msg: string): Promise<void> {
+  let threw = false;
+  let returned: unknown;
+  try {
+    returned = await fn();
+  } catch {
+    threw = true;
+  }
+  if (!threw) {
+    throw new Error(`conformance: ${msg} — expected a thrown error, got ${JSON.stringify(returned)}`);
   }
 }
 
@@ -68,14 +96,20 @@ function makeUser(over: Partial<UserData> = {}): UserData {
   } as UserData;
 }
 
-/** A UserData at the documented cap: maxWalletsPerUser = 64 encrypted wallets (~15 KB). */
+/**
+ * The LARGEST UserData the server will ever persist: all four (chain, role) slots filled,
+ * each carrying a max-length encryptedSecret (8192 chars) — roughly 33 KB.
+ *
+ * The record is slot-bounded, not count-bounded: `validateWallets` rejects a fifth entry
+ * and any duplicate slot, and import REPLACES a slot rather than appending. So this is a
+ * real worst case a backend must round-trip byte-identically, not an arbitrary number.
+ */
 function makeMaxWalletUser(): UserData {
-  const wallets: EncryptedWallet[] = Array.from({ length: 64 }, (_, i) => ({
+  const wallets: EncryptedWallet[] = WALLET_SLOTS.map((slot, i) => ({
+    ...slot,
     publicKey: `${PK_A}${i}`,
-    encryptedSecret: `${"a1b2c3d4".repeat(20)}:${String(i).padStart(4, "0")}`,
-    role: "trading",
-    chain: i % 2 === 0 ? "solana" : "evm",
-  })) as EncryptedWallet[];
+    encryptedSecret: `${"a1b2c3d4".repeat(1024)}:${String(i).padStart(4, "0")}`,
+  }));
   return makeUser({ wallets, email: "max@example.com" });
 }
 
@@ -167,40 +201,73 @@ export function authStoreConformanceCases(
 
   // === CHALLENGES =================================================================
 
-  add("🚨 challenge: N concurrent takeChallenge — exactly ONE caller observes the value", async (store) => {
-    await store.putChallenge("app1", PK_A, "the-challenge", 300);
+  add("🚨 challenge: N concurrent takeChallenge — exactly ONE caller wins", async (store) => {
+    const c = "a".repeat(64);
+    await store.putChallenge("app1", PK_A, c, 300);
 
-    const results = await Promise.all(Array.from({ length: 8 }, () => store.takeChallenge("app1", PK_A)));
-    const winners = results.filter((r) => r === "the-challenge");
+    const results = await Promise.all(Array.from({ length: 8 }, () => store.takeChallenge("app1", PK_A, c)));
     assertEqual(
-      winners.length,
+      results.filter(Boolean).length,
       1,
-      "CHALLENGE REPLAY: more than one caller observed the same single-use challenge. " +
+      "CHALLENGE REPLAY: more than one caller consumed the same single-use challenge. " +
         "takeChallenge must be an ATOMIC get-and-delete — it is the sole mechanism closing " +
         "the replay race.",
     );
   });
 
   add("challenge: a consumed challenge is gone", async (store) => {
-    await store.putChallenge("app1", PK_A, "once", 300);
-    assertEqual(await store.takeChallenge("app1", PK_A), "once", "first take returns the value");
-    assertEqual(await store.takeChallenge("app1", PK_A), null, "second take must return null");
+    const c = "b".repeat(64);
+    await store.putChallenge("app1", PK_A, c, 300);
+    assertEqual(await store.takeChallenge("app1", PK_A, c), true, "first take consumes it");
+    assertEqual(await store.takeChallenge("app1", PK_A, c), false, "second take must fail");
+  });
+
+  add("🚨 challenge: issuing a NEW challenge does not invalidate one already in flight", async (store) => {
+    // A single slot per identity was a targeted denial of login: /challenge is
+    // unauthenticated and accepts any public key, so one request from anywhere
+    // overwrote whatever the account's owner was in the middle of signing — a ~7s
+    // window at securityLevel 2, repeatable indefinitely.
+    const inFlight = "c".repeat(64);
+    const attacker = "d".repeat(64);
+    await store.putChallenge("app1", PK_A, inFlight, 300);
+    await store.putChallenge("app1", PK_A, attacker, 300);
+
+    assertEqual(
+      await store.takeChallenge("app1", PK_A, inFlight),
+      true,
+      "TARGETED LOCKOUT: issuing a second challenge destroyed the first. Challenges must " +
+        "ACCUMULATE per identity — each expiring on its own — so that anyone able to name " +
+        "an account cannot invalidate its owner's in-flight login.",
+    );
+    // …and the two are independent: burning one leaves the other usable.
+    assertEqual(await store.takeChallenge("app1", PK_A, attacker), true, "the other survives");
+  });
+
+  add("challenge: consuming one value does not consume a different one", async (store) => {
+    const a = "e".repeat(64);
+    const b = "f".repeat(64);
+    await store.putChallenge("app1", PK_A, a, 300);
+    await store.putChallenge("app1", PK_A, b, 300);
+    assertEqual(await store.takeChallenge("app1", PK_A, a), true, "a is consumed");
+    assertEqual(await store.takeChallenge("app1", PK_A, a), false, "a is now gone");
+    assertEqual(await store.takeChallenge("app1", PK_A, b), true, "b was untouched");
   });
 
   add("🚨 challenge: an expired challenge is invisible — with NO sweep having run", async (store) => {
-    await store.putChallenge("app1", PK_A, "stale", 1);
+    const c = "1".repeat(64);
+    await store.putChallenge("app1", PK_A, c, 1);
     await advance(1000);
     assertEqual(
-      await store.takeChallenge("app1", PK_A),
-      null,
+      await store.takeChallenge("app1", PK_A, c),
+      false,
       "expiry MUST be enforced on the READ path. A TTL index / cron / reaper is space " +
         "reclamation only — Mongo sweeps ~60s late, DynamoDB up to days — and relying on " +
         "it means accepting expired challenges.",
     );
   });
 
-  add("challenge: absent challenge returns null (never throws)", async (store) => {
-    assertEqual(await store.takeChallenge("app1", PK_B), null, "absent challenge is null");
+  add("challenge: an absent challenge returns false (never throws)", async (store) => {
+    assertEqual(await store.takeChallenge("app1", PK_B, "9".repeat(64)), false, "absent is false");
   });
 
   // === SESSIONS ===================================================================
@@ -259,12 +326,12 @@ export function authStoreConformanceCases(
     assertEqual(await store.getUser("app1", PK_B), null, "absent user is null");
   });
 
-  add("🚨 user: a 64-wallet UserData round-trips BYTE-IDENTICAL (no silent truncation)", async (store) => {
+  add("🚨 user: a max-size UserData round-trips BYTE-IDENTICAL (no silent truncation)", async (store) => {
     const u = makeMaxWalletUser();
     await store.putUser(u);
     const got = await store.getUser("app1", PK_A);
     assert(got, "the max-size record must be readable");
-    assertEqual(got.wallets.length, 64, "all 64 wallets must survive");
+    assertEqual(got.wallets.length, WALLET_SLOTS.length, "every wallet slot must survive");
     assertEqual(
       JSON.stringify(got.wallets),
       JSON.stringify(u.wallets),
@@ -297,6 +364,110 @@ export function authStoreConformanceCases(
       "email lookup must normalize (lowercase + trim) — use the exported normalizeEmail(). " +
         "Do NOT delegate this to the column's collation: on MySQL that would ALSO case-fold " +
         "the appId and the base58 publicKey, merging distinct tenants and distinct accounts.",
+    );
+  });
+
+  add(
+    "🚨 user record: a wallet-slot write and a session-pointer write do NOT clobber each other",
+    async (store) => {
+      // The user record must NOT be a single blob that every write rewrites wholesale.
+      // When it was, an import overlapping a login resolved last-write-wins and silently
+      // destroyed one of them — and `encryptedSecret` is the ONLY copy of that private
+      // key, so the funds at that address became permanently unreachable.
+      const u = makeUser({ publicKey: PK_A, email: "slots@example.com", wallets: [] });
+      await store.putUser(u);
+
+      const wallet = {
+        chain: "evm" as const,
+        role: "funds" as const,
+        publicKey: "0xabc",
+        encryptedSecret: "IMPORTED",
+      };
+      await Promise.all([
+        store.putWalletSlot(u.appId, PK_A, wallet),
+        store.setSessionPointer(u.appId, PK_A, "d".repeat(64)),
+      ]);
+
+      const got = await store.getUser(u.appId, PK_A);
+      assertEqual(
+        got?.wallets.find((w) => w.chain === "evm" && w.role === "funds")?.encryptedSecret,
+        "IMPORTED",
+        "LOST WRITE: the session-pointer write destroyed a wallet. These are different " +
+          "fields of the record and must be writable independently — a whole-record " +
+          "read-modify-write here loses an unrecoverable private key.",
+      );
+      assertEqual(got?.authTokenHash, "d".repeat(64), "the session pointer was lost");
+    },
+  );
+
+  add("🚨 user record: writing one wallet slot leaves the other slots untouched", async (store) => {
+    const solana = {
+      chain: "solana" as const,
+      role: "funds" as const,
+      publicKey: PK_A,
+      encryptedSecret: "KEEP-ME",
+    };
+    const u = makeUser({ publicKey: PK_B, email: "twoslots@example.com", wallets: [solana] });
+    await store.putUser(u);
+
+    await store.putWalletSlot(u.appId, PK_B, {
+      chain: "evm",
+      role: "signing",
+      publicKey: "0xdef",
+      encryptedSecret: "NEW",
+    });
+
+    const got = await store.getUser(u.appId, PK_B);
+    assertEqual(got?.wallets.length, 2, "writing one slot must not drop another");
+    assertEqual(
+      got?.wallets.find((w) => w.chain === "solana")?.encryptedSecret,
+      "KEEP-ME",
+      "LOST WRITE: an unrelated slot was destroyed by a slot-scoped write",
+    );
+  });
+
+  add("🚨 email index: the SAME email under ONE app is CLAIMED, never stolen", async (store) => {
+    // The handler checks "is this email taken?" before writing, but check-then-act is not
+    // atomic — two concurrent registrations both see "free". An upsert lets the second
+    // STEAL the row: the first account still exists but is no longer reachable by email,
+    // so its owner cannot log in, and only they hold the key to their wallets.
+    //
+    // The store is the only layer that can settle this. It must claim, and the loser must
+    // be told, not silently overwritten.
+    const first = makeUser({ appId: "app1", publicKey: PK_A, email: "contested@example.com" });
+    await store.putUser(first);
+
+    const second = makeUser({ appId: "app1", publicKey: PK_B, email: "contested@example.com" });
+    let rejected = false;
+    try {
+      await store.putUser(second);
+    } catch {
+      rejected = true;
+    }
+
+    assert(
+      rejected,
+      "SILENT STEAL: putUser accepted a second identity for an email another key already " +
+        "holds. It must throw (EmailTakenError) so the caller can answer 409.",
+    );
+    assertEqual(
+      await store.getPublicKeyByEmail("app1", "contested@example.com"),
+      PK_A,
+      "the ORIGINAL owner must still hold the address after a losing claim",
+    );
+  });
+
+  add("email index: re-writing a user's OWN record is not a collision", async (store) => {
+    // putUser serves updates too. Claiming must be idempotent for the current holder, or
+    // every profile write after registration would fail.
+    const u = makeUser({ appId: "app1", publicKey: PK_A, email: "owner@example.com" });
+    await store.putUser(u);
+    await store.putUser({ ...u, pbkdf2Iterations: 600_000 });
+
+    assertEqual(
+      await store.getPublicKeyByEmail("app1", "owner@example.com"),
+      PK_A,
+      "a user's own re-write must keep its index entry",
     );
   });
 
@@ -398,11 +569,13 @@ export function authStoreConformanceCases(
     for (const [i, payload] of nasty.entries()) {
       // As a challenge value, a session owner, and a rate-limit identifier: the backend
       // must treat every one of these as OPAQUE DATA and never as syntax.
+      // The challenge is now part of the lookup key, so an injection-shaped VALUE must
+      // still address exactly its own entry and nothing else.
       await store.putChallenge("app1", `pk-${i}`, payload, 300);
       assertEqual(
-        await store.takeChallenge("app1", `pk-${i}`),
-        payload,
-        `injection-shaped challenge value must round-trip verbatim: ${payload}`,
+        await store.takeChallenge("app1", `pk-${i}`, payload),
+        true,
+        `injection-shaped challenge value must address exactly its own entry: ${payload}`,
       );
 
       await store.putSession("app1", `h-${i}`, { publicKey: payload }, 300);
@@ -453,6 +626,74 @@ export function authStoreConformanceCases(
       const removed = await store.sweepExpired(2);
       assert(removed <= 2, `limit=2 must bound one batch, but ${removed} were removed`);
     });
+  }
+
+  // === OPTIONAL: FAIL CLOSED (supply makeFailingStore) ============================
+  // Invariant 3. A backend that answers "absent"/"allowed" when it actually FAILED has
+  // silently switched off a security control under exactly the load that broke it. The
+  // absence/expiry cases above prove a store reports "not there" correctly; these prove it
+  // never reports "not there" when the truth is "I could not tell". This is the case that
+  // pins the 2026-08-08 F-1 fix across every engine.
+
+  if (opts.makeFailingStore) {
+    const makeFailing = opts.makeFailingStore;
+    const failCase = (name: string, run: (store: AuthStore) => Promise<void>): void => {
+      cases.push({
+        name,
+        run: async () => {
+          const store = await makeFailing();
+          try {
+            await run(store);
+          } finally {
+            await store.close?.();
+          }
+        },
+      });
+    };
+
+    failCase("🚨 fail closed: getUser PROPAGATES a backend error — never null (F-1)", (store) =>
+      assertThrows(
+        () => store.getUser("app1", PK_A),
+        "SILENT KEY LOSS: getUser answered instead of throwing when the backend FAILED. `null` " +
+          "means 'answered, and absent' — connect-wallet reads it as 'never registered here', takes " +
+          "the creation branch, and overwrites the only copy of the user's encrypted wallet keys.",
+      ),
+    );
+
+    failCase("🚨 fail closed: getSession PROPAGATES a backend error — never null", (store) =>
+      assertThrows(
+        () => store.getSession("app1", "hash-1"),
+        "a swallowed getSession error returns null, which verifySession cannot tell from a genuine " +
+          "logout — a backend outage becomes a silent auth failure rather than a surfaced fault.",
+      ),
+    );
+
+    failCase("🚨 fail closed: getPublicKeyByEmail PROPAGATES a backend error — never null", (store) =>
+      assertThrows(
+        () => store.getPublicKeyByEmail("app1", "a@example.com"),
+        "a swallowed lookup error returns null — login then treats a transient outage as " +
+          "'no such account', and the /register path could re-create over an existing one.",
+      ),
+    );
+
+    failCase("🚨 fail closed: takeChallenge PROPAGATES a backend error — never false", (store) =>
+      assertThrows(
+        () => store.takeChallenge("app1", PK_A, "a".repeat(64)),
+        "a swallowed takeChallenge error returns false, turning a backend fault into an ordinary " +
+          "auth failure instead of a surfaced 500 — the caller cannot distinguish 'wrong challenge' " +
+          "from 'store down'.",
+      ),
+    );
+
+    failCase("🚨 fail closed: hitRateLimit PROPAGATES a backend error — never allowed=true", (store) =>
+      assertThrows(
+        () =>
+          store.hitRateLimit({ endpoint: "login", appId: "app1", identifier: "victim@example.com" }, 60, 5),
+        "FAIL OPEN: hitRateLimit answered instead of throwing when the backend FAILED. A rate " +
+          "limiter that cannot count must not grant permission — returning {allowed:true} disables " +
+          "the control under exactly the load that broke it.",
+      ),
+    );
   }
 
   return cases;

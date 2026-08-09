@@ -1,15 +1,20 @@
-// v0.5.0 — the release's four behavioral guarantees:
-//   §1  session tokens are stored as SHA-256 digests, in BOTH storage locations
-//   §2  close?() / sweepExpired?() exist, are optional, and are honestly feature-detected
-//   §3  the AuthStore seam is additive — `storage` still works, `store` also works
-//   §4  the prerequisite fixes (MemoryAdapter.del, /login email validation, fail-closed)
+// The storage seam's four standing guarantees. Not a changelog — each of these is a live
+// contract that both ports must keep holding:
+//   §1  session tokens are stored as SHA-256 digests, in BOTH storage locations, so a
+//       database read yields no replayable credential
+//   §2  close?() / sweepExpired?() are OPTIONAL and honestly feature-detected — a backend
+//       that omits them must still work, and callers must not assume they exist
+//   §3  the seam is ADDITIVE — `{ storage }` (KV) and `{ store }` (domain) both work, and
+//       neither is a migration away from the other
+//   §4  the supporting invariants: MemoryAdapter.del, /login email validation before the
+//       value reaches a key, and fail-closed rate limiting
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
 import { RedisAdapter } from "../src/storage/redis";
 import { KvAuthStore, type RateLimitResult } from "../src/storage/store";
 import { hashSessionToken } from "../src/core/crypto";
 import { DEFAULT_CONFIG } from "../src/core/config";
-import { registerEmail, jreq } from "./_auth-helpers";
+import { registerEmail, jreq, addressFor } from "./_auth-helpers";
 import { Keypair } from "@solana/web3.js";
 
 const APP_KEY = "a".repeat(64);
@@ -22,7 +27,9 @@ async function registerFresh(h: ReturnType<typeof createAuthHandlers>, email: st
   const publicKey = freshKeypair();
   const res = await registerEmail(h, { email, appKey: APP_KEY, publicKey });
   expect(res.status).toBe(201);
-  return { ...(await res.json()), publicKey } as { authToken: string; publicKey: string };
+  // The RESPONSE carries the address actually registered (the helper derives a real
+  // keypair from the label, since /register now demands proof of possession).
+  return (await res.json()) as { authToken: string; publicKey: string };
 }
 
 // =====================================================================================
@@ -31,7 +38,7 @@ async function registerFresh(h: ReturnType<typeof createAuthHandlers>, email: st
 describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer token", () => {
   it("🚨 the raw token appears in NEITHER the session key NOR the UserData blob", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "atrest@example.com");
 
     // (a) The session is keyed by the DIGEST. The raw token is not a key.
@@ -42,20 +49,25 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
     // token is not inside the UserData record either. Before v0.5.0, issueSession wrote
     // `user.authToken = token`, so a read of the store yielded a live, replayable
     // credential for every logged-in user even if the KEY had been hashed.
-    const blob = await storage.get(`pubKey:ttc:${publicKey}`);
-    expect(blob).not.toBeNull();
-    expect(blob!).not.toContain(authToken);
+    // The record is a HASH (profile / session pointer / one field per wallet slot), so
+    // check EVERY field: the raw token must appear in none of them.
+    const rec = await storage.hgetall(`pubKey:ttc:${publicKey}`);
+    expect(Object.keys(rec).length).toBeGreaterThan(0);
+    for (const v of Object.values(rec)) expect(v).not.toContain(authToken);
 
-    const user = JSON.parse(blob!);
-    expect(user.authToken).toBeUndefined();
-    expect(user.authTokenHash).toBe(hashSessionToken(authToken));
+    const profile = JSON.parse(rec.p!);
+    expect(profile.authToken).toBeUndefined();
+    expect(rec.t).toBe(hashSessionToken(authToken)); // the pointer field holds the DIGEST
   });
 
   it("the digest is never echoed to the client", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
-    const publicKey = freshKeypair();
-    const res = await registerEmail(h, { email: "echo@example.com", appKey: APP_KEY, publicKey });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
+    const res = await registerEmail(h, {
+      email: "echo@example.com",
+      appKey: APP_KEY,
+      publicKey: freshKeypair(),
+    });
     const body = await res.json();
 
     expect(body.authToken).toMatch(/^[0-9a-f]{64}$/); // the RAW token, for the client
@@ -65,7 +77,7 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
 
   it("the session still verifies, and a new login still revokes the previous session", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "revoke@example.com");
 
     // The round trip works end-to-end through the hashed key.
@@ -79,28 +91,6 @@ describe("§1 session tokens at rest are SHA-256 digests, never the raw bearer t
 
     const after = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(after.status).toBe(401);
-  });
-
-  it("a legacy raw `authToken` field is scrubbed from the record on the next write", async () => {
-    const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
-    const { publicKey } = await registerFresh(h, "legacy@example.com");
-
-    // Simulate a record written by a pre-v0.5.0 version: it carries a raw bearer token.
-    const blob = JSON.parse((await storage.get(`pubKey:ttc:${publicKey}`))!);
-    blob.authToken = "stale-raw-token-from-v0.4.x";
-    delete blob.authTokenHash;
-    await storage.set(`pubKey:ttc:${publicKey}`, JSON.stringify(blob));
-
-    // Any subsequent session issuance rewrites the record and drops the legacy field.
-    const store = new KvAuthStore(storage, DEFAULT_CONFIG.keyPrefixes);
-    const { issueSession } = await import("../src/server/session");
-    const user = await store.getUser("ttc", publicKey);
-    await issueSession(store, user!, DEFAULT_CONFIG);
-
-    const after = JSON.parse((await storage.get(`pubKey:ttc:${publicKey}`))!);
-    expect(after.authToken).toBeUndefined();
-    expect(after.authTokenHash).toMatch(/^[0-9a-f]{64}$/);
   });
 });
 
@@ -164,7 +154,10 @@ describe("§2 close?() and sweepExpired?() are optional and truthfully advertise
 // =====================================================================================
 describe("§3 the AuthStore seam is additive — no existing deployment changes a line", () => {
   it("createAuthHandlers({ storage }) still works, exactly as before", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const { authToken, publicKey } = await registerFresh(h, "kv@example.com");
     const res = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(res.status).toBe(200);
@@ -172,14 +165,16 @@ describe("§3 the AuthStore seam is additive — no existing deployment changes 
 
   it("createAuthHandlers({ store }) accepts a native AuthStore", async () => {
     const store = new KvAuthStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes);
-    const h = createAuthHandlers({ store });
+    const h = createAuthHandlers({ store, config: { origin: "https://test.example" } });
     const { authToken, publicKey } = await registerFresh(h, "native@example.com");
     const res = await h.userData(jreq({}, { "ttc-auth-token": authToken, "ttc-public-key": publicKey }));
     expect(res.status).toBe(200);
   });
 
   it("supplying neither is a loud, immediate error", () => {
-    expect(() => createAuthHandlers({})).toThrow(/requires either `store`.*or `storage`/);
+    expect(() => createAuthHandlers({ config: { origin: "https://test.example" } })).toThrow(
+      /requires either `store`.*or `storage`/,
+    );
   });
 });
 
@@ -199,12 +194,14 @@ describe("§4.1 MemoryAdapter.del clears BOTH keyspaces, like real Redis DEL", (
 });
 
 describe("§4.2 /login validates the email BEFORE it reaches a storage key", () => {
-  it("🚨 rejects an over-length email instead of turning it into a 400 KB key", async () => {
+  it("🚨 rejects an over-length email instead of turning it into a storage key", async () => {
     const storage = new MemoryAdapter();
-    const h = createAuthHandlers({ storage });
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
 
-    const huge = `${"a".repeat(400_000)}@example.com`;
-    const res = await h.login(jreq({ email: huge, signature: "ab", challenge: "cd" }));
+    // Comfortably past the documented 320-byte bound, but small enough to get past the
+    // body cap — so this exercises the EMAIL validator, not the transport bound.
+    const long = `${"a".repeat(1_000)}@example.com`;
+    const res = await h.login(jreq({ email: long, signature: "ab", challenge: "cd" }));
 
     // Inert on Redis; on Postgres this is an unauthenticated 500, and on non-strict MySQL
     // a SILENT key truncation. Either way it invalidates the ≤320-byte bound every
@@ -213,14 +210,34 @@ describe("§4.2 /login validates the email BEFORE it reaches a storage key", () 
     expect((await res.json()).error).toBe("Invalid email format");
   });
 
+  it("🚨 a body past MAX_BODY_BYTES is rejected before it is even parsed", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { origin: "https://test.example" } });
+
+    // 400 KB of email. Unbounded `req.json()` buffered and parsed this on an
+    // unauthenticated route before any validator or rate limiter ran.
+    const huge = `${"a".repeat(400_000)}@example.com`;
+    const res = await h.login(jreq({ email: huge, signature: "ab", challenge: "cd" }));
+    expect(res.status).toBe(400);
+    // readJson returns null, so the handler reports the missing-fields error rather than
+    // a format error — the body never became an object at all.
+    expect((await res.json()).error).toBe("email, signature and challenge required");
+  });
+
   it("rejects a malformed email on /login, matching /register", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.login(jreq({ email: "not-an-email", signature: "ab", challenge: "cd" }));
     expect(res.status).toBe(400);
   });
 
   it("a valid-but-unknown email still reaches the normal 401 (no behavior change)", async () => {
-    const h = createAuthHandlers({ storage: new MemoryAdapter() });
+    const h = createAuthHandlers({
+      storage: new MemoryAdapter(),
+      config: { origin: "https://test.example" },
+    });
     const res = await h.login(jreq({ email: "nobody@example.com", signature: "ab", challenge: "cd" }));
     expect(res.status).toBe(401);
   });
@@ -237,6 +254,7 @@ describe("§4.3 storage failures FAIL CLOSED — a broken backend never grants p
   it("🚨 a throwing hitRateLimit propagates — it does NOT resolve to `allowed`", async () => {
     const h = createAuthHandlers({
       store: new BrokenRateLimitStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes),
+      config: { origin: "https://test.example" },
     });
 
     const url = `http://localhost/api/auth?publicKey=${freshKeypair()}`;

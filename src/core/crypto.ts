@@ -12,6 +12,41 @@ import { pbkdf2 } from "@noble/hashes/pbkdf2.js";
 import { utf8ToBytes, bytesToHex } from "@noble/hashes/utils.js";
 
 /**
+ * Minimum characters for a user-TYPED passkey, enforced at REGISTRATION only.
+ *
+ * This secret is not a password. It cannot be reset, it cannot be rotated, and it is never
+ * sent to the server — so no rate limit can protect it. The attack is offline, against a
+ * stolen ciphertext, at one PBKDF2 per guess. Against a human-chosen string, 600k
+ * iterations buys hours, not security.
+ *
+ * 16 is a FLOOR, not a strength claim: 16 characters of natural language is roughly 32-40
+ * bits, which is still weak. It is the point below which the SDK stops pretending. The real
+ * control is `generateStrongPasskey`, which is the default path in the shipped UI and
+ * produces ~192 bits.
+ *
+ * Length only — deliberately no composition rule. Requiring an uppercase/digit/symbol
+ * measures the wrong thing: `P@ssw0rd!` satisfies every such rule and is in every cracking
+ * wordlist, while a long passphrase fails most of them despite being far stronger. NIST
+ * SP 800-63B dropped composition rules for exactly this reason.
+ */
+export const MIN_PASSKEY_LENGTH = 16;
+
+/**
+ * Reject a passkey that is too short to be worth encrypting a wallet under.
+ * Returns an error message, or null when acceptable.
+ *
+ * 🚨 Call this on REGISTRATION paths only, never before deriving a key for LOGIN. An
+ * existing account may hold a shorter passkey; refusing to derive for it would lock that
+ * user out of their wallets permanently, which is a worse outcome than the weak key.
+ */
+export function checkPasskeyLength(passkey: string): string | null {
+  if (passkey.length < MIN_PASSKEY_LENGTH) {
+    return `Passkey must be at least ${MIN_PASSKEY_LENGTH} characters. It encrypts your wallet and cannot be reset or recovered.`;
+  }
+  return null;
+}
+
+/**
  * Deterministically derive the 256-bit app (encryption) key for email/passkey
  * users: PBKDF2(passkey, salt = SHA-256(appId : normalized email)). Same inputs
  * always yield the same key, so wallets decrypt on any device without server
@@ -19,6 +54,9 @@ import { utf8ToBytes, bytesToHex } from "@noble/hashes/utils.js";
  * email) derives a DIFFERENT key per deployment, so a key cracked/coerced on one
  * app can't unlock the same user on another, and a precomputed table is per-appId.
  * Default "ttc" must match DEFAULT_CONFIG.appId; override per deployment.
+ *
+ * NO length check here — see checkPasskeyLength. This function serves login too, and an
+ * account registered before the floor existed must still be able to decrypt its wallets.
  */
 export function deriveAppKeyFromPasskey(
   passkey: string,

@@ -15,6 +15,8 @@ import { useSigner } from "../src/react/useSigner";
 import { useAuth } from "../src/react/useAuth";
 import { useExportKey } from "../src/react/useExportKey";
 import { useBiometricUnlock } from "../src/react/useBiometricUnlock";
+import { useActiveWallet } from "../src/react/useActiveWallet";
+import { useWallets } from "../src/react/useWallets";
 import { armAppKey, lockVault, getAppKey, setSession, clearSession } from "../src/client/session";
 import { encryptSecret, deriveAppKeyFromPasskey } from "../src/core/crypto";
 import type { EncryptedWallet } from "../src/core/types";
@@ -192,5 +194,97 @@ describe("useBiometricUnlock — F9: descriptor purged on logout", () => {
     await act(async () => {});
     expect(result.current.isEnabled).toBe(false); // marker gone → disabled…
     expect(localStorage.getItem(REG_KEY)).toBeNull(); // …and no stale descriptor (consistent)
+  });
+});
+
+// =====================================================================================
+// v0.5.1 — a Web3 account's Solana wallet is the wallet it logged in with
+//
+// The dangerous case is a Web3 user whose wallet ADAPTER is not connected in this browser
+// session. `externalSolanaAddress` is an app-supplied prop, so it is null then — while the
+// SDK session (localStorage) happily persists. Before the fix, useActiveWallet() fell
+// through to an embedded wallet and handed the app the WRONG Solana address.
+// =====================================================================================
+describe("useActiveWallet / useWallets — Web3 identity wins over any embedded wallet", () => {
+  const CONNECTED = "So1anaWa11etConnected1111111111111111111111";
+  const STRAY = "StrayEmbeddedFundsWa11et22222222222222222222";
+
+  /** A pre-v0.5.1 Web3 record: identity = the connected wallet, PLUS a stray embedded funds wallet. */
+  const legacyWeb3User = {
+    appId: APP_ID,
+    publicKey: CONNECTED, // the wallet they logged in with
+    authMethod: "wallet",
+    wallets: [
+      // The wallet that should never have been generated. Its key IS held by the SDK.
+      { chain: "solana", role: "funds", publicKey: STRAY, encryptedSecret: "ct" },
+      { chain: "evm", role: "funds", publicKey: "0xabc", encryptedSecret: "ct" },
+    ],
+    createdAt: 1,
+  };
+
+  function web3Wrapper({ children }: { children: React.ReactNode }) {
+    // NOTE: no `externalSolanaAddress` — the adapter is NOT connected. This is the state
+    // a returning user is in before they re-approve their wallet.
+    return (
+      <AuthProvider
+        apiBaseUrl="/api/auth"
+        config={{ appId: APP_ID, securityLevel: 1, autoLockMs: 60_000, lockOnHide: false }}
+      >
+        {children}
+      </AuthProvider>
+    );
+  }
+
+  beforeEach(() => {
+    stubFetch(legacyWeb3User);
+    setSession({ publicKey: CONNECTED, authToken: "tok", appKey: "00".repeat(32) });
+  });
+
+  it("🚨 useActiveWallet returns the CONNECTED wallet, not the stray embedded one", async () => {
+    const { result } = renderHook(() => useActiveWallet(), { wrapper: web3Wrapper });
+    await act(async () => {});
+
+    expect(result.current?.address).toBe(CONNECTED);
+    expect(result.current?.address).not.toBe(STRAY); // the deposit-address bug
+    expect(result.current?.isIdentity).toBe(true);
+    expect(result.current?.isEmbedded).toBe(false);
+    // And it is NOT exportable — the SDK never held this key and must not pretend to.
+    expect(result.current?.encrypted).toBeNull();
+  });
+
+  it("the stray embedded wallet is still LISTED (it may hold funds) but is not the identity", async () => {
+    const { result } = renderHook(() => useWallets(), { wrapper: web3Wrapper });
+    await act(async () => {});
+
+    const identity = result.current.filter((w) => w.isIdentity);
+    expect(identity).toHaveLength(1);
+    expect(identity[0].address).toBe(CONNECTED);
+
+    // Deliberately NOT hidden: it is a real key with a possibly-real balance, and hiding it
+    // would strand those funds. It just can't masquerade as the user's wallet any more.
+    const stray = result.current.find((w) => w.address === STRAY);
+    expect(stray).toBeDefined();
+    expect(stray!.isIdentity).toBe(false);
+    expect(stray!.encrypted).not.toBeNull(); // still recoverable/sweepable
+  });
+
+  it("an EMAIL account's embedded funds wallet IS the identity (unchanged)", async () => {
+    const emailUser = {
+      appId: APP_ID,
+      publicKey: STRAY, // for email accounts the embedded funds wallet IS UserData.publicKey
+      authMethod: "email",
+      wallets: [{ chain: "solana", role: "funds", publicKey: STRAY, encryptedSecret: "ct" }],
+      createdAt: 1,
+    };
+    stubFetch(emailUser);
+    setSession({ publicKey: STRAY, authToken: "tok", appKey: "00".repeat(32) });
+
+    const { result } = renderHook(() => useActiveWallet(), { wrapper: web3Wrapper });
+    await act(async () => {});
+
+    expect(result.current?.address).toBe(STRAY);
+    expect(result.current?.isEmbedded).toBe(true);
+    expect(result.current?.isIdentity).toBe(true);
+    expect(result.current?.encrypted).not.toBeNull(); // exportable, correctly
   });
 });

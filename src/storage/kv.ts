@@ -13,6 +13,7 @@ export interface KvLike {
   // and may auto-deserialize values on read (hence the coerce() in the adapter).
   hget<T = string>(key: string, field: string): Promise<T | null>;
   hset(key: string, kv: Record<string, unknown>): Promise<unknown>;
+  hsetnx(key: string, field: string, value: unknown): Promise<number>;
   hdel(key: string, ...fields: string[]): Promise<unknown>;
   hgetall<T = Record<string, unknown>>(key: string): Promise<T | null>;
 }
@@ -57,6 +58,10 @@ class KvAdapter implements StorageAdapter {
 
   async hset(key: string, field: string, value: string): Promise<void> {
     await this.client.hset(key, { [field]: value });
+  }
+
+  async hsetnx(key: string, field: string, value: string): Promise<boolean> {
+    return (await this.client.hsetnx(key, field, value)) === 1;
   }
 
   async hdel(key: string, field: string): Promise<void> {

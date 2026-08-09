@@ -1,5 +1,9 @@
 # Project rules
 
+Keep responses short. No summary reports unless asked.
+
+No migration guides, and no deprecated context. Build as if the project is version 1.0
+
 ## Git — NEVER commit
 
 - **Never run `git commit`.** Not with `-m`, not `--amend`, never.
