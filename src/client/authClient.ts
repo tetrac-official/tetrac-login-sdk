@@ -64,6 +64,25 @@ import {
  *  They are NOT interchangeable: feeding `{ registration }` for an email/web3
  *  account derives the wrong key and locks the user out — use `{ biometricUnlock }`.
  */
+/**
+ * A non-2xx API response, carrying the HTTP status.
+ *
+ * The status is the contract; the message is prose. `<EmailMethod>`'s auto mode used to
+ * decide "account exists → fall back to login" by substring-matching the message
+ * ("already exists"), which made a 429 — or any reworded error — terminal. Branch on
+ * `status` (409 = collision, 429 = throttled). Prefer duck-typing (`err.status === 409`)
+ * over `instanceof` in consuming code: a bundler can duplicate this class.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export type ReauthCredentials =
   | { passkey: string }
   | {
@@ -253,7 +272,9 @@ export class AuthClient {
       body: JSON.stringify({ appId: this.config.appId, ...(body as Record<string, unknown>) }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((data as { error?: string }).error ?? `Request failed (${res.status})`);
+    if (!res.ok) {
+      throw new ApiError((data as { error?: string }).error ?? `Request failed (${res.status})`, res.status);
+    }
     return data as T;
   }
 
@@ -266,7 +287,7 @@ export class AuthClient {
   async fetchUserData(): Promise<UserData | null> {
     const res = await fetch(`${this.opts.apiBaseUrl}/user-data`, { headers: this.authHeaders() });
     if (res.status === 401) return null;
-    if (!res.ok) throw new Error(`user-data failed (${res.status})`);
+    if (!res.ok) throw new ApiError(`user-data failed (${res.status})`, res.status);
     const data = (await res.json().catch(() => ({}))) as { user?: UserData };
     return data.user ?? null;
   }

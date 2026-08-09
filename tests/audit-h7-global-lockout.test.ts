@@ -12,7 +12,9 @@
 import { createAuthHandlers } from "../src/server/routes";
 import { clientIp } from "../src/server/http";
 import { MemoryAdapter } from "../src/storage/memory";
-import { registerEmail } from "./_auth-helpers";
+import { KvAuthStore } from "../src/storage/store";
+import { DEFAULT_CONFIG } from "../src/core/config";
+import { addressFor, registerEmail } from "./_auth-helpers";
 
 const PK = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
 const APP_KEY = "ab".repeat(32);
@@ -44,10 +46,32 @@ describe("H-7 — no shared bucket when the IP is unusable", () => {
   });
 
   it("🚨 trustProxyHeaders + NO proxy header does not lock out the deployment", async () => {
-    const h = handlers({ trustProxyHeaders: true, rateLimit: { windowSeconds: 60, maxAttempts: 3 } });
+    // Ten DIFFERENT REAL accounts, seeded directly. Under the old sentinel every one shared
+    // the "unknown" IP bucket, so request 4 onward 429'd for everybody. Each now keys on its
+    // own resolved publicKey, so distinct accounts stay independent. (Seeded rather than
+    // registered so the fixture doesn't itself lean on the challenge path.)
+    const store = new KvAuthStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes);
+    for (let i = 0; i < 10; i++) {
+      await store.putUser({
+        appId: "ttc",
+        publicKey: addressFor(`h7-user${i}`),
+        email: `user${i}@test.com`,
+        authMethod: "email",
+        authPublicKey: "ab".repeat(32),
+        wallets: [],
+        createdAt: 1,
+      });
+    }
+    const h = createAuthHandlers({
+      store,
+      config: {
+        origin: "https://test.example",
+        trustProxyHeaders: true,
+        rateLimit: { windowSeconds: 60, maxAttempts: 3 },
+      },
+      onWarning: () => {},
+    });
 
-    // Many DIFFERENT accounts, none carrying x-forwarded-for. Under the old sentinel every
-    // one of these shared the "unknown" bucket, so request 4 onward was a 429 for everybody.
     const statuses: number[] = [];
     for (let i = 0; i < 10; i++) {
       statuses.push((await h.challenge(req({ email: `user${i}@test.com` }))).status);
@@ -69,7 +93,8 @@ describe("H-7 — no shared bucket when the IP is unusable", () => {
 
   it("still throttles per-IP when the header IS present", async () => {
     // The fix must not disable the control it is protecting — a real IP is still a bucket.
-    const h = handlers({ trustProxyHeaders: true, rateLimit: { windowSeconds: 60, maxAttempts: 3 } });
+    // The per-IP bucket has its own limit now (F-7), so size THAT.
+    const h = handlers({ trustProxyHeaders: true, ipRateLimit: { windowSeconds: 60, maxAttempts: 3 } });
     const statuses: number[] = [];
     for (let i = 0; i < 8; i++) {
       statuses.push(

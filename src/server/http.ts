@@ -49,8 +49,16 @@ export function clientIp(req: Request, trustProxyHeaders = false, trustedProxyHo
       .filter(Boolean);
     const idx = parts.length - 1 - trustedProxyHops;
     if (idx >= 0 && parts[idx]) return parts[idx]!;
+    // The chain is SHORTER than trustedProxyHops + 1 — i.e. this request did not traverse
+    // the proxy chain the operator configured. That is precisely when x-real-ip is
+    // caller-controlled, so falling back to it would silently undo trustedProxyHops and let
+    // the caller name their own bucket. Return null — "no trustworthy IP" — instead (F-6).
+    return null;
   }
-  return req.headers.get("x-real-ip") ?? null;
+  // x-forwarded-for absent entirely. Consult x-real-ip ONLY for a single trusted edge
+  // (hops 0). With hops > 0 the operator declared a multi-proxy chain; a lone x-real-ip did
+  // not traverse it and is not trustworthy either.
+  return trustedProxyHops === 0 ? (req.headers.get("x-real-ip") ?? null) : null;
 }
 
 /**
@@ -65,15 +73,63 @@ export const MAX_BODY_BYTES = 128 * 1024;
  *
  * Unbounded `req.json()` buffers and parses whatever arrives BEFORE any validator or rate
  * limiter runs, on routes that are all unauthenticated. `content-length` is a hint an
- * attacker controls, so it is only a cheap early out — the decoded text is measured too.
+ * attacker controls, so it is only a cheap early out — the body is measured for real too.
  */
 export async function readJson<T>(req: Request, maxBytes = MAX_BODY_BYTES): Promise<T | null> {
   const declared = Number(req.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) return null;
+  const text = await readBounded(req, maxBytes);
+  if (text === null) return null;
   try {
-    const text = await req.text();
-    if (text.length > maxBytes) return null;
     return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the body as UTF-8 text, enforcing `maxBytes` in BYTES and aborting the moment the
+ * cumulative count crosses it. Two fixes over `req.text()` + `text.length` (audit F-9):
+ *
+ *   • Bytes, not UTF-16 code units. `String.length` counts code units, so a body of 128k
+ *     three-byte characters — ~384 KB on the wire — measured as 128k and slipped past a
+ *     128 KB cap.
+ *   • Bounded DURING the read. A chunked request with no `content-length` used to be
+ *     buffered in full before the size check ran; the stream is now dropped as soon as it
+ *     exceeds the cap, so nothing larger than `maxBytes` is ever held.
+ *
+ * Falls back to a buffered read (still measured in bytes) when the body is not an
+ * incrementally readable stream — a synthetic request, or a runtime that does not expose
+ * `body.getReader`.
+ */
+async function readBounded(req: Request, maxBytes: number): Promise<string | null> {
+  const body = req.body as ReadableStream<Uint8Array> | null;
+  if (!body || typeof body.getReader !== "function") {
+    try {
+      const text = await req.text();
+      return new TextEncoder().encode(text).byteLength > maxBytes ? null : text;
+    } catch {
+      return null;
+    }
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let total = 0;
+  let out = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      // `stream: true` keeps a multi-byte character split across chunk boundaries intact.
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+    return out;
   } catch {
     return null;
   }

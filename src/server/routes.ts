@@ -56,6 +56,20 @@ export interface AuthHandlerOptions {
    * `createSqlAuthStore`. Pass a no-op to silence, or route them into your logger.
    */
   onWarning?: (issue: ConfigWarning) => void;
+  /**
+   * OPTIONAL gate on ACCOUNT CREATION. Called on the creation branch of `/register` and
+   * `/connect-wallet` — never on a returning user's sign-in — before the deployment
+   * ceiling. Return `false` (or throw) to refuse creation with `403`.
+   *
+   * This is the escape valve for the creation-ceiling denial-of-service (audit 2026-08-08
+   * F-4): the deployment-wide `create` bucket is both the anti-abuse control AND a service
+   * every real signup depends on, so an attacker can hold it exhausted at the limit rate
+   * and close registration for everyone. A per-IP fallback exists when `trustProxyHeaders`
+   * is on, but a deployment that cannot supply a trustworthy IP has no per-source control
+   * at all. Wire a proof-of-work check, CAPTCHA, invite code, or verified-email gate here —
+   * the same gate `SECURITY.md` recommends when email must mean identity.
+   */
+  beforeCreateAccount?: (req: Request) => boolean | Promise<boolean>;
 }
 
 /** A boot-time configuration finding. Mirrors the SQL layer's `PreflightIssue`. */
@@ -226,6 +240,17 @@ function validIterations(n: unknown): boolean {
   return typeof n === "number" && Number.isInteger(n) && n >= PBKDF2_MIN && n <= PBKDF2_MAX;
 }
 
+// authMethod is a PERSISTED field, so it gets the same allowlist discipline as every other
+// one (audit 2026-08-08 F-3). It was the lone field written straight from the body —
+// `body.authMethod ?? "email"` — so an anonymous caller could persist any type or an
+// unbounded string in a field that never expires and round-trips to every client, and that
+// the server's own `authMethod !== "wallet"` guard then tests. Closed union, absence
+// defaults to "email" (unchanged).
+const AUTH_METHODS: readonly UserData["authMethod"][] = ["email", "wallet", "biometric"];
+function validAuthMethod(v: unknown): v is UserData["authMethod"] {
+  return typeof v === "string" && (AUTH_METHODS as readonly string[]).includes(v);
+}
+
 export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
   const config = resolveConfig(opts.config);
   checkConfig(config, opts.onWarning);
@@ -262,7 +287,10 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     // origin access, a health check, a bypassed CDN, local dev.
     const ip = requesterIp(req);
     if (ip) {
-      const r = await checkRateLimit(store, { endpoint: "ip", identifier: ip }, config.rateLimit);
+      // The IP bucket has its OWN limit (config.ipRateLimit), not the per-endpoint
+      // rateLimit — it aggregates ALL traffic from one address, so it must be sized for
+      // shared egress IPs (NAT/CGNAT/VPN), not per-identifier volume (audit F-7).
+      const r = await checkRateLimit(store, { endpoint: "ip", identifier: ip }, config.ipRateLimit);
       if (!r.allowed) return error("Rate limit exceeded", 429);
     }
     if (bucket) {
@@ -290,26 +318,42 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
     return value.includes("@") ? normalizeEmail(value) : value;
   }
 
-  // The deployment-wide ceiling on NEW ACCOUNTS. One bucket: no appId, no identifier.
+  // The ceiling on NEW ACCOUNTS. Keyed on a trustworthy IP when there is one, and on a
+  // single deployment-wide "global" identifier only as the fallback.
   //
-  // That is the entire point. Every other bucket is keyed on an email or a public key
-  // lifted from the request body, so an attacker who generates a fresh keypair per request
-  // gets a fresh counter and the limit never fires — which is how an anonymous client
-  // creates unbounded, permanent, un-swept records. There is no key here to rotate.
+  // Every OTHER bucket is keyed on an email or a public key lifted from the request body,
+  // so an attacker who generates a fresh keypair per request gets a fresh counter and the
+  // limit never fires — which is how an anonymous client creates unbounded, permanent,
+  // un-swept records. Creation must therefore key on something the caller cannot rotate.
   //
-  // It is NOT app-scoped either: `appId` also comes from the request, so scoping by it
-  // would hand back the same rotation (unless allowedAppIds is set, which it is not by
-  // default).
+  // A single GLOBAL counter has that property but pays for it symmetrically: the defender
+  // has no key to rotate either, so an attacker holds the one bucket exhausted at the limit
+  // rate and closes registration for the whole deployment (audit 2026-08-08 F-4). So when a
+  // trustworthy IP exists we charge THAT instead — one abuser is bounded to their own IP,
+  // legitimate users on other IPs are untouched — mirroring /challenge's requester-vs-target
+  // reasoning. With no IP the global bucket is the only unrotatable key left; `beforeCreate`
+  // (below) is what protects that case, and it runs regardless of IP.
   //
   // CALL THIS ONLY WHERE A RECORD IS ACTUALLY CREATED. The client's "auto" mode registers
   // first and falls back to login on 409, so returning users hit /register on every normal
   // sign-in; charging them would turn a 2/min creation ceiling into a 2/min login ceiling.
-  async function accountCreationLimited(): Promise<Response | null> {
-    const r = await checkRateLimit(
-      store,
-      { endpoint: "create", identifier: "global" },
-      config.accountCreationRateLimit,
-    );
+  async function accountCreationLimited(req: Request): Promise<Response | null> {
+    // Integrator gate first: the only creation control that works with no trustworthy IP.
+    // A throw is treated as "refused", so a failing CAPTCHA/PoW backend fails closed.
+    if (opts.beforeCreateAccount) {
+      let ok = false;
+      try {
+        ok = await opts.beforeCreateAccount(req);
+      } catch {
+        ok = false;
+      }
+      if (!ok) return error("Account creation refused", 403);
+    }
+    const ip = requesterIp(req);
+    const bucket: RateLimitBucket = ip
+      ? { endpoint: "create", identifier: ip }
+      : { endpoint: "create", identifier: "global" };
+    const r = await checkRateLimit(store, bucket, config.accountCreationRateLimit);
     return r.allowed ? null : error("Too many new accounts right now — try again shortly", 429);
   }
 
@@ -415,46 +459,53 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         const e = validateEmail(body.email);
         if (e) return error(e);
       }
-      // Rate-limit BEFORE resolving/issuing, so a probe for an UNKNOWN email is charged
-      // too — otherwise it escapes limiting entirely.
-      //
-      // WHO is charged depends on whether we can identify the requester. Issuing a
-      // challenge is not a failure event and grants no capability, so charging the TARGET
-      // is backwards: the attacker names the victim, and the victim's own /challenge then
-      // 429s. That is a complete authentication denial by an unauthenticated caller, held
-      // open indefinitely at the limit rate.
-      //
-      //   trustworthy IP  ->  charge the REQUESTER, and DO NOT touch the target bucket.
-      //                       The abuser exhausts their own counter; the victim is
-      //                       unaffected, and a horizontal sweep is finally visible to a
-      //                       control that sees BREADTH rather than depth-per-identifier.
-      //   no IP           ->  fall back to the target bucket. It is the only key we have,
-      //                       and dropping it would leave challenge issuance unbounded.
-      //                       Keying globally instead is worse: one abuser would lock out
-      //                       every account at once.
-      //
-      // `/login` already gets this right for the same reason — it charges only on FAILED
-      // verification, so a valid login is never throttled by an attacker's attempts.
-      // Keyed on whether THIS REQUEST yielded an IP — not merely on config.trustProxyHeaders.
-      // A deployment can trust its proxy and still receive a request without the header
-      // (direct origin hit, health check, bypassed CDN); gating on the flag alone dropped
-      // the target bucket for those requests and left challenge issuance unbounded.
-      const identifier = body?.publicKey ?? body?.email;
-      const targetBucket: RateLimitBucket | undefined =
-        !requesterIp(req) && identifier
-          ? { endpoint: "challenge", appId, identifier: bucketId(identifier) }
-          : undefined;
-      const limited = await rateLimited(req, targetBucket);
-      if (limited) return limited;
+      // Charge the IP leg FIRST (a no-op without a trustworthy IP). When we have one it
+      // bounds this request — reads and all — before any storage work, so the resolution
+      // below cannot be spun as a cheap-read amplifier.
+      const ipLimited = await rateLimited(req);
+      if (ipLimited) return ipLimited;
 
-      // Wallet flow passes publicKey; email/biometric flow passes the account email
-      // (or internal biometric id), which we resolve to the identity publicKey.
+      // Resolve the identity key up front. Wallet flow passes publicKey; email/biometric
+      // flow passes the account email (or internal biometric id), which resolves to the
+      // identity publicKey. This is a READ — it issues and stores nothing — and it is what
+      // lets the anti-abuse bucket tell a real ACCOUNT (bound per-account, not rotatable)
+      // from an UNKNOWN key an attacker rotates a fresh keypair into on every request.
       let publicKey = body?.publicKey ?? null;
       if (!publicKey && body?.email) {
         publicKey = await resolvePublicKeyByEmail(store, appId, body.email);
       }
       // Neither identifier supplied — a malformed request, not a probe. Still a 400.
       if (!publicKey && !body?.email) return error("publicKey or email required");
+      const user = publicKey ? await getUserByPublicKey(store, appId, publicKey) : null;
+
+      // Rate-limit BEFORE issuing, so an UNKNOWN-key/email probe is charged too. Issuing a
+      // challenge grants no capability, so charging a named TARGET is backwards — the
+      // attacker names the victim and the victim's own /challenge then 429s, a complete
+      // auth denial held open at the limit rate. So:
+      //
+      //   trustworthy IP     -> already charged above (the requester); touch no target.
+      //   no IP, KNOWN key   -> the per-account target bucket. It is a real account, not
+      //                         rotatable, so this bounds abuse of THAT account's issuance
+      //                         without one caller being able to throttle another.
+      //   no IP, UNKNOWN key -> a GLOBAL bucket, NOT the caller's key (audit 2026-08-08
+      //                         F-5). A fresh keypair per request must not buy a fresh
+      //                         counter, or an attacker writes an unbounded set of stored
+      //                         challenges (and an unbounded set of per-identifier
+      //                         rate-limit rows). An unknown key must still get a STORED
+      //                         challenge — registration proves possession of a key with no
+      //                         record yet — so the write is BOUNDED, not refused. Known-key
+      //                         logins never touch this bucket, so they are unaffected; only
+      //                         new-account challenge fetches share it, and only in the
+      //                         trustProxyHeaders-off config already flagged as degraded
+      //                         (the no_requester_identity boot warning).
+      if (!requesterIp(req)) {
+        const targetBucket: RateLimitBucket =
+          user && publicKey
+            ? { endpoint: "challenge", appId, identifier: bucketId(publicKey) }
+            : { endpoint: "challenge-unknown", identifier: "global" };
+        const limited = await rateLimited(req, targetBucket);
+        if (limited) return limited;
+      }
 
       if (!publicKey) {
         // UNKNOWN EMAIL — answer in the shape a real account would, and store nothing.
@@ -489,8 +540,8 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // Accounts also need their PINNED derivation parameters back before they can sign:
       // the PBKDF2 iteration count (email) and the off-chain envelope (hardware wallet).
       // Both are app-key derivation input and neither is secret. Re-deriving with a
-      // different value silently yields a different key and undecryptable wallets.
-      const user = await getUserByPublicKey(store, appId, publicKey);
+      // different value silently yields a different key and undecryptable wallets. `user`
+      // was resolved above (one read, reused here).
       // ALWAYS emit a number — never omit the field.
       //
       // An omitted key is itself the oracle: a record with no pinned count answered
@@ -551,13 +602,23 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       if (body.offchainEnvelope != null && !validEnvelope(body.offchainEnvelope)) {
         return error("Invalid offchainEnvelope", 400);
       }
+      if (body.authMethod != null && !validAuthMethod(body.authMethod)) {
+        return error("Invalid authMethod", 400);
+      }
 
-      const limited = await rateLimited(req, {
+      // Charge on FAILURE, not on arrival — the same treatment /login gets, for the same
+      // reason (audit 2026-08-08 F-2). This bucket is keyed on a CALLER-SUPPLIED email,
+      // and the client's "auto" mode sends every returning user through /register before
+      // falling back to /login on 409. Charging on arrival let an unauthenticated
+      // attacker naming a victim's email fill the bucket with free 409s, and the
+      // victim's own /register then 429'd — which the auto flow treats as terminal, so
+      // the fallback to /login never ran. A returning user's 409 must cost nothing, and
+      // only a request that FAILS to prove possession may feed the counter (below).
+      const registerBucket: RateLimitBucket = {
         endpoint: "register",
         appId,
         identifier: bucketId(body.email ?? body.publicKey),
-      });
-      if (limited) return limited;
+      };
 
       if (await getUserByPublicKey(store, appId, body.publicKey)) {
         return error("Account already exists", 409);
@@ -606,16 +667,20 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
       // victim's pending challenge (matches login/loginWallet/connectWallet — WI-5).
       if (!body.signature || !body.challenge) return error("signature and challenge required");
       if (!verifySolanaSignature(body.publicKey, body.signature, body.challenge, config.origin)) {
+        const limited = await rateLimited(req, registerBucket);
+        if (limited) return limited;
         return error("Signature verification failed", 401);
       }
       if (!(await consumeChallenge(store, appId, body.publicKey, body.challenge))) {
+        const limited = await rateLimited(req, registerBucket);
+        if (limited) return limited;
         return error("Invalid or expired challenge", 401);
       }
 
       // Every collision check has passed, so this request WILL create a record. Charge the
       // deployment-wide ceiling here — not at the top — so a returning user's 409 (the
       // client's "auto" mode registers first, then falls back to login) costs nothing.
-      const capped = await accountCreationLimited();
+      const capped = await accountCreationLimited(req);
       if (capped) return capped;
 
       const user: UserData = {
@@ -802,7 +867,7 @@ export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
         // The other creation path. A valid signature is required to get here, but keypairs
         // are free to generate, so without this it is the same unbounded record creation
         // by a different door.
-        const cappedNew = await accountCreationLimited();
+        const cappedNew = await accountCreationLimited(req);
         if (cappedNew) return cappedNew;
         user = {
           appId,

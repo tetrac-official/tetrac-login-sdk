@@ -144,7 +144,11 @@ export function EmailMethod({
         try {
           result = await registerWithEmail({ email, passkey });
         } catch (err) {
-          if (!String(err).includes("already exists")) throw err;
+          // Branch on the STATUS, not the message text (audit 2026-08-08 F-2): 409 is the
+          // collision contract; anything else — including a 429 — is a real failure to
+          // surface, not a cue to retry as login. Duck-typed rather than
+          // `instanceof ApiError`, because a bundler can duplicate the class.
+          if ((err as { status?: unknown }).status !== 409) throw err;
           if (passkey === revealed) {
             // The value in the field was GENERATED for the account we were creating, so it
             // cannot be this one's. Retrying it as a login would just 401 and burn a

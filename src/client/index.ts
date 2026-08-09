@@ -40,6 +40,7 @@ export {
 export {
   AuthClient,
   createAuthClient,
+  ApiError,
   type AuthClientOptions,
   type WalletGenConfig,
   type ReauthCredentials,

@@ -14,6 +14,9 @@
 // 400, never a throw.
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
+import { Keypair } from "@solana/web3.js";
+import { deriveAuthPublicKey } from "../src/client/authKey";
+import { proofFor, jreq } from "./_auth-helpers";
 
 function h() {
   return createAuthHandlers({
@@ -103,6 +106,45 @@ describe("🚨 a non-string authPublicKey is a 400, never a 500", () => {
       }),
     );
     expect(res.status).toBe(400);
+  });
+});
+
+describe("🚨 a non-string / unknown authMethod is a 400, never persisted (F-3)", () => {
+  const PK = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
+  const BAD: Array<[string, unknown]> = [
+    ["array", ["wallet"]],
+    ["number", 1],
+    ["boolean", true],
+    ["object", { evil: true }],
+    ["unknown string", "admin"],
+    ["oversized string", "x".repeat(60_000)],
+  ];
+  it.each(BAD)("/register rejects a %s authMethod", async (_label, authMethod) => {
+    const res = await h().register(
+      post({ publicKey: PK, email: "a@b.co", authMethod, authPublicKey: "ab".repeat(32) }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Invalid authMethod/i);
+  });
+
+  it("a valid non-default authMethod is accepted and round-trips unchanged", async () => {
+    // Guard against over-strict validation: "biometric" is a member of the union and must
+    // persist as given, not be coerced to the "email" default.
+    const handlers = h();
+    const kp = Keypair.generate();
+    const proof = await proofFor(handlers, kp);
+    const res = await handlers.register(
+      jreq({
+        publicKey: kp.publicKey.toBase58(),
+        email: "bio@b.co",
+        authMethod: "biometric",
+        authPublicKey: deriveAuthPublicKey("ab".repeat(32)),
+        wallets: [],
+        ...proof,
+      }),
+    );
+    expect(res.status).toBe(201);
+    expect((await res.json()).user.authMethod).toBe("biometric");
   });
 });
 

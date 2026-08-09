@@ -29,6 +29,12 @@ describe("shipped defaults — anti-abuse", () => {
     expect(DEFAULT_CONFIG.rateLimit).toEqual({ windowSeconds: 60, maxAttempts: 10 });
   });
 
+  it("the per-IP bucket has its OWN, higher limit (100 per 60s) for shared egress IPs", () => {
+    // Sized for aggregated traffic from one address (NAT/CGNAT/VPN), NOT reused from the
+    // per-endpoint rateLimit, which throttled ~2 sign-ins/min per shared IP (F-7).
+    expect(DEFAULT_CONFIG.ipRateLimit).toEqual({ windowSeconds: 60, maxAttempts: 100 });
+  });
+
   it("🚨 account creation is capped at 2 per 60s, deployment-wide", () => {
     // The ONE bucket with no key an attacker can rotate. Every other bucket is keyed on an
     // email or public key from the request body, so a fresh keypair per request is a fresh

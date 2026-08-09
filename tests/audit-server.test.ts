@@ -44,34 +44,33 @@ async function registerUser(h: ReturnType<typeof createAuthHandlers>, email: str
 }
 
 describe("H5 RESOLVED — challenge rate limiting is per-target, not a shared global bucket", () => {
-  it("distinct publicKeys get independent buckets ⇒ one abuser can't lock out everyone", async () => {
+  it("distinct REGISTERED publicKeys get independent buckets ⇒ one abuser can't lock out everyone", async () => {
+    // The concern is that flooding ONE real account's /challenge must not lock out OTHERS.
+    // That per-account distinctness applies to keys that resolve to a record — so seed the
+    // three as real wallet accounts. Unregistered keys deliberately SHARE one global bucket
+    // now (audit 2026-08-08 F-5, see audit-f5-*), so they are the wrong fixture here.
+    const store = new KvAuthStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes);
+    const A = "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9";
+    const B = "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu";
+    const C = "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse";
+    for (const publicKey of [A, B, C]) {
+      await store.putUser({ appId: "ttc", publicKey, authMethod: "wallet", wallets: [], createdAt: 1 });
+    }
     const h = createAuthHandlers({
-      storage: new MemoryAdapter(),
+      store,
       config: { origin: "https://test.example", rateLimit: { maxAttempts: 2, windowSeconds: 60 } },
     });
     // trustProxyHeaders defaults false ⇒ the SDK no longer gates on the shared "unknown"
     // IP bucket; each /challenge is rate-limited on its OWN resolved-publicKey counter, so
     // hammering one target can't exhaust a global bucket and lock out the others.
-    expect(
-      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
-    ).toBe(200);
-    expect(
-      (await h.challenge(req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }))).status,
-    ).toBe(200);
-    expect(
-      (await h.challenge(req({ publicKey: "GyGKxMyg1p9SsHfm15MkNUu1u9TN2JtTspcdmrtGUdse" }))).status,
-    ).toBe(200); // NO global lockout
+    expect((await h.challenge(req({ publicKey: A }))).status).toBe(200);
+    expect((await h.challenge(req({ publicKey: B }))).status).toBe(200);
+    expect((await h.challenge(req({ publicKey: C }))).status).toBe(200); // NO global lockout
     // The per-target limit still bites when a SINGLE target is flooded…
-    expect(
-      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
-    ).toBe(200); // AAA #2 (== limit)
-    expect(
-      (await h.challenge(req({ publicKey: "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9" }))).status,
-    ).toBe(429); // AAA #3 (> limit)
+    expect((await h.challenge(req({ publicKey: A }))).status).toBe(200); // AAA #2 (== limit)
+    expect((await h.challenge(req({ publicKey: A }))).status).toBe(429); // AAA #3 (> limit)
     // …and a different target is unaffected by that flood.
-    expect(
-      (await h.challenge(req({ publicKey: "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu" }))).status,
-    ).toBe(200);
+    expect((await h.challenge(req({ publicKey: B }))).status).toBe(200);
   });
 });
 
@@ -97,7 +96,8 @@ describe("challenge UNKNOWN-email rate limiting (WI-4 enumeration hardening)", (
       config: {
         origin: "https://test.example",
         trustProxyHeaders: true,
-        rateLimit: { maxAttempts: 2, windowSeconds: 60 },
+        // The per-IP bucket carries its own limit now (F-7); size THAT to exercise it.
+        ipRateLimit: { maxAttempts: 2, windowSeconds: 60 },
       },
     });
     // This is the case requester-keying exists for: DIFFERENT emails, one source. Per-target
@@ -229,9 +229,14 @@ describe("SERVERSIDE-1/8 RESOLVED — sessions are namespaced disjointly; JSON.p
     expect(await storage.get(`session:ttc:${hashSessionToken(token)}`)).toBe(body.publicKey); // intact
   });
 
-  it("getUserByPublicKey guards JSON.parse — a non-JSON stored value yields null, not a crash", async () => {
+  it("getUserByPublicKey answers null for an absent record", async () => {
     const storage = new MemoryAdapter();
-    await storage.set("pubKey:ttc:weird", "not-json{"); // malformed record
+    // A stray STRING key is invisible to the hash read — the record hash simply does not
+    // exist, so this is the ABSENT case and null is correct. An existing-but-unparseable
+    // record is the opposite case and must THROW, not read as absent — audit 2026-08-08
+    // F-1 (see audit-f1-getuser-fail-closed.test.ts): null here is what let connect-wallet
+    // re-create the record and overwrite its wallet keys.
+    await storage.set("pubKey:ttc:weird", "not-json{");
     const user = await getUserByPublicKey(
       new KvAuthStore(storage, DEFAULT_CONFIG.keyPrefixes),
       "ttc",

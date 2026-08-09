@@ -86,7 +86,8 @@ describe("L-3 — /challenge is not an account-existence oracle", () => {
 
 describe("M-1 residual — an attacker cannot spend the victim's /challenge budget", () => {
   it("🚨 with a trustworthy IP, a flood from one requester leaves the victim able to log in", async () => {
-    const h = handlers({ trustProxyHeaders: true, rateLimit: { windowSeconds: 60, maxAttempts: 5 } });
+    // The requester is throttled by the per-IP bucket, which has its own limit now (F-7).
+    const h = handlers({ trustProxyHeaders: true, ipRateLimit: { windowSeconds: 60, maxAttempts: 5 } });
     await registerEmail(h, { publicKey: PK, email: "victim@test.com", appKey: APP_KEY });
 
     // Attacker burns their OWN bucket naming the victim.
@@ -107,7 +108,7 @@ describe("M-1 residual — an attacker cannot spend the victim's /challenge budg
   it("🚨 a horizontal sweep is throttled once a requester can be identified", async () => {
     // The point of requester-keying: the counter finally sees BREADTH. Per-target keying
     // gave each probed address its own counter, so N addresses cost N free requests.
-    const h = handlers({ trustProxyHeaders: true, rateLimit: { windowSeconds: 60, maxAttempts: 5 } });
+    const h = handlers({ trustProxyHeaders: true, ipRateLimit: { windowSeconds: 60, maxAttempts: 5 } });
     const sweeper = { "x-forwarded-for": "203.0.113.77" };
 
     const statuses: number[] = [];

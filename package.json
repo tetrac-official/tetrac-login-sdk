@@ -110,7 +110,7 @@
     "pg": "^8",
     "react": ">=18",
     "tweetnacl": "^1.0.3",
-    "viem": "^2.46.0"
+    "viem": "^2.55.0"
   },
   "peerDependenciesMeta": {
     "@ledgerhq/hw-app-solana": {
@@ -178,7 +178,7 @@
     "tsup": "^8.3.0",
     "tweetnacl": "^1.0.3",
     "typescript": "^5.8.3",
-    "viem": "^2.46.1"
+    "viem": "^2.55.0"
   },
   "engines": {
     "node": ">=18"

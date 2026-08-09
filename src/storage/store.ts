@@ -283,20 +283,21 @@ export class KvAuthStore implements AuthStore {
     const h = await this.kv.hgetall(appScoped(this.prefixes.pubKey, appId, publicKey));
     const profile = h[KvAuthStore.F_PROFILE];
     if (!profile) return null;
-    try {
-      const user = JSON.parse(profile) as UserData;
-      const wallets: EncryptedWallet[] = [];
-      for (const [field, raw] of Object.entries(h)) {
-        if (!field.startsWith("w:")) continue;
-        wallets.push(JSON.parse(raw) as EncryptedWallet);
-      }
-      user.wallets = sortWalletsBySlot(wallets);
-      const token = h[KvAuthStore.F_TOKEN];
-      if (token) user.authTokenHash = token;
-      return user;
-    } catch {
-      return null; // malformed/non-JSON value — fail safe instead of throwing
+    // NO catch around the parses (invariant 3: errors fail closed). A hash that exists
+    // but cannot be parsed is not "absent" — returning null here told connect-wallet
+    // "no such account", and its creation branch then overwrote this record's wallet
+    // slots, the only copy of the user's encrypted keys. Throwing 500s the request and
+    // the record survives.
+    const user = JSON.parse(profile) as UserData;
+    const wallets: EncryptedWallet[] = [];
+    for (const [field, raw] of Object.entries(h)) {
+      if (!field.startsWith("w:")) continue;
+      wallets.push(JSON.parse(raw) as EncryptedWallet);
     }
+    user.wallets = sortWalletsBySlot(wallets);
+    const token = h[KvAuthStore.F_TOKEN];
+    if (token) user.authTokenHash = token;
+    return user;
   }
 
   async putUser(user: UserData): Promise<void> {

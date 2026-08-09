@@ -10,7 +10,8 @@
 //   • email normalization                      → normalizeEmail() before the driver sees it
 //   • collation / column sizing                → the dialect's DDL; the user never picks
 //   • injection safety                         → templates + bound params, always
-//   • fail closed                              → no try/catch. Errors propagate.
+//   • fail closed                              → errors propagate; the one catch below
+//     (the email-index insert race) rethrows as a TYPED error, never swallows.
 //
 // A dialect author reads none of this. They declare `supportsReturning` and emit DDL.
 import type { AuthStore, SessionValue, RateLimitBucket, RateLimitResult } from "../store.js";
@@ -93,21 +94,23 @@ export class SqlAuthStore implements AuthStore {
     );
     const row = rows[0];
     if (row?.data == null) return null;
-    try {
-      const user = JSON.parse(String(row.data)) as UserData;
-      // Wallets live one-row-per-slot, so a slot write never rewrites the profile and two
-      // concurrent writes to DIFFERENT slots cannot lose each other.
-      const ws = await this.run<{ data: string }>(
-        this.driver,
-        `SELECT data FROM ${t.userWallets} WHERE app_id = ? AND public_key = ?`,
-        [appId, publicKey],
-      );
-      user.wallets = sortWalletsBySlot(ws.map((w) => JSON.parse(String(w.data)) as EncryptedWallet));
-      if (row.auth_token_hash != null) user.authTokenHash = String(row.auth_token_hash);
-      return user;
-    } catch {
-      return null; // malformed value — fail safe rather than throwing
-    }
+    // NO try/catch (header rule: fail closed — errors propagate). `null` is a promise
+    // that the backend ANSWERED and the record is ABSENT; callers act on it — the
+    // connect-wallet creation branch overwrites this identity's record, including the
+    // only copy of its encrypted wallet keys. A dropped connection on the wallets query
+    // or an unparseable row is neither "answered" nor "absent", so both must throw:
+    // the request 500s and the record survives.
+    const user = JSON.parse(String(row.data)) as UserData;
+    // Wallets live one-row-per-slot, so a slot write never rewrites the profile and two
+    // concurrent writes to DIFFERENT slots cannot lose each other.
+    const ws = await this.run<{ data: string }>(
+      this.driver,
+      `SELECT data FROM ${t.userWallets} WHERE app_id = ? AND public_key = ?`,
+      [appId, publicKey],
+    );
+    user.wallets = sortWalletsBySlot(ws.map((w) => JSON.parse(String(w.data)) as EncryptedWallet));
+    if (row.auth_token_hash != null) user.authTokenHash = String(row.auth_token_hash);
+    return user;
   }
 
   /**

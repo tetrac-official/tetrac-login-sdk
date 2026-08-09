@@ -146,3 +146,23 @@ the SDK's only runtime dependency.
 | Auth keypair | ed25519, seeded from `SHA-256("ttc-auth-v1:" + appKey)` — independent of the encryption key |
 | Session tokens | 256-bit CSPRNG; storage sees only `SHA-256(token)` |
 | Challenges | 256-bit CSPRNG, single-use, atomically consumed, constant-time compared |
+
+## Dependency advisories
+
+The SDK's own runtime footprint is a single package — `@noble/hashes` — and `npm audit --omit=dev`
+against it reports zero vulnerabilities. Advisories can still appear via **peer dependencies** the
+consuming app installs (`viem`, `@solana/web3.js`, `tweetnacl`) and their transitive graphs. Current
+status:
+
+- **`viem` → `ws` (GHSA-96hv-2xvq-fx4p, high — DoS):** fixed. The `viem` peer floor is `^2.55.0`,
+  which resolves `ws ≥ 8.21.0` (the advisory covers `8.0.0–8.20.1`). A fresh install on a consumer
+  therefore resolves a clean tree; keep `viem` at or above that floor.
+- **`@solana/web3.js` (v1) → `jayson` → `uuid` (GHSA-w5hq-g745-h8pq, moderate — missing buffer
+  bounds check):** **accepted risk, not reachable.** The flaw is only triggerable through `uuid`
+  v3/v5/v6 called with a caller-supplied `buf` argument. `jayson` never calls `uuid` that way, and the
+  SDK never calls `jayson`'s affected surface. There is no fix in the `@solana/web3.js` v1 line, which
+  is the line this SDK targets, so the advisory is recorded here rather than resolved.
+
+Dev-toolchain advisories (`esbuild`, `js-yaml`, `brace-expansion`, etc.) affect the build/test
+environment only and never ship: `files` publishes `dist` alone. CI runs `npm audit --omit=dev` as a
+non-blocking report so a *runtime* regression surfaces while dev-only noise stays out of the gate.

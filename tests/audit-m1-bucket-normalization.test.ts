@@ -10,6 +10,8 @@
 // case are genuinely different accounts.
 import { createAuthHandlers } from "../src/server/routes";
 import { MemoryAdapter } from "../src/storage/memory";
+import { KvAuthStore } from "../src/storage/store";
+import { DEFAULT_CONFIG } from "../src/core/config";
 import { registerEmail, jreq } from "./_auth-helpers";
 
 const PK = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
@@ -92,11 +94,21 @@ describe("M-1 — one account is one bucket, regardless of spelling", () => {
   it("public keys differing only in case remain DISTINCT buckets", async () => {
     // base58 is case-sensitive: folding these would merge two unrelated accounts' limits and
     // let one user throttle another. The normalization must apply to emails only.
-    const h = handlers({ rateLimit: { windowSeconds: 60, maxAttempts: 2 } });
-
-    // Two valid, distinct base58 keys.
+    //
+    // Distinctness is a property of REAL accounts — seed the two as wallet records. Two
+    // UNREGISTERED keys now share one global bucket by design (audit 2026-08-08 F-5), so
+    // testing this with unregistered keys would assert the exact behavior F-5 removed.
+    const store = new KvAuthStore(new MemoryAdapter(), DEFAULT_CONFIG.keyPrefixes);
     const a = "AKkzLhjhyFtM9j7WAhbaqYpFe49cXeJBg2kzLRC2PnNa";
     const b = "8SFqwqnq4whPhs8icwHA2hQg3hUoN1qrCLK1SBx3WKwe";
+    for (const publicKey of [a, b]) {
+      await store.putUser({ appId: "ttc", publicKey, authMethod: "wallet", wallets: [], createdAt: 1 });
+    }
+    const h = createAuthHandlers({
+      store,
+      config: { origin: "https://test.example", rateLimit: { windowSeconds: 60, maxAttempts: 2 } },
+      onWarning: () => {},
+    });
 
     await h.challenge(jreq({ publicKey: a }));
     await h.challenge(jreq({ publicKey: a }));

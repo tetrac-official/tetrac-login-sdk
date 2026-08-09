@@ -99,8 +99,9 @@ describe("account creation ceiling", () => {
     expect((await registerEmail(h, { publicKey, email, appKey: APP_KEY, wallets: [] })).status).toBe(201);
 
     // Budget is now 1 of 2. Repeated returning sign-ins must not consume any of it.
-    // (Kept under 10 so the PER-TARGET /register bucket — 10/60s on this email, charged on
-    // every hit including a 409 — isn't what ends the loop.)
+    // (The per-target /register bucket charges only on FAILED possession proof now — F-2 —
+    // and a returning user's 409 is an email collision that never reaches that charge, so
+    // the loop is bounded only by the creation ceiling this test is about.)
     for (let i = 0; i < 5; i++) {
       const dup = await registerEmail(h, { publicKey: freshKey(), email, appKey: APP_KEY, wallets: [] });
       expect(dup.status).toBe(409); // "Account already exists" — no record created

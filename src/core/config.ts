@@ -154,6 +154,21 @@ export interface AuthConfig {
   keyPrefixes: KeyPrefixes;
   rateLimit: RateLimitConfig;
   /**
+   * The GLOBAL per-IP bucket, checked on every rate-limited route and keyed on the client
+   * IP alone — no endpoint, no appId. Default **100 per 60s**.
+   *
+   * It is deliberately its own config, NOT `rateLimit` (audit 2026-08-08 F-7). `rateLimit`
+   * sizes PER-ENDPOINT, PER-IDENTIFIER buckets; this one AGGREGATES every request from an
+   * address. Reusing `rateLimit`'s 10/60s here meant one egress IP supported only ~2
+   * sign-ins per minute (an "auto" email sign-in is up to four counted requests), which is
+   * fine for a residential IP and wrong for the population that shares one: corporate and
+   * university NAT, carrier-grade NAT, VPN exit nodes. Size this above
+   * `requests-per-sign-in × expected concurrent users per egress IP`; it is still a strong
+   * abuse signal (100/60s ≈ 25 concurrent sign-ins from one NAT) while not throttling
+   * shared-IP users during normal use.
+   */
+  ipRateLimit: RateLimitConfig;
+  /**
    * Ceiling on ACCOUNT CREATION for the whole deployment. Default **2 per 60s**.
    *
    * This is the one bucket that is not keyed on anything the caller supplies. Every other
@@ -212,6 +227,10 @@ export const DEFAULT_CONFIG: Omit<AuthConfig, "origin"> = {
     windowSeconds: 60,
     maxAttempts: 10,
   },
+  ipRateLimit: {
+    windowSeconds: 60,
+    maxAttempts: 100,
+  },
   accountCreationRateLimit: {
     windowSeconds: 60,
     maxAttempts: 2,
@@ -262,6 +281,7 @@ export function resolveConfig(override?: DeepPartial<AuthConfig>): AuthConfig {
     origin: normalizeOrigin(origin),
     keyPrefixes: { ...DEFAULT_CONFIG.keyPrefixes, ...override?.keyPrefixes },
     rateLimit: { ...DEFAULT_CONFIG.rateLimit, ...override?.rateLimit },
+    ipRateLimit: { ...DEFAULT_CONFIG.ipRateLimit, ...override?.ipRateLimit },
     accountCreationRateLimit: {
       ...DEFAULT_CONFIG.accountCreationRateLimit,
       ...override?.accountCreationRateLimit,
