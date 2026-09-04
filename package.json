@@ -93,7 +93,7 @@
     "test:engines": "npm run docker:up && REDIS_URL=redis://localhost:56379 POSTGRES_URL=postgres://postgres:pw@localhost:55432/tetrac_test MYSQL_URL=mysql://root:pw@localhost:53306/tetrac_test jest storage-conformance sql-conformance ; npm run docker:down"
   },
   "dependencies": {
-    "@noble/hashes": "2.2.0"
+    "@noble/hashes": "2.4.0"
   },
   "peerDependencies": {
     "@ledgerhq/hw-app-solana": "^7.10.4",
