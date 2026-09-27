@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1
+
+- Wallet login signs a valid Sign In With Solana message. Phantom 26.30.x refused the previous text with "The app's signature request cannot be shown due to invalid formatting." `walletLoginMessage` takes `{ challenge, origin, address }` and names the signer; clients and servers on 0.6.0 and 0.6.1 cannot verify each other's wallet-login or registration signatures, so run one version on both.
+- `createAuthHandlers` throws at construction unless `config.origin` is a bare http(s) origin — scheme and host, optional port. The check is exported as `parseOrigin`.
+
 ## 0.6.0
 
 - Postgres/Supabase, MySQL, and SQLite ship first-party (`@tetrac/login-sdk/storage/sql`), each with a preflight that refuses to boot on a world-readable schema, a truncating MySQL, or a web-served SQLite file.

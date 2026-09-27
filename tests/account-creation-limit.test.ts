@@ -78,7 +78,10 @@ describe("account creation ceiling", () => {
       const publicKey = kp.publicKey.toBase58();
       const { challenge } = await (await h.challenge(jreq({ publicKey }))).json();
       const sig = Buffer.from(
-        nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, ORIGIN)), kp.secretKey),
+        nacl.sign.detached(
+          new TextEncoder().encode(walletLoginMessage({ challenge, origin: ORIGIN, address: publicKey })),
+          kp.secretKey,
+        ),
       ).toString("hex");
       return h.connectWallet(jreq({ publicKey, signature: sig, challenge, wallets: [] }));
     };

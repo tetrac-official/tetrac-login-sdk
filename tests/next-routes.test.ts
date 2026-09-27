@@ -89,6 +89,16 @@ describe("createNextAuthRoutes — action dispatch", () => {
   });
 });
 
+// `export const { GET, POST } = createNextAuthRoutes(...)` runs at module load, so an origin
+// no wallet login message can be built from fails the route at boot, not on every request.
+describe("createNextAuthRoutes — origin check", () => {
+  it("throws at construction for an origin with a path", () => {
+    expect(() =>
+      createNextAuthRoutes({ storage: new MemoryAdapter(), config: { origin: "https://test.example/api" } }),
+    ).toThrow(/^\[tetrac\] Invalid origin/);
+  });
+});
+
 // L-1 (audit.md) — the dispatch table must not resolve inherited properties.
 //
 // It was an object literal, so `postRoutes["constructor"]` walked Object.prototype, found
@@ -175,7 +185,9 @@ describe("no endpoint answers 404", () => {
     const { challenge } = await (await handlers.challenge(jreq("challenge", { publicKey }))).json();
     const signature = Array.from(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: publicKey }),
+        ),
         kp.secretKey,
       ),
       (b) => b.toString(16).padStart(2, "0"),

@@ -134,7 +134,9 @@ describe("wallet accounts: same wallet, independent per-app records", () => {
     const { challenge } = await (await h.challenge(req({ appId, publicKey: pubKey }))).json();
     const sig = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );
@@ -174,7 +176,9 @@ describe("wallet accounts: same wallet, independent per-app records", () => {
     const { challenge } = await (await h.challenge(req({ appId: APP_A, publicKey: pubKey }))).json();
     const sig = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );

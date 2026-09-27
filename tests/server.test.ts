@@ -60,7 +60,9 @@ describe("wallet auth flow", () => {
     expect(challenge).toHaveLength(64);
 
     // 2. sign the canonical message
-    const message = new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example"));
+    const message = new TextEncoder().encode(
+      walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+    );
     const signature = bytesToHex(nacl.sign.detached(message, kp.secretKey));
 
     // 3. register the wallet (proves ownership)
@@ -73,7 +75,9 @@ describe("wallet auth flow", () => {
     const ch2 = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig2 = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(ch2.challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge: ch2.challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );
@@ -116,7 +120,9 @@ describe("wallet auth flow", () => {
     // …and the challenge survives, so the real owner can still register with it.
     const sig = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );
@@ -127,13 +133,39 @@ describe("wallet auth flow", () => {
   });
 });
 
+describe("config.origin boot check", () => {
+  // Every wallet signature is verified against a message built from config.origin. One that
+  // cannot be built would fail every wallet login and registration at request time, with no
+  // error anywhere, so construction throws instead.
+  it.each([
+    "myapp.example",
+    "https://myapp.example/app",
+    "https://myapp.example?x=1",
+    "https://myapp.example#top",
+    "https://user:pw@myapp.example",
+    "ftp://myapp.example",
+  ])("createAuthHandlers throws for origin %s", (origin) => {
+    expect(() => createAuthHandlers({ storage: new MemoryAdapter(), config: { origin } })).toThrow(
+      /^\[tetrac\] Invalid origin/,
+    );
+  });
+
+  it("accepts a bare http(s) origin regardless of case, trailing slash or port", () => {
+    for (const origin of ["HTTPS://Test.Example/", "http://localhost:3000"]) {
+      expect(() => createAuthHandlers({ storage: new MemoryAdapter(), config: { origin } })).not.toThrow();
+    }
+  });
+});
+
 describe("connect-wallet (upsert)", () => {
   async function connect(h: ReturnType<typeof createAuthHandlers>, kp: Keypair, wallets: unknown[]) {
     const pubKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );
@@ -280,7 +312,9 @@ describe("atomic challenge consume (H3)", () => {
     const { challenge } = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );
@@ -293,7 +327,9 @@ describe("atomic challenge consume (H3)", () => {
     const ch2 = await (await h.challenge(req({ publicKey: pubKey }))).json();
     const sig2 = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(ch2.challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge: ch2.challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );

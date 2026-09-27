@@ -32,6 +32,17 @@ const handlers = (storage: MemoryAdapter) =>
 
 const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 
+/** The wallet-login signature `kp` produces for `challenge`, naming its own public key. */
+const signLogin = (kp: Keypair, challenge: string) =>
+  toHex(
+    nacl.sign.detached(
+      new TextEncoder().encode(
+        walletLoginMessage({ challenge, origin: ORIGIN, address: kp.publicKey.toBase58() }),
+      ),
+      kp.secretKey,
+    ),
+  );
+
 describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge", () => {
   it("🚨 email login: the victim's challenge still works after an attacker requests one", async () => {
     const storage = new MemoryAdapter();
@@ -73,9 +84,7 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const first = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
     await h.challenge(jreq({ publicKey })); // attacker's request lands in between
 
-    const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(first, ORIGIN)), kp.secretKey),
-    );
+    const sig = signLogin(kp, first);
     const res = await h.connectWallet(jreq({ publicKey, signature: sig, challenge: first, wallets: [] }));
     expect(res.status).toBe(201);
   });
@@ -89,9 +98,7 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const mine = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
     for (let i = 0; i < 9; i++) await h.challenge(jreq({ publicKey }));
 
-    const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(mine, ORIGIN)), kp.secretKey),
-    );
+    const sig = signLogin(kp, mine);
     expect(
       (await h.connectWallet(jreq({ publicKey, signature: sig, challenge: mine, wallets: [] }))).status,
     ).toBe(201);
@@ -104,9 +111,7 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const publicKey = kp.publicKey.toBase58();
 
     const c = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
-    const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(c, ORIGIN)), kp.secretKey),
-    );
+    const sig = signLogin(kp, c);
     const body = { publicKey, signature: sig, challenge: c, wallets: [] };
 
     expect((await h.connectWallet(jreq(body))).status).toBe(201);
@@ -120,16 +125,32 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const kp = Keypair.generate();
     const publicKey = kp.publicKey.toBase58();
 
+    const real = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
+
     // The presented value is part of the lookup key now, so anything that is not exactly
     // what generateChallenge() mints is refused up front.
     // ("" is a MISSING field, refused earlier with 400 — a different path.)
-    for (const bad of ["not-hex", "a".repeat(63), `${"a".repeat(64)}:extra`, "x".repeat(5000)]) {
-      const sig = toHex(
-        nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(bad, ORIGIN)), kp.secretKey),
-      );
+    // [presented, signed]. "a"×63 and "x"×5000 are valid SIWS nonces, so they are signed as
+    // presented and only the challenge-shape check can refuse them. "not-hex" and ":extra"
+    // cannot appear in a login message at all, so they travel with a genuine signature over
+    // the real challenge instead.
+    const cases: [string, string][] = [
+      ["not-hex", real],
+      ["a".repeat(63), "a".repeat(63)],
+      [`${"a".repeat(64)}:extra`, real],
+      ["x".repeat(5000), "x".repeat(5000)],
+    ];
+    for (const [bad, signed] of cases) {
+      const sig = signLogin(kp, signed);
       const res = await h.connectWallet(jreq({ publicKey, signature: sig, challenge: bad, wallets: [] }));
       expect(res.status).toBe(401);
     }
+
+    // None of them consumed the real challenge.
+    const res = await h.connectWallet(
+      jreq({ publicKey, signature: signLogin(kp, real), challenge: real, wallets: [] }),
+    );
+    expect(res.status).toBe(201);
   });
 
   it("registration still binds the auth key it was given", async () => {

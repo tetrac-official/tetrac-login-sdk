@@ -91,7 +91,7 @@ async function connect(appId, ct) {
   const { challenge } = await (await h.challenge(req({ appId, publicKey: W }))).json();
   const sig = bytesToHex(
     nacl.sign.detached(
-      new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+      new TextEncoder().encode(walletLoginMessage({ challenge, origin: "https://test.example", address: W })),
       kp.secretKey,
     ),
   );
@@ -113,7 +113,12 @@ check(
 console.log("\nChallenge scoping:");
 const { challenge: chA } = await (await h.challenge(req({ appId: APP_A, publicKey: W }))).json();
 const sigA = bytesToHex(
-  nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(chA, "https://test.example")), kp.secretKey),
+  nacl.sign.detached(
+    new TextEncoder().encode(
+      walletLoginMessage({ challenge: chA, origin: "https://test.example", address: W }),
+    ),
+    kp.secretKey,
+  ),
 );
 const cross = await h.loginWallet(req({ appId: APP_B, publicKey: W, signature: sigA, challenge: chA }));
 check("app-A challenge spent under app B → 401", cross.status === 401);

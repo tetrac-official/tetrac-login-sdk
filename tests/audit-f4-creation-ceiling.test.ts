@@ -31,7 +31,9 @@ async function registerFromIp(
   const publicKey = kp.publicKey.toBase58();
   const headers = { "x-forwarded-for": ip };
   const ch = (await (await h.challenge(jreq({ publicKey }, headers))).json()) as { challenge: string };
-  const msg = new TextEncoder().encode(walletLoginMessage(ch.challenge, ORIGIN));
+  const msg = new TextEncoder().encode(
+    walletLoginMessage({ challenge: ch.challenge, origin: ORIGIN, address: publicKey }),
+  );
   const res = await h.connectWallet(
     jreq(
       {

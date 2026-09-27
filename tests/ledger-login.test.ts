@@ -44,7 +44,12 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
   it("accepts a software wallet's RAW signature (no regression)", () => {
     const kp = Keypair.generate();
     const challenge = generateChallenge();
-    const sig = softwareSign(kp, enc(walletLoginMessage(challenge, "https://test.example")));
+    const sig = softwareSign(
+      kp,
+      enc(
+        walletLoginMessage({ challenge, origin: "https://test.example", address: kp.publicKey.toBase58() }),
+      ),
+    );
     expect(
       verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
     ).toBe(true);
@@ -53,7 +58,12 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
   it("accepts a Ledger LEGACY off-chain signature (fixes the 401 on deployed firmware)", () => {
     const kp = Keypair.generate();
     const challenge = generateChallenge();
-    const sig = ledgerSign(kp, enc(walletLoginMessage(challenge, "https://test.example")));
+    const sig = ledgerSign(
+      kp,
+      enc(
+        walletLoginMessage({ challenge, origin: "https://test.example", address: kp.publicKey.toBase58() }),
+      ),
+    );
     // Before the fix this returned false → 401 Invalid credentials.
     expect(
       verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
@@ -63,15 +73,43 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
   it("accepts a Ledger V0 off-chain signature (newer firmware)", () => {
     const kp = Keypair.generate();
     const challenge = generateChallenge();
-    const sig = ledgerSignV0(kp, enc(walletLoginMessage(challenge, "https://test.example")));
+    const sig = ledgerSignV0(
+      kp,
+      enc(
+        walletLoginMessage({ challenge, origin: "https://test.example", address: kp.publicKey.toBase58() }),
+      ),
+    );
     expect(
       verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
     ).toBe(true);
   });
 
+  it("the login message encodes as RestrictedAscii in both envelopes (no UTF-8/blind-sign format)", () => {
+    const kp = Keypair.generate();
+    const message = enc(
+      walletLoginMessage({
+        challenge: generateChallenge(),
+        origin: "https://test.example",
+        address: kp.publicKey.toBase58(),
+      }),
+    );
+    // Format byte: offset 17 in the legacy header, 49 in v0 (after the 32-byte app domain).
+    expect(encodeOffchainMessageLegacy(message)[17]).toBe(0x00);
+    expect(encodeOffchainMessage(message, kp.publicKey.toBytes())[49]).toBe(0x00);
+  });
+
   it("rejects a signature bound to a DIFFERENT challenge (replay protection intact)", () => {
     const kp = Keypair.generate();
-    const sig = ledgerSign(kp, enc(walletLoginMessage(generateChallenge(), "https://test.example")));
+    const sig = ledgerSign(
+      kp,
+      enc(
+        walletLoginMessage({
+          challenge: generateChallenge(),
+          origin: "https://test.example",
+          address: kp.publicKey.toBase58(),
+        }),
+      ),
+    );
     expect(
       verifySolanaSignature(kp.publicKey.toBase58(), toHex(sig), generateChallenge(), "https://test.example"),
     ).toBe(false);
@@ -81,8 +119,19 @@ describe("verifySolanaSignature — hardware (off-chain) + software (raw)", () =
     const signer = Keypair.generate();
     const impostor = Keypair.generate();
     const challenge = generateChallenge();
-    const sig = ledgerSign(signer, enc(walletLoginMessage(challenge, "https://test.example")));
-    // The envelope embeds the signer pubkey; verifying under the impostor's key fails.
+    // `signer` signs the message an honest client would build for the key being claimed
+    // (the impostor's), so the only thing wrong is the key: the signature does not verify
+    // under the impostor's key in any envelope.
+    const sig = ledgerSign(
+      signer,
+      enc(
+        walletLoginMessage({
+          challenge,
+          origin: "https://test.example",
+          address: impostor.publicKey.toBase58(),
+        }),
+      ),
+    );
     expect(
       verifySolanaSignature(impostor.publicKey.toBase58(), toHex(sig), challenge, "https://test.example"),
     ).toBe(false);

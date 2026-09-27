@@ -71,7 +71,9 @@ describe("F-5 — registration still works: an unknown key gets a usable stored 
 
     // /challenge for a key with no record yet must still STORE a challenge…
     const ch = (await (await h.challenge(jreq({ publicKey }))).json()) as { challenge: string };
-    const msg = new TextEncoder().encode(walletLoginMessage(ch.challenge, ORIGIN));
+    const msg = new TextEncoder().encode(
+      walletLoginMessage({ challenge: ch.challenge, origin: ORIGIN, address: publicKey }),
+    );
     // …or this consume would fail and registration would be impossible.
     const res = await h.connectWallet(
       jreq({

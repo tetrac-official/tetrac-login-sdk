@@ -252,6 +252,42 @@ export function normalizeOrigin(origin: string): string {
   return origin.trim().toLowerCase().replace(/\/+$/, "");
 }
 
+/**
+ * Parse an origin into the URL the wallet login message is built from, or throw.
+ *
+ * Accepts only a bare http(s) origin: scheme and host, optional port. Nothing else can
+ * equal a page's `window.location.origin`, so a server configured with anything else
+ * would reject every wallet login and registration with no error anywhere. Non-web
+ * schemes are rejected too — their WHATWG `URL.origin` is the string "null", which would
+ * put `URI: null` in the signed bytes. The server calls this at construction; the login
+ * message builder calls it on every build.
+ */
+export function parseOrigin(origin: string): URL {
+  const site = normalizeOrigin(origin);
+  let url: URL | undefined;
+  try {
+    url = new URL(site);
+  } catch {
+    url = undefined;
+  }
+  if (
+    !url ||
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    // An empty `?` or `#` leaves `search`/`hash` empty, so check the string itself.
+    /[?#]/.test(site)
+  ) {
+    throw new Error(
+      `[tetrac] Invalid origin ${JSON.stringify(origin)}. Expected a bare http(s) origin — ` +
+        "scheme and host, optional port, no path, query, fragment or credentials — e.g. " +
+        "'https://myapp.example' or 'http://localhost:3000'.",
+    );
+  }
+  return url;
+}
+
 /** `window.location.origin` when running in a browser, else undefined. */
 function browserOrigin(): string | undefined {
   return typeof window !== "undefined" ? window.location?.origin : undefined;

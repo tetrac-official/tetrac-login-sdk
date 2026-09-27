@@ -87,7 +87,7 @@ wallets stop decrypting.**
 | Option | Default | |
 |---|---|---|
 | `appId` | `"ttc"` | Per-deployment identifier. Domain-separates key derivation and namespaces every storage key, so several apps can share one database. The default provides no isolation — override it. |
-| `origin` | *(required on the server)* | Canonical origin, e.g. `"https://myapp.example"` — scheme + host (+ port), no path or trailing slash. Binds wallet signatures to your site so they cannot be relayed from another. Defaults to `window.location.origin` in the browser. |
+| `origin` | *(required on the server)* | Canonical http(s) origin, e.g. `"https://myapp.example"` — scheme + host (+ port), no path, query or fragment; `createAuthHandlers` throws otherwise. Binds wallet signatures to your site so they cannot be relayed from another. Defaults to `window.location.origin` in the browser. |
 | `allowedAppIds` | *(unset)* | Accepted `appId` values. Unset, any well-formed `appId` mints a namespace — a client sending the wrong one registers into a separate tenant under a different key. Warns at boot. |
 
 ### Key derivation

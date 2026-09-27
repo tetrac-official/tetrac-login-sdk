@@ -19,7 +19,8 @@ function hexToBytes(hex: string): Uint8Array {
 
 /**
  * Verify that `signatureHex` is a valid signature, by `publicKeyBase58`, over the
- * canonical wallet-login message built from `challenge`.
+ * wallet-login message for `challenge` and `origin` that names `publicKeyBase58` as its
+ * address.
  *
  * Accepts BOTH encodings, trying the cheap one first:
  *  1. RAW — software wallets (Phantom et al.) sign the message bytes directly.
@@ -44,7 +45,9 @@ export function verifySolanaSignature(
     // `origin` MUST come from server configuration, never from the request — it is
     // the whole anti-relay property. A caller that echoes back a client-supplied
     // origin has rebuilt the vulnerability this parameter exists to close.
-    const message = new TextEncoder().encode(walletLoginMessage(challenge, origin));
+    const message = new TextEncoder().encode(
+      walletLoginMessage({ challenge, origin, address: publicKeyBase58 }),
+    );
     const sig = hexToBytes(signatureHex);
     const pubKeyBytes = new PublicKey(publicKeyBase58).toBytes();
     // 1) Raw (software wallets) — the default, unchanged path.

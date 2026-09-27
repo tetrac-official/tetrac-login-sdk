@@ -29,15 +29,47 @@ describe("verifySolanaSignature — malformed input fails closed", () => {
     expect(verifySolanaSignature(pub, "00".repeat(64), CHALLENGE, "https://test.example")).toBe(false);
   });
 
-  it("rejects an invalid base58 public key (PublicKey ctor throws → caught)", () => {
+  it("rejects a non-base58 public key (login message builder throws → caught)", () => {
     expect(
       verifySolanaSignature("not valid base58 !!!", "00".repeat(64), CHALLENGE, "https://test.example"),
     ).toBe(false);
   });
 
+  it("rejects a base58 public key that is not 32 bytes (PublicKey ctor throws → caught)", () => {
+    // Passes the message's address check (32–44 base58 chars) but decodes to 33 bytes.
+    expect(verifySolanaSignature("z".repeat(44), "00".repeat(64), CHALLENGE, "https://test.example")).toBe(
+      false,
+    );
+  });
+
+  it("rejects a challenge the login message cannot carry, even under a genuine signature", () => {
+    // Genuine signatures over the exact bytes the message would hold for each bad nonce.
+    const valid = walletLoginMessage({ challenge: CHALLENGE, origin: "https://test.example", address: pub });
+    for (const bad of ["short", "ab".repeat(16) + "!"]) {
+      const text = valid.replace(`Nonce: ${CHALLENGE}`, `Nonce: ${bad}`);
+      expect(text).toContain(`Nonce: ${bad}`);
+      const sig = nacl.sign.detached(new TextEncoder().encode(text), kp.secretKey);
+      expect(verifySolanaSignature(pub, bytesToHex(sig), bad, "https://test.example")).toBe(false);
+    }
+  });
+
+  it("rejects a server origin with a path, even under a genuine signature for its bare origin", () => {
+    // Its URL origin is https://test.example, so only the builder's origin check stops this.
+    const sig = nacl.sign.detached(
+      new TextEncoder().encode(
+        walletLoginMessage({ challenge: CHALLENGE, origin: "https://test.example", address: pub }),
+      ),
+      kp.secretKey,
+    );
+    expect(verifySolanaSignature(pub, bytesToHex(sig), CHALLENGE, "https://test.example")).toBe(true);
+    expect(verifySolanaSignature(pub, bytesToHex(sig), CHALLENGE, "https://test.example/app")).toBe(false);
+  });
+
   it("tolerates a 0x-prefixed signature and still verifies a real one", () => {
     const sig = nacl.sign.detached(
-      new TextEncoder().encode(walletLoginMessage(CHALLENGE, "https://test.example")),
+      new TextEncoder().encode(
+        walletLoginMessage({ challenge: CHALLENGE, origin: "https://test.example", address: pub }),
+      ),
       kp.secretKey,
     );
     expect(verifySolanaSignature(pub, "0x" + bytesToHex(sig), CHALLENGE, "https://test.example")).toBe(true); // 0x strip branch
