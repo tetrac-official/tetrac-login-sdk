@@ -259,7 +259,9 @@ describe("concurrent connect-wallet upsert", () => {
     const { challenge } = await chRes.json();
     const sig = bytesToHex(
       nacl.sign.detached(
-        new TextEncoder().encode(walletLoginMessage(challenge, "https://test.example")),
+        new TextEncoder().encode(
+          walletLoginMessage({ challenge, origin: "https://test.example", address: pubKey }),
+        ),
         kp.secretKey,
       ),
     );

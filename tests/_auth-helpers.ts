@@ -51,7 +51,9 @@ export function addressFor(label: string): string {
 
 /**
  * Produce the possession proof `/register` now requires: fetch a challenge for `address`
- * and sign it with `signer`. Pass a mismatched signer to exercise the rejection path.
+ * and sign the login message naming `address` with `signer`. Pass a mismatched signer to
+ * exercise the rejection path — the message still names the claimed `address`, so it
+ * fails only on the key.
  */
 export async function proofFor(
   h: { challenge: (req: Request) => Promise<Response> },
@@ -63,7 +65,7 @@ export async function proofFor(
     challenge: string;
   };
   const msg = new TextEncoder().encode(
-    walletLoginMessage(ch.challenge, opts.origin ?? "https://test.example"),
+    walletLoginMessage({ challenge: ch.challenge, origin: opts.origin ?? "https://test.example", address }),
   );
   return { signature: bytesToHex(nacl.sign.detached(msg, signer.secretKey)), challenge: ch.challenge };
 }
@@ -127,8 +129,10 @@ export async function registerEmail(
       challenge: string;
     };
     const signer = opts.signAs ?? identity;
+    // The message names the claimed `address` even under `signAs`, so a mismatched signer
+    // fails only on the key.
     const msg = new TextEncoder().encode(
-      walletLoginMessage(ch.challenge, opts.origin ?? "https://test.example"),
+      walletLoginMessage({ challenge: ch.challenge, origin: opts.origin ?? "https://test.example", address }),
     );
     proof = { signature: bytesToHex(nacl.sign.detached(msg, signer.secretKey)), challenge: ch.challenge };
   }

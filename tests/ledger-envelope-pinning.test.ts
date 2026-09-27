@@ -99,15 +99,19 @@ describe("M-4 — the off-chain envelope is app-key derivation input", () => {
 });
 
 describe("M-4 — the server pins and returns the envelope", () => {
-  async function registerHardware(h: ReturnType<typeof createAuthHandlers>, kp: Keypair) {
+  async function registerHardware(
+    h: ReturnType<typeof createAuthHandlers>,
+    kp: Keypair,
+    envelope: OffchainEnvelope,
+  ) {
     const publicKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(jreq({ publicKey }))).json();
     // The AUTH signature may cascade freely — it is challenge-bound and stateless.
     const sig = toHex(
       nacl.sign.detached(
         encodeOffchainMessageAs(
-          "legacy",
-          new TextEncoder().encode(walletLoginMessage(challenge, ORIGIN)),
+          envelope,
+          new TextEncoder().encode(walletLoginMessage({ challenge, origin: ORIGIN, address: publicKey })),
           kp.publicKey.toBytes(),
         ),
         kp.secretKey,
@@ -120,21 +124,24 @@ describe("M-4 — the server pins and returns the envelope", () => {
         wallets: [],
         signature: sig,
         challenge,
-        offchainEnvelope: "legacy",
+        offchainEnvelope: envelope,
       }),
     );
   }
 
-  it("🚨 /challenge returns the pinned envelope so the client never cascades again", async () => {
-    const storage = new MemoryAdapter();
-    const h = handlers(storage);
-    const kp = Keypair.generate();
+  it.each(["legacy", "v0"] as const)(
+    "🚨 /challenge returns the pinned %s envelope so the client never cascades again",
+    async (envelope) => {
+      const storage = new MemoryAdapter();
+      const h = handlers(storage);
+      const kp = Keypair.generate();
 
-    expect((await registerHardware(h, kp)).status).toBe(201);
+      expect((await registerHardware(h, kp, envelope)).status).toBe(201);
 
-    const body = await (await h.challenge(jreq({ publicKey: kp.publicKey.toBase58() }))).json();
-    expect(body.offchainEnvelope).toBe("legacy");
-  });
+      const body = await (await h.challenge(jreq({ publicKey: kp.publicKey.toBase58() }))).json();
+      expect(body.offchainEnvelope).toBe(envelope);
+    },
+  );
 
   it("a software wallet gets no envelope — it signs raw bytes and has nothing to pin", async () => {
     const storage = new MemoryAdapter();
@@ -144,7 +151,10 @@ describe("M-4 — the server pins and returns the envelope", () => {
 
     const { challenge } = await (await h.challenge(jreq({ publicKey }))).json();
     const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, ORIGIN)), kp.secretKey),
+      nacl.sign.detached(
+        new TextEncoder().encode(walletLoginMessage({ challenge, origin: ORIGIN, address: publicKey })),
+        kp.secretKey,
+      ),
     );
     expect((await h.connectWallet(jreq({ publicKey, signature: sig, challenge, wallets: [] }))).status).toBe(
       201,

@@ -394,7 +394,9 @@ export class AuthClient {
     // Decrypt only to sign, then drop the reference — same discipline as every other
     // signing path here.
     const kp = await toSolanaKeypair(identity, appKey);
-    const message = new TextEncoder().encode(walletLoginMessage(challenge, this.clientOrigin()));
+    const message = new TextEncoder().encode(
+      walletLoginMessage({ challenge, origin: this.clientOrigin(), address: identity.publicKey }),
+    );
     return { signature: bytesToHex(nacl.sign.detached(message, kp.secretKey)), challenge };
   }
 
@@ -418,7 +420,9 @@ export class AuthClient {
     const enc = new TextEncoder();
     // The AUTH signature may cascade freely: it is challenge-bound and stateless, so which
     // envelope produced it does not matter — the server accepts any of them.
-    const authSig = await signMessage(enc.encode(walletLoginMessage(challenge, this.clientOrigin())));
+    const authSig = await signMessage(
+      enc.encode(walletLoginMessage({ challenge, origin: this.clientOrigin(), address: publicKey })),
+    );
     // Hardware wallets derive the key from the newline-free message so the device
     // can clear-sign it (a Ledger rejects newline content / forces blind signing).
     const keyMessage = hardwareWallet

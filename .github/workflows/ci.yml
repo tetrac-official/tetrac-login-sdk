@@ -114,6 +114,11 @@ jobs:
       - name: Build
         run: npm run build
 
+      # The wallet-login message as SHIPPED: dist/ must emit a Sign In With Solana message
+      # the reference parser accepts, and its server must reject every mismatched origin.
+      - name: Verify SIWS login message (dist)
+        run: node scripts/verify-siws-login.mjs
+
       - name: Test
         run: npm test
 

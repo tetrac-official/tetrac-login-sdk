@@ -8,6 +8,7 @@
 // the question to answer is "was that intended, and does the reasoning below still hold?".
 // Update the expectation AND the comment together, or revert the change.
 import { DEFAULT_CONFIG, PBKDF2_ITERATIONS, resolveConfig } from "../src/core/config";
+import { AuthClient } from "../src/client/authClient";
 
 describe("shipped defaults — session and challenge lifetime", () => {
   it("sessions last 24h", () => {
@@ -111,6 +112,23 @@ describe("origin is required and normalized", () => {
     // Both sides build the signed message from this; disagreement fails every wallet login.
     expect(resolveConfig({ origin: "HTTPS://App.Example/" }).origin).toBe("https://app.example");
     expect(resolveConfig({ origin: " https://app.example// " }).origin).toBe("https://app.example");
+  });
+
+  it("does NOT validate the origin's URL shape — the browser runs resolveConfig too", () => {
+    // The client builds wallet messages from window.location.origin, and its email and
+    // passkey flows never read config.origin, so a shape check here could only break a
+    // browser sign-in over a value nothing uses. The server validates its own origin when
+    // createAuthHandlers is constructed.
+    expect(resolveConfig({ origin: "myapp.example" }).origin).toBe("myapp.example");
+    expect(resolveConfig({ origin: "null" }).origin).toBe("null");
+  });
+
+  it("AuthClient constructs with an origin the server would refuse", () => {
+    // "null" is how an opaque origin serializes. appId is set only to skip the default-'ttc'
+    // warning.
+    const build = () =>
+      new AuthClient({ apiBaseUrl: "/api/auth", config: { appId: "test-app", origin: "null" } });
+    expect(build).not.toThrow();
   });
 });
 

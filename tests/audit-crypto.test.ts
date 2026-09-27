@@ -19,7 +19,7 @@ import {
 } from "../src/core/crypto";
 import { deriveAuthPublicKey } from "../src/client/authKey";
 import { DEFAULT_CONFIG, PBKDF2_ITERATIONS } from "../src/core/config";
-import { WALLET_APP_KEY_MESSAGE, walletAppKeyMessage } from "../src/core/index";
+import { WALLET_APP_KEY_MESSAGE, walletAppKeyMessage, walletAppKeyMessageHw } from "../src/core/index";
 
 const sha256hex = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 const ORIGINAL = "0x" + "11".repeat(32);
@@ -98,6 +98,22 @@ describe("H4 RESOLVED — the wallet-app-key message is domain-bound by appId", 
   it("same appId ⇒ same message (deterministic — recovery/login stays stable)", () => {
     expect(walletAppKeyMessage("appA", "https://test.example")).toBe(
       walletAppKeyMessage("appA", "https://test.example"),
+    );
+  });
+
+  // Golden strings (invariant 4). The app key is SHA-256 of the wallet's signature over
+  // these exact bytes, and every existing Web3 account derived its key from them: one
+  // changed character re-derives every key and strands every stored wallet. A failure
+  // here is a regression in the builder — never update the literal to match it.
+  it("golden string: walletAppKeyMessage is byte-for-byte pinned", () => {
+    expect(walletAppKeyMessage("myapp", "https://myapp.example")).toBe(
+      "Unlock your encrypted TTC wallet keys.\n\nOnly sign this on a site you trust. This signature never leaves your device.\n\nApp: myapp\nSite: https://myapp.example",
+    );
+  });
+
+  it("golden string: walletAppKeyMessageHw (hardware, newline-free) is byte-for-byte pinned", () => {
+    expect(walletAppKeyMessageHw("myapp", "https://myapp.example")).toBe(
+      "Unlock your encrypted TTC wallet keys. Only sign this on a site you trust. This signature never leaves your device. App: myapp Site: https://myapp.example",
     );
   });
 

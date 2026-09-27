@@ -10,6 +10,7 @@ import {
 } from "../storage/store.js";
 import {
   resolveConfig,
+  parseOrigin,
   APP_ID_HEADER,
   AUTH_TOKEN_HEADER,
   PUBLIC_KEY_HEADER,
@@ -253,6 +254,10 @@ function validAuthMethod(v: unknown): v is UserData["authMethod"] {
 
 export function createAuthHandlers(opts: AuthHandlerOptions): AuthHandlers {
   const config = resolveConfig(opts.config);
+  // Every wallet signature is verified against a message built from config.origin. One that
+  // cannot be built would fail every wallet login and registration silently, so fail here.
+  // Server-side only: the client signs with window.location.origin and never reads it.
+  parseOrigin(config.origin);
   checkConfig(config, opts.onWarning);
   // A native AuthStore wins; otherwise wrap the KV adapter. One of the two is required.
   const store: AuthStore =

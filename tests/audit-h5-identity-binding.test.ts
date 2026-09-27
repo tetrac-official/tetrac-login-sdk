@@ -35,10 +35,17 @@ function setup() {
   return { h, store };
 }
 
-/** Sign the standard wallet-login message with a keypair the caller actually holds. */
-function signAs(kp: Keypair, challenge: string): string {
+/**
+ * Sign the wallet-login message naming `address` — the identity key the request claims —
+ * with a keypair the caller actually holds. When `kp` is not that key, the proof fails
+ * only on the key.
+ */
+function signAs(kp: Keypair, challenge: string, address: string): string {
   return hex(
-    nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(challenge, ORIGIN)), kp.secretKey),
+    nacl.sign.detached(
+      new TextEncoder().encode(walletLoginMessage({ challenge, origin: ORIGIN, address })),
+      kp.secretKey,
+    ),
   );
 }
 
@@ -71,7 +78,7 @@ describe("§1 — the plant is refused at the door", () => {
     // …but can only sign it with a key they actually hold.
     const attacker = Keypair.generate();
     const res = await h.register(
-      jreq(plantBody(addr, { signature: signAs(attacker, ch.challenge), challenge: ch.challenge })),
+      jreq(plantBody(addr, { signature: signAs(attacker, ch.challenge, addr), challenge: ch.challenge })),
     );
 
     expect(res.status).toBe(401);
@@ -98,14 +105,19 @@ describe("§1 — the plant is refused at the door", () => {
     expect(
       (
         await h.register(
-          jreq(plantBody(addr, { signature: signAs(attacker, chAtk.challenge), challenge: chAtk.challenge })),
+          jreq(
+            plantBody(addr, {
+              signature: signAs(attacker, chAtk.challenge, addr),
+              challenge: chAtk.challenge,
+            }),
+          ),
         )
       ).status,
     ).toBe(401);
 
     const chVic = await (await h.challenge(jreq({ publicKey: addr }))).json();
     const res = await h.connectWallet(
-      jreq({ publicKey: addr, signature: signAs(victim, chVic.challenge), challenge: chVic.challenge }),
+      jreq({ publicKey: addr, signature: signAs(victim, chVic.challenge, addr), challenge: chVic.challenge }),
     );
     expect(res.status).toBe(201);
     const { user } = await res.json();
@@ -145,7 +157,7 @@ describe("§2 — FIX A blocks the plant at its source", () => {
     const res = await registerWithProofOfPossession(
       h,
       store,
-      plantBody(addr, { signature: signAs(attacker, ch.challenge), challenge: ch.challenge }),
+      plantBody(addr, { signature: signAs(attacker, ch.challenge, addr), challenge: ch.challenge }),
     );
 
     expect(res.status).toBe(401);
@@ -173,7 +185,7 @@ describe("§2 — FIX A blocks the plant at its source", () => {
       authPublicKey: deriveAuthPublicKey("bb".repeat(32)),
       authMethod: "email",
       wallets: [{ chain: "solana", role: "funds", publicKey: addr, encryptedSecret: "ct" }],
-      signature: signAs(identity, ch.challenge),
+      signature: signAs(identity, ch.challenge, addr),
       challenge: ch.challenge,
     });
 
@@ -198,7 +210,7 @@ describe("§2 — FIX A blocks the plant at its source", () => {
       authPublicKey: deriveAuthPublicKey("cc".repeat(32)),
       authMethod: "email",
       wallets: [],
-      signature: signAs(identity, ch.challenge),
+      signature: signAs(identity, ch.challenge, addr),
       challenge: ch.challenge,
     };
 
@@ -242,7 +254,7 @@ describe("§3 — FIX B stops the victim landing in a planted record", () => {
     const ch = await (await h.challenge(jreq({ publicKey: addr }))).json();
     const res = await connectWalletCrossMethodGuarded(h, store, {
       publicKey: addr,
-      signature: signAs(victim, ch.challenge),
+      signature: signAs(victim, ch.challenge, addr),
       challenge: ch.challenge,
     });
 
@@ -259,7 +271,7 @@ describe("§3 — FIX B stops the victim landing in a planted record", () => {
     const ch1 = await (await h.challenge(jreq({ publicKey: addr }))).json();
     const first = await connectWalletCrossMethodGuarded(h, store, {
       publicKey: addr,
-      signature: signAs(user, ch1.challenge),
+      signature: signAs(user, ch1.challenge, addr),
       challenge: ch1.challenge,
       wallets: [{ chain: "evm", role: "funds", publicKey: "0xMINE", encryptedSecret: "ct" }],
     });
@@ -268,7 +280,7 @@ describe("§3 — FIX B stops the victim landing in a planted record", () => {
     const ch2 = await (await h.challenge(jreq({ publicKey: addr }))).json();
     const again = await connectWalletCrossMethodGuarded(h, store, {
       publicKey: addr,
-      signature: signAs(user, ch2.challenge),
+      signature: signAs(user, ch2.challenge, addr),
       challenge: ch2.challenge,
     });
     expect(again.status).toBe(200); // returning user, unaffected by the guard
@@ -291,7 +303,7 @@ describe("§4 — no collateral damage", () => {
       authPublicKey: deriveAuthPublicKey("dd".repeat(32)),
       authMethod: "email",
       wallets: [{ chain: "solana", role: "funds", publicKey: emailAddr, encryptedSecret: "ct" }],
-      signature: signAs(emailIdentity, chA.challenge),
+      signature: signAs(emailIdentity, chA.challenge, emailAddr),
       challenge: chA.challenge,
     });
     expect(emailReg.status).toBe(201);
@@ -301,7 +313,7 @@ describe("§4 — no collateral damage", () => {
     const chB = await (await h.challenge(jreq({ publicKey: walletAddr }))).json();
     const walletReg = await connectWalletCrossMethodGuarded(h, store, {
       publicKey: walletAddr,
-      signature: signAs(walletUser, chB.challenge),
+      signature: signAs(walletUser, chB.challenge, walletAddr),
       challenge: chB.challenge,
     });
     expect(walletReg.status).toBe(201);
@@ -322,7 +334,7 @@ describe("§4 — no collateral damage", () => {
         await registerWithProofOfPossession(
           h,
           store,
-          plantBody(addr, { signature: signAs(attacker, chAtk.challenge), challenge: chAtk.challenge }),
+          plantBody(addr, { signature: signAs(attacker, chAtk.challenge, addr), challenge: chAtk.challenge }),
         )
       ).status,
     ).toBe(401);
@@ -331,7 +343,7 @@ describe("§4 — no collateral damage", () => {
     const chVic = await (await h.challenge(jreq({ publicKey: addr }))).json();
     const res = await connectWalletCrossMethodGuarded(h, store, {
       publicKey: addr,
-      signature: signAs(victim, chVic.challenge),
+      signature: signAs(victim, chVic.challenge, addr),
       challenge: chVic.challenge,
     });
     expect(res.status).toBe(201);

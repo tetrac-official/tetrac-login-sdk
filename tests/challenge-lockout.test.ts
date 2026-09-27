@@ -20,6 +20,8 @@ import { MemoryAdapter } from "../src/storage/memory";
 import { walletLoginMessage } from "../src/core/index";
 import { deriveAuthPublicKey, signAuthChallenge } from "../src/client/authKey";
 import { registerEmail, jreq } from "./_auth-helpers";
+import { consumeChallenge } from "../src/server/challenge";
+import type { AuthStore } from "../src/storage/store";
 
 const APP_KEY = "ab".repeat(32);
 const ORIGIN = "https://test.example";
@@ -31,6 +33,17 @@ const handlers = (storage: MemoryAdapter) =>
   });
 
 const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+
+/** The wallet-login signature `kp` produces for `challenge`, naming its own public key. */
+const signLogin = (kp: Keypair, challenge: string) =>
+  toHex(
+    nacl.sign.detached(
+      new TextEncoder().encode(
+        walletLoginMessage({ challenge, origin: ORIGIN, address: kp.publicKey.toBase58() }),
+      ),
+      kp.secretKey,
+    ),
+  );
 
 describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge", () => {
   it("🚨 email login: the victim's challenge still works after an attacker requests one", async () => {
@@ -73,9 +86,7 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const first = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
     await h.challenge(jreq({ publicKey })); // attacker's request lands in between
 
-    const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(first, ORIGIN)), kp.secretKey),
-    );
+    const sig = signLogin(kp, first);
     const res = await h.connectWallet(jreq({ publicKey, signature: sig, challenge: first, wallets: [] }));
     expect(res.status).toBe(201);
   });
@@ -89,9 +100,7 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const mine = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
     for (let i = 0; i < 9; i++) await h.challenge(jreq({ publicKey }));
 
-    const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(mine, ORIGIN)), kp.secretKey),
-    );
+    const sig = signLogin(kp, mine);
     expect(
       (await h.connectWallet(jreq({ publicKey, signature: sig, challenge: mine, wallets: [] }))).status,
     ).toBe(201);
@@ -104,9 +113,7 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const publicKey = kp.publicKey.toBase58();
 
     const c = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
-    const sig = toHex(
-      nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(c, ORIGIN)), kp.secretKey),
-    );
+    const sig = signLogin(kp, c);
     const body = { publicKey, signature: sig, challenge: c, wallets: [] };
 
     expect((await h.connectWallet(jreq(body))).status).toBe(201);
@@ -120,16 +127,49 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const kp = Keypair.generate();
     const publicKey = kp.publicKey.toBase58();
 
+    const real = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
+    const getdel = jest.spyOn(storage, "getdel");
+
     // The presented value is part of the lookup key now, so anything that is not exactly
     // what generateChallenge() mints is refused up front.
     // ("" is a MISSING field, refused earlier with 400 — a different path.)
-    for (const bad of ["not-hex", "a".repeat(63), `${"a".repeat(64)}:extra`, "x".repeat(5000)]) {
-      const sig = toHex(
-        nacl.sign.detached(new TextEncoder().encode(walletLoginMessage(bad, ORIGIN)), kp.secretKey),
-      );
+    // [presented, signed]. "a"×63 and "x"×5000 are valid SIWS nonces, so they are signed as
+    // presented, verify, and reach consumeChallenge — the storage spy below proves they
+    // never become a key. "not-hex" and ":extra" cannot appear in a login message at all,
+    // so they travel with a genuine signature over the real challenge and stop at the
+    // signature check; the shape check itself is covered by the consumeChallenge test below.
+    const cases: [string, string][] = [
+      ["not-hex", real],
+      ["a".repeat(63), "a".repeat(63)],
+      [`${"a".repeat(64)}:extra`, real],
+      ["x".repeat(5000), "x".repeat(5000)],
+    ];
+    for (const [bad, signed] of cases) {
+      const sig = signLogin(kp, signed);
       const res = await h.connectWallet(jreq({ publicKey, signature: sig, challenge: bad, wallets: [] }));
       expect(res.status).toBe(401);
     }
+    const looked = getdel.mock.calls.map(([key]) => key);
+    for (const [bad] of cases) expect(looked.filter((key) => key.endsWith(`:${bad}`))).toEqual([]);
+
+    // None of them consumed the real challenge.
+    const res = await h.connectWallet(
+      jreq({ publicKey, signature: signLogin(kp, real), challenge: real, wallets: [] }),
+    );
+    expect(res.status).toBe(201);
+  });
+
+  it("consumeChallenge refuses any value generateChallenge() could not have minted", async () => {
+    // A store that accepts everything, so a missing shape check would show up as `true`.
+    const takeChallenge = jest.fn(async () => true);
+    const store = { takeChallenge } as unknown as AuthStore;
+    const publicKey = Keypair.generate().publicKey.toBase58();
+    for (const bad of ["not-hex", "a".repeat(63), `${"a".repeat(64)}:extra`, "x".repeat(5000)]) {
+      expect(await consumeChallenge(store, "app", publicKey, bad)).toBe(false);
+    }
+    expect(takeChallenge).not.toHaveBeenCalled();
+    // Control: a well-formed value does reach the store.
+    expect(await consumeChallenge(store, "app", publicKey, "ab".repeat(32))).toBe(true);
   });
 
   it("registration still binds the auth key it was given", async () => {

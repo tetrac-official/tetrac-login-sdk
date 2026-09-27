@@ -52,7 +52,9 @@ async function connect(
 ): Promise<Response> {
   const publicKey = kp.publicKey.toBase58();
   const ch = (await (await h.challenge(jreq({ publicKey }))).json()) as { challenge: string };
-  const msg = new TextEncoder().encode(walletLoginMessage(ch.challenge, ORIGIN));
+  const msg = new TextEncoder().encode(
+    walletLoginMessage({ challenge: ch.challenge, origin: ORIGIN, address: publicKey }),
+  );
   return h.connectWallet(
     jreq({
       publicKey,
