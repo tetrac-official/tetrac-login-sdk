@@ -24,7 +24,6 @@ function hexToBytes(hex: string): Uint8Array {
  *
  * Accepts BOTH encodings, trying the cheap one first:
  *  1. RAW — software wallets (Phantom et al.) sign the message bytes directly.
- *     Byte-identical to the original behavior; software accounts are unaffected.
  *  2. OFF-CHAIN — hardware wallets (Ledger) cannot sign raw bytes; they sign a
  *     Solana off-chain message envelope. The exact layout depends on the device
  *     firmware (legacy 20-byte header vs v0 85-byte header), so the server tries
@@ -33,7 +32,7 @@ function hexToBytes(hex: string): Uint8Array {
  * The off-chain attempt is NOT a trust widening: every candidate preimage embeds
  * the single-use `challenge` (and the v0 candidate embeds `pubKeyBytes` as the
  * signer), so a forged signature or a mismatched signer still fails. Replay
- * protection (single-use challenge) is unchanged.
+ * protection is the single-use challenge.
  */
 export function verifySolanaSignature(
   publicKeyBase58: string,
@@ -50,7 +49,7 @@ export function verifySolanaSignature(
     );
     const sig = hexToBytes(signatureHex);
     const pubKeyBytes = new PublicKey(publicKeyBase58).toBytes();
-    // 1) Raw (software wallets) — the default, unchanged path.
+    // 1) Raw (software wallets).
     if (nacl.sign.detached.verify(message, sig, pubKeyBytes)) return true;
     // 2) Off-chain envelopes (hardware wallets). offchainMessageCandidates throws
     //    on a non-ASCII/oversized message; the outer catch turns that into `false`.

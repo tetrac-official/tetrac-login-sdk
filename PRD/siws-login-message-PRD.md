@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Status** | In verification — implemented in the working tree (uncommitted, branch v0.6.1); automated gate (§8.1) pending; manual release gate (§8.2) not run. Review amendments in §13 |
+| **Status** | In verification — implemented on branch v0.6.1 (8c894a1, review follow-ups uncommitted); automated gate (§8.1, §8.1a) passed; manual release gate (§8.2) not run. Review amendments in §13 |
 | **Date** | 2026-09-27 |
 | **Target** | 0.6.1 (breaking changes permitted; no migration or deprecation shims) |
-| **Scope** | `src/core/index.ts`, `src/core/config.ts`, `src/client/authClient.ts`, `src/server/signature.ts`, `src/server/routes.ts`, `tests/*`, `scripts/smoke-multi-app.mjs`, `package.json` |
+| **Scope** | `src/core/index.ts`, `src/core/config.ts`, `src/client/authClient.ts`, `src/server/signature.ts`, `src/server/routes.ts`, `tests/*`, `scripts/smoke-multi-app.mjs`, `scripts/verify-siws-login.mjs`, `.github/workflows/ci.yml`, `package.json` |
 | **Closes** | Web3 login fails on Phantom 26.30.x: *"The app's signature request cannot be shown due to invalid formatting."* |
 | **Owner** | TTC |
 

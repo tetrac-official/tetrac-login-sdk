@@ -20,6 +20,8 @@ import { MemoryAdapter } from "../src/storage/memory";
 import { walletLoginMessage } from "../src/core/index";
 import { deriveAuthPublicKey, signAuthChallenge } from "../src/client/authKey";
 import { registerEmail, jreq } from "./_auth-helpers";
+import { consumeChallenge } from "../src/server/challenge";
+import type { AuthStore } from "../src/storage/store";
 
 const APP_KEY = "ab".repeat(32);
 const ORIGIN = "https://test.example";
@@ -126,14 +128,16 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
     const publicKey = kp.publicKey.toBase58();
 
     const real = (await (await h.challenge(jreq({ publicKey }))).json()).challenge as string;
+    const getdel = jest.spyOn(storage, "getdel");
 
     // The presented value is part of the lookup key now, so anything that is not exactly
     // what generateChallenge() mints is refused up front.
     // ("" is a MISSING field, refused earlier with 400 — a different path.)
     // [presented, signed]. "a"×63 and "x"×5000 are valid SIWS nonces, so they are signed as
-    // presented and only the challenge-shape check can refuse them. "not-hex" and ":extra"
-    // cannot appear in a login message at all, so they travel with a genuine signature over
-    // the real challenge instead.
+    // presented, verify, and reach consumeChallenge — the storage spy below proves they
+    // never become a key. "not-hex" and ":extra" cannot appear in a login message at all,
+    // so they travel with a genuine signature over the real challenge and stop at the
+    // signature check; the shape check itself is covered by the consumeChallenge test below.
     const cases: [string, string][] = [
       ["not-hex", real],
       ["a".repeat(63), "a".repeat(63)],
@@ -145,12 +149,27 @@ describe("M-1 — an attacker cannot invalidate a victim's in-flight challenge",
       const res = await h.connectWallet(jreq({ publicKey, signature: sig, challenge: bad, wallets: [] }));
       expect(res.status).toBe(401);
     }
+    const looked = getdel.mock.calls.map(([key]) => key);
+    for (const [bad] of cases) expect(looked.filter((key) => key.endsWith(`:${bad}`))).toEqual([]);
 
     // None of them consumed the real challenge.
     const res = await h.connectWallet(
       jreq({ publicKey, signature: signLogin(kp, real), challenge: real, wallets: [] }),
     );
     expect(res.status).toBe(201);
+  });
+
+  it("consumeChallenge refuses any value generateChallenge() could not have minted", async () => {
+    // A store that accepts everything, so a missing shape check would show up as `true`.
+    const takeChallenge = jest.fn(async () => true);
+    const store = { takeChallenge } as unknown as AuthStore;
+    const publicKey = Keypair.generate().publicKey.toBase58();
+    for (const bad of ["not-hex", "a".repeat(63), `${"a".repeat(64)}:extra`, "x".repeat(5000)]) {
+      expect(await consumeChallenge(store, "app", publicKey, bad)).toBe(false);
+    }
+    expect(takeChallenge).not.toHaveBeenCalled();
+    // Control: a well-formed value does reach the store.
+    expect(await consumeChallenge(store, "app", publicKey, "ab".repeat(32))).toBe(true);
   });
 
   it("registration still binds the auth key it was given", async () => {

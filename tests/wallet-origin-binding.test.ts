@@ -42,6 +42,19 @@ const enc = (s: string) => new TextEncoder().encode(s);
 const toHex = (b: Uint8Array) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
 const sign = (kp: Keypair, msg: Uint8Array) => toHex(nacl.sign.detached(msg, kp.secretKey));
 
+/** A request in which everything that could name a site names evil.app. */
+const fromEvil = (body: Record<string, unknown>) =>
+  new Request(`${EVIL_ORIGIN}/api/auth`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: EVIL_ORIGIN,
+      host: "evil.app",
+      "x-forwarded-host": "evil.app",
+    },
+    body: JSON.stringify({ ...body, origin: EVIL_ORIGIN }),
+  });
+
 describe("C-1 — wallet login signatures are origin-bound", () => {
   it("🚨 a signature harvested on ANOTHER origin does NOT verify", () => {
     const kp = Keypair.generate();
@@ -128,19 +141,6 @@ describe("C-1 — wallet login signatures are origin-bound", () => {
     const publicKey = kp.publicKey.toBase58();
     const { challenge } = await (await h.challenge(jreq({ appId: APP_ID, publicKey }))).json();
 
-    // Everything in the request that could name a site names evil.app.
-    const fromEvil = (body: Record<string, unknown>) =>
-      new Request(`${EVIL_ORIGIN}/api/auth`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: EVIL_ORIGIN,
-          host: "evil.app",
-          "x-forwarded-host": "evil.app",
-        },
-        body: JSON.stringify({ ...body, origin: EVIL_ORIGIN }),
-      });
-
     // A relayed evil.app signature, in a request that agrees it is from evil.app, is still
     // checked against victim.app's configured origin.
     const relayed = sign(kp, enc(walletLoginMessage({ challenge, origin: EVIL_ORIGIN, address: publicKey })));
@@ -158,6 +158,70 @@ describe("C-1 — wallet login signatures are origin-bound", () => {
       fromEvil({ appId: APP_ID, publicKey, signature: honest, challenge, wallets: [] }),
     );
     expect(ok.status).toBe(201);
+  });
+
+  it("🚨 /login-wallet ignores the request's origin too", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { appId: APP_ID, origin: VICTIM_ORIGIN } });
+    const kp = Keypair.generate();
+    const publicKey = kp.publicKey.toBase58();
+    const signFor = (challenge: string, origin: string) =>
+      sign(kp, enc(walletLoginMessage({ challenge, origin, address: publicKey })));
+    const fresh = async () =>
+      (await (await h.challenge(jreq({ appId: APP_ID, publicKey }))).json()).challenge as string;
+
+    // An account to log in to.
+    const first = await fresh();
+    const created = await h.connectWallet(
+      jreq({
+        appId: APP_ID,
+        publicKey,
+        signature: signFor(first, VICTIM_ORIGIN),
+        challenge: first,
+        wallets: [],
+      }),
+    );
+    expect(created.status).toBe(201);
+
+    const challenge = await fresh();
+    const attack = fromEvil({
+      appId: APP_ID,
+      publicKey,
+      signature: signFor(challenge, EVIL_ORIGIN),
+      challenge,
+    });
+    expect((await h.loginWallet(attack)).status).toBe(401);
+    // Same challenge, same hostile request: the honest signature logs in, so the failed
+    // attempt did not burn it and nothing in the request was consulted.
+    const honest = fromEvil({
+      appId: APP_ID,
+      publicKey,
+      signature: signFor(challenge, VICTIM_ORIGIN),
+      challenge,
+    });
+    expect((await h.loginWallet(honest)).status).toBe(200);
+  });
+
+  it("🚨 /register ignores the request's origin too", async () => {
+    const storage = new MemoryAdapter();
+    const h = createAuthHandlers({ storage, config: { appId: APP_ID, origin: VICTIM_ORIGIN } });
+    const kp = Keypair.generate();
+    const publicKey = kp.publicKey.toBase58();
+    const { challenge } = await (await h.challenge(jreq({ appId: APP_ID, publicKey }))).json();
+    const register = (origin: string) =>
+      h.register(
+        fromEvil({
+          appId: APP_ID,
+          publicKey,
+          authMethod: "wallet",
+          signature: sign(kp, enc(walletLoginMessage({ challenge, origin, address: publicKey }))),
+          challenge,
+          wallets: [],
+        }),
+      );
+
+    expect((await register(EVIL_ORIGIN)).status).toBe(401);
+    expect((await register(VICTIM_ORIGIN)).status).toBe(201);
   });
 
   it("🚨 the APP-KEY message is origin-bound too — a hostile appId does not reproduce the key", () => {

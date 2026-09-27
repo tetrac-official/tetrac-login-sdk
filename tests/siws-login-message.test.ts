@@ -137,6 +137,7 @@ describe("walletLoginMessage — throws rather than emit a field outside the SIW
     ["empty", ""],
     ['the string "undefined"', "undefined"],
     ["31 base58 characters", ADDRESS.slice(0, 31)],
+    ["45 base58 characters", ADDRESS + "1"],
     ['44 characters with a "0"', "0" + ADDRESS.slice(1)],
     ['44 characters with an "O"', "O" + ADDRESS.slice(1)],
     ['44 characters with an "I"', "I" + ADDRESS.slice(1)],
@@ -146,11 +147,24 @@ describe("walletLoginMessage — throws rather than emit a field outside the SIW
   });
 
   it.each([
-    ["too short", "short7"],
+    ["7 characters", "abcdefg"],
     ["base64url", "ab-cd_efgh"],
     ["empty", ""],
   ])("rejects a challenge that is %s", (_label, challenge) => {
     expect(build({ challenge })).toThrow(/^\[tetrac\] .*challenge/);
+  });
+
+  // The quantifier edges. "1" × 32 is the base58 encoding of the all-zero 32-byte key, and
+  // real keys with leading zero bytes encode to fewer than 43 characters.
+  it.each([
+    ["32", "1".repeat(32)],
+    ["44", ADDRESS],
+  ])("accepts a %s-character address", (_n, address) => {
+    expect(build({ address })).not.toThrow();
+  });
+
+  it("accepts an 8-character challenge", () => {
+    expect(build({ challenge: "abcdefgh" })).not.toThrow();
   });
 
   it.each(INVALID_ORIGINS)("rejects the origin %j", (origin) => {
